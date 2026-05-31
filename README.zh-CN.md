@@ -1,4 +1,4 @@
-# Codex Migration Handoff
+﻿# Codex Mac-Windows Migration Handoff
 
 把 Codex 从 Mac 迁移到 Windows，并尽量保留历史对话、记忆、skills、plugins、自动化、生成图片、项目上下文和工作环境线索。
 
@@ -9,7 +9,7 @@
 如果你是另一个正在帮用户迁移 Codex 的 AI agent，先读这一段：
 
 ```text
-使用 codex-migration-handoff/ 这个 skill。先在源电脑打包 Codex 数据，选择 standard/full/full-with-secrets 模式；必要时包含项目文件夹；通过私密渠道传输迁移包；在 Windows 上关闭 Codex 后运行恢复脚本；最后运行验证脚本。
+使用 codex-mac-windows-migration-handoff/ 这个 skill。先在源电脑打包 Codex 数据，选择 standard/full/full-with-secrets 模式；必要时包含项目文件夹；通过私密渠道传输迁移包；在 Windows 上关闭 Codex 后运行恢复脚本；最后运行验证脚本。
 ```
 
 适用场景：
@@ -32,7 +32,7 @@ AI agent 工作区迁移, OpenAI Codex 桌面端迁移
 ## 仓库内容
 
 ```text
-codex-migration-handoff/
+codex-mac-windows-migration-handoff/
   SKILL.md
   agents/openai.yaml
   references/path-map.md
@@ -44,22 +44,22 @@ codex-migration-handoff/
 
 ## 安装到 Codex
 
-把整个 `codex-migration-handoff` 文件夹复制到：
+把整个 `codex-mac-windows-migration-handoff` 文件夹复制到：
 
 ```text
-~/.codex/skills/codex-migration-handoff
+~/.codex/skills/codex-mac-windows-migration-handoff
 ```
 
 也可以作为项目级 skill 放到：
 
 ```text
-<项目目录>/.agents/skills/codex-migration-handoff
+<项目目录>/.agents/skills/codex-mac-windows-migration-handoff
 ```
 
 然后新开一个 Codex 对话，说：
 
 ```text
-使用 $codex-migration-handoff，帮我把 Mac 上的 Codex 数据、对话和项目迁移到 Windows。
+使用 $codex-mac-windows-migration-handoff，帮我把 Mac 上的 Codex 数据、对话和项目迁移到 Windows。
 ```
 
 ## 会迁移哪些东西
@@ -99,7 +99,7 @@ full-with-secrets
 建议先完全退出 Mac 上的 Codex，再在终端里运行：
 
 ```bash
-cd /path/to/codex-migration-handoff
+cd /path/to/codex-mac-windows-migration-handoff
 bash scripts/create_mac_codex_migration_package.sh \
   --project "$HOME/Documents/New project"
 ```
@@ -150,7 +150,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 或者从 skill 文件夹运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\codex-migration-handoff\scripts\verify_windows_codex_restore.ps1
+powershell -ExecutionPolicy Bypass -File .\codex-mac-windows-migration-handoff\scripts\verify_windows_codex_restore.ps1
 ```
 
 验证脚本会检查 sessions、skills、plugins、generated images、SQLite 文件、package metadata 和可能的项目目录。

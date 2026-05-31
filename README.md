@@ -1,4 +1,4 @@
-# Codex Migration Handoff
+﻿# Codex Mac-Windows Migration Handoff
 
 Move Codex from Mac to Windows without losing conversations, memories, skills, plugins, automations, generated images, or project context.
 
@@ -9,7 +9,7 @@ This is a small public Codex skill for agents and users who need to reproduce a 
 If you are an AI agent helping a user migrate Codex, read this first:
 
 ```text
-Use the skill in codex-migration-handoff/. Package the source computer's Codex data, choose standard/full/full-with-secrets mode, include project folders when needed, transfer the package privately, run the Windows restore script after Codex is closed, then run the verifier.
+Use the skill in codex-mac-windows-migration-handoff/. Package the source computer's Codex data, choose standard/full/full-with-secrets mode, include project folders when needed, transfer the package privately, run the Windows restore script after Codex is closed, then run the verifier.
 ```
 
 Primary use cases:
@@ -34,7 +34,7 @@ This repository contains a Codex skill for migrating Codex data, conversations, 
 The main skill lives at:
 
 ```text
-codex-migration-handoff/
+codex-mac-windows-migration-handoff/
 ```
 
 Use this skill when a user asks to move Codex to another computer, preserve prior conversations, reproduce a project workspace, package Codex data on Mac, restore it on Windows, or hand off the migration package through Feishu, cloud drive, GitHub, or an external disk.
@@ -42,7 +42,7 @@ Use this skill when a user asks to move Codex to another computer, preserve prio
 ## Contents
 
 ```text
-codex-migration-handoff/
+codex-mac-windows-migration-handoff/
   SKILL.md
   agents/openai.yaml
   references/path-map.md
@@ -55,27 +55,27 @@ codex-migration-handoff/
 There is also a backup archive:
 
 ```text
-codex-migration-handoff-skill.zip
+codex-mac-windows-migration-handoff-skill.zip
 ```
 
 ## Install For Codex
 
-Copy the whole `codex-migration-handoff` folder into one of these locations:
+Copy the whole `codex-mac-windows-migration-handoff` folder into one of these locations:
 
 ```text
-~/.codex/skills/codex-migration-handoff
+~/.codex/skills/codex-mac-windows-migration-handoff
 ```
 
 or, for a project-local skill:
 
 ```text
-<project>/.agents/skills/codex-migration-handoff
+<project>/.agents/skills/codex-mac-windows-migration-handoff
 ```
 
 Then start a new Codex thread and ask:
 
 ```text
-Use $codex-migration-handoff to migrate Codex from my Mac to my Windows computer.
+Use $codex-mac-windows-migration-handoff to migrate Codex from my Mac to my Windows computer.
 ```
 
 ## What Gets Migrated
@@ -115,7 +115,7 @@ full-with-secrets
 Run the Mac package script from Terminal, ideally after closing Codex:
 
 ```bash
-cd /path/to/codex-migration-handoff
+cd /path/to/codex-mac-windows-migration-handoff
 bash scripts/create_mac_codex_migration_package.sh \
   --project "$HOME/Documents/New project"
 ```
@@ -169,7 +169,7 @@ Then verify:
 or, from the skill folder:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\codex-migration-handoff\scripts\verify_windows_codex_restore.ps1
+powershell -ExecutionPolicy Bypass -File .\codex-mac-windows-migration-handoff\scripts\verify_windows_codex_restore.ps1
 ```
 
 ## Windows Inventory
@@ -177,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File .\codex-migration-handoff\scripts\verif
 To inspect a Windows machine before or after migration:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\codex-migration-handoff\scripts\collect_windows_codex_inventory.ps1
+powershell -ExecutionPolicy Bypass -File .\codex-mac-windows-migration-handoff\scripts\collect_windows_codex_inventory.ps1
 ```
 
 This reports Codex data folders, approximate sizes, and likely project folders.
