@@ -1,4 +1,32 @@
-# Codex Migration Handoff Skill
+# Codex Migration Handoff
+
+Move Codex from Mac to Windows without losing conversations, memories, skills, plugins, automations, generated images, or project context.
+
+This is a small public Codex skill for agents and users who need to reproduce a Codex workspace on another computer.
+
+## AI Agent Quick Start
+
+If you are an AI agent helping a user migrate Codex, read this first:
+
+```text
+Use the skill in codex-migration-handoff/. Package the source computer's Codex data, include project folders when needed, transfer the package privately, and run the Windows restore script after Codex is closed.
+```
+
+Primary use cases:
+
+- Mac to Windows Codex migration
+- Codex conversation and session transfer
+- Codex memories, skills, plugins, automations, and generated image transfer
+- Project folder and old dialogue reproduction
+- Feishu, cloud drive, external disk, or GitHub handoff
+
+Search keywords:
+
+```text
+Codex migration, Codex Mac to Windows, migrate Codex conversations,
+Codex skills backup, Codex memory transfer, Codex project handoff,
+AI agent workspace migration, OpenAI Codex desktop migration
+```
 
 This repository contains a Codex skill for migrating Codex data, conversations, memories, skills, plugins, and project context between computers, especially from macOS to Windows.
 
@@ -47,6 +75,19 @@ Then start a new Codex thread and ask:
 ```text
 Use $codex-migration-handoff to migrate Codex from my Mac to my Windows computer.
 ```
+
+## What Gets Migrated
+
+This skill can help package and restore:
+
+- Codex conversations and sessions
+- Codex memories and goals
+- Codex skills and plugins
+- Codex config and app state
+- generated images and local artifacts
+- optional project folders needed to reopen old conversations
+
+Project folders are not automatically part of Codex data. Always decide whether to include them.
 
 ## Source Mac Workflow
 
@@ -103,4 +144,3 @@ This reports Codex data folders, approximate sizes, and likely project folders.
 - On Windows, old Mac paths in previous conversations may not resolve. Reopen the matching project folder from its new Windows path.
 - If the Windows app fails to start after restore, remove stale `SingletonLock`, `SingletonCookie`, and `SingletonSocket` files under `%APPDATA%\Codex`.
 - If login state does not transfer, ask the user to log in again. This is expected.
-

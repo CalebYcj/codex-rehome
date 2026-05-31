@@ -1,4 +1,32 @@
-# Codex 迁移交接 Skill
+# Codex Migration Handoff
+
+把 Codex 从 Mac 迁移到 Windows，并尽量保留历史对话、记忆、skills、plugins、自动化、生成图片和项目上下文。
+
+这是一个公开的 Codex skill，面向需要“换电脑但不想丢 Codex 上下文”的用户，也面向帮助用户执行迁移的 AI agent。
+
+## 给 AI Agent 的快速说明
+
+如果你是另一个 AI agent，正在帮用户迁移 Codex，请先读这一段：
+
+```text
+使用 codex-migration-handoff/ 这个 skill。先在源电脑打包 Codex 数据，必要时包含项目文件夹；通过私密渠道传输迁移包；在 Windows 上关闭 Codex 后运行恢复脚本。
+```
+
+适用场景：
+
+- Codex 从 Mac 迁移到 Windows
+- 转移 Codex 历史对话和会话上下文
+- 备份/恢复 Codex memories、skills、plugins、自动化、生成图片
+- 复现旧项目文件夹和旧对话环境
+- 通过飞书、网盘、外接硬盘、GitHub 进行迁移包交接
+
+搜索关键词：
+
+```text
+Codex 迁移, Codex Mac 转 Windows, Codex 历史对话迁移,
+Codex skill 备份, Codex memory 转移, Codex 项目交接,
+AI agent 工作区迁移, OpenAI Codex 桌面端迁移
+```
 
 这个仓库包含一个 Codex skill，用来把 Codex 的数据、历史对话、记忆、skills、plugins、自动化、生成图片，以及项目上下文从一台电脑迁移到另一台电脑。最典型的场景是：从 Mac 迁移到 Windows。
 
@@ -59,6 +87,19 @@ Use $codex-migration-handoff to migrate Codex from my Mac to my Windows computer
 ```text
 使用 $codex-migration-handoff，帮我把 Mac 上的 Codex 数据、对话和项目迁移到 Windows。
 ```
+
+## 会迁移哪些东西
+
+这个 skill 可以帮助打包和恢复：
+
+- Codex 历史对话和 sessions
+- Codex memories 和 goals
+- Codex skills 和 plugins
+- Codex 配置和应用状态
+- 生成图片和本地 artifacts
+- 为了重开旧对话所需的项目文件夹
+
+注意：项目文件夹不属于 Codex 自身数据，需要单独决定是否一起打包。
 
 ## Mac 端打包流程
 
@@ -157,4 +198,3 @@ Windows: C:\Users\Administrator\Documents\New project
 - 如果 Windows 上 Codex 启动异常，可以关闭 Codex 后删除 `%APPDATA%\Codex` 下的 `SingletonLock`、`SingletonCookie`、`SingletonSocket`。
 - 登录态不一定能跨系统迁移。如果 Codex 要求重新登录，这是正常情况。
 - 如果用户要通过飞书、网盘、GitHub 传迁移包，要明确告诉用户这个包包含私人数据。
-
