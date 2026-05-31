@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex Migration Handoff"
+  short_description: "Move Codex history and projects"
+  default_prompt: "Use $codex-migration-handoff to migrate Codex data, project files, and conversation continuity to another computer."
+
+policy:
+  allow_implicit_invocation: true
