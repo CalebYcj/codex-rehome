@@ -1,6 +1,6 @@
 # How to Migrate OpenAI Codex Desktop from Mac to Windows
 
-This guide explains how to migrate OpenAI Codex Desktop from macOS to Windows using the `codex-mac-windows-migration-handoff` skill. The workflow packages Codex conversations, sessions, memories, skills, plugins, generated images, selected app state, and project folders into a Windows-oriented migration zip.
+This guide explains how to migrate OpenAI Codex Desktop from macOS to Windows using the `codex-rehome` skill. The workflow packages Codex conversations, sessions, memories, skills, plugins, generated images, selected app state, and project folders into a Windows-oriented migration zip.
 
 For Windows to Mac, Windows to Windows, or Mac to Mac, start with [How to migrate Codex between Mac and Windows](migrate-codex-between-mac-and-windows.md).
 
@@ -19,7 +19,7 @@ Use this guide if you want to:
 Clone or download the repository, then run the Mac package script:
 
 ```bash
-cd codex-mac-windows-migration-handoff
+cd codex-rehome
 bash scripts/create_mac_codex_migration_package.sh \
   --mode standard \
   --project "$HOME/Documents/New project"

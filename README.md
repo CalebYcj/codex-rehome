@@ -1,8 +1,10 @@
-# Codex Mac Windows Migration Handoff - Move OpenAI Codex Desktop Between Mac and Windows
+# Codex Rehome - Move OpenAI Codex Desktop Between Mac and Windows
 
-Codex Mac Windows Migration Handoff is an open-source Codex skill for moving OpenAI Codex Desktop between macOS and Windows computers. It helps package and restore Codex conversations, sessions, memories, skills, plugins, MCP/connectors, generated images, project folders, path mappings, and restore verification scripts.
+Codex Rehome is an open-source Codex skill for moving OpenAI Codex Desktop between macOS and Windows computers. It helps package and restore Codex conversations, sessions, memories, skills, plugins, MCP/connectors, generated images, project folders, path mappings, and restore verification scripts.
 
 Use this project when you need to migrate Codex Desktop from Mac to Windows, Windows to Mac, Windows to Windows, or Mac to Mac; back up Codex conversations and sessions; restore Codex skills and plugins; or hand off a local AI agent workspace to another computer.
+
+Find it on GitHub by searching `codex-rehome`.
 
 中文说明: 这是一个用于在 Mac 和 Windows 电脑之间迁移 OpenAI Codex Desktop 的开源 Codex skill，支持 Mac 转 Windows、Windows 转 Mac、Windows 转 Windows、Mac 转 Mac，以及迁移对话、sessions、记忆、skills、plugins、MCP、生成物和项目文件夹。
 
@@ -21,7 +23,7 @@ Use this project when you need to migrate Codex Desktop from Mac to Windows, Win
 If you are an AI agent helping a user migrate Codex, read this first:
 
 ```text
-Use the skill in codex-mac-windows-migration-handoff/. Identify the source OS and target OS, package the source computer's Codex data, choose standard/full/full-with-secrets mode, include project folders when needed, transfer the package privately, run the target OS restore script after Codex is closed, then run the matching verifier.
+Use the skill in codex-rehome/. Identify the source OS and target OS, package the source computer's Codex data, choose standard/full/full-with-secrets mode, include project folders when needed, transfer the package privately, run the target OS restore script after Codex is closed, then run the matching verifier.
 ```
 
 Primary use cases:
@@ -65,7 +67,7 @@ So the skill is not just a shell script. It is a reusable agent workflow with sc
 The main skill lives at:
 
 ```text
-codex-mac-windows-migration-handoff/
+codex-rehome/
 ```
 
 Use this skill when a user asks to move Codex to another computer, preserve prior conversations, reproduce a project workspace, package Codex data on Mac or Windows, restore it on Mac or Windows, or hand off the migration package through Feishu, cloud drive, GitHub, or an external disk.
@@ -73,7 +75,7 @@ Use this skill when a user asks to move Codex to another computer, preserve prio
 ## Contents
 
 ```text
-codex-mac-windows-migration-handoff/
+codex-rehome/
   SKILL.md
   agents/openai.yaml
   references/path-map.md
@@ -90,27 +92,27 @@ codex-mac-windows-migration-handoff/
 There is also a backup archive:
 
 ```text
-codex-mac-windows-migration-handoff-skill.zip
+codex-rehome-skill.zip
 ```
 
 ## Install For Codex
 
-Copy the whole `codex-mac-windows-migration-handoff` folder into one of these locations:
+Copy the whole `codex-rehome` folder into one of these locations:
 
 ```text
-~/.codex/skills/codex-mac-windows-migration-handoff
+~/.codex/skills/codex-rehome
 ```
 
 or, for a project-local skill:
 
 ```text
-<project>/.agents/skills/codex-mac-windows-migration-handoff
+<project>/.agents/skills/codex-rehome
 ```
 
 Then start a new Codex thread and ask:
 
 ```text
-Use $codex-mac-windows-migration-handoff to migrate Codex from my old computer to my new computer.
+Use $codex-rehome to migrate Codex from my old computer to my new computer.
 ```
 
 ## What Gets Migrated
@@ -162,7 +164,7 @@ full-with-secrets
 Run the Mac package script from Terminal, ideally after closing Codex:
 
 ```bash
-cd /path/to/codex-mac-windows-migration-handoff
+cd /path/to/codex-rehome
 bash scripts/create_mac_codex_migration_package.sh \
   --project "$HOME/Documents/New project"
 ```
@@ -183,14 +185,14 @@ Run the Windows package script from PowerShell, ideally after closing Codex:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\codex-mac-windows-migration-handoff\scripts\create_windows_codex_migration_package.ps1 `
+.\codex-rehome\scripts\create_windows_codex_migration_package.ps1 `
   -Project "$env:USERPROFILE\Documents\New project"
 ```
 
 For a fuller inventory without secrets:
 
 ```powershell
-.\codex-mac-windows-migration-handoff\scripts\create_windows_codex_migration_package.ps1 `
+.\codex-rehome\scripts\create_windows_codex_migration_package.ps1 `
   -Mode full `
   -Project "$env:USERPROFILE\Documents\New project"
 ```
@@ -245,13 +247,13 @@ bash ./Verify-Codex-Mac-Restore.sh
 To inspect a Windows machine before or after migration:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\codex-mac-windows-migration-handoff\scripts\collect_windows_codex_inventory.ps1
+powershell -ExecutionPolicy Bypass -File .\codex-rehome\scripts\collect_windows_codex_inventory.ps1
 ```
 
 To inspect a Mac machine before or after migration:
 
 ```bash
-bash ./codex-mac-windows-migration-handoff/scripts/collect_mac_codex_inventory.sh
+bash ./codex-rehome/scripts/collect_mac_codex_inventory.sh
 ```
 
 These inventory scripts report Codex data folders, approximate sizes, and likely project folders.

@@ -33,7 +33,7 @@ bash scripts/create_mac_codex_migration_package.sh \
 On Windows:
 
 ```powershell
-.\codex-mac-windows-migration-handoff\scripts\create_windows_codex_migration_package.ps1 `
+.\codex-rehome\scripts\create_windows_codex_migration_package.ps1 `
   -Mode standard `
   -Project "$env:USERPROFILE\Documents\New project"
 ```

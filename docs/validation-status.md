@@ -1,6 +1,6 @@
 # Feature Status
 
-`codex-mac-windows-migration-handoff` supports moving Codex Desktop workspaces across Mac and Windows computers.
+`codex-rehome` supports moving Codex Desktop workspaces across Mac and Windows computers.
 
 ## Supported Directions
 

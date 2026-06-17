@@ -1,9 +1,9 @@
 ---
-name: codex-mac-windows-migration-handoff
+name: codex-rehome
 description: "Use when the user wants to migrate, back up, restore, or reproduce a Codex Desktop workspace between Mac and Windows computers in any direction, including Mac to Windows, Windows to Mac, Windows to Windows, or Mac to Mac; relevant for Codex conversations, sessions, memories, skills, plugins, MCP/connectors, automations, generated images, app data, project folders, environment inventory, path mappings, secrets handling, and Feishu/cloud-drive/external-disk handoffs."
 ---
 
-# Codex Cross-Computer Migration Handoff
+# Codex Rehome
 
 Use this skill to make a repeatable migration handoff for the user's Codex collaboration workspace: Codex state, project folders, generated artifacts, skills/plugins, MCP/connectors, environment inventory, path mappings, and restore verification.
 
@@ -102,7 +102,7 @@ Real Mac source validation found this useful shape:
 When the user wants another Codex instance on the source computer to help, send a short instruction like:
 
 ```text
-Use the codex-mac-windows-migration-handoff workflow. Create a standard <source OS>-to-<target OS> Codex migration package, include Codex data folders and these project folders: <paths>. Exclude auth files, browser login state, .env files, private keys, sockets, .git, node_modules, and virtualenvs. Put the zip on Desktop and tell me the zip path, size, manifest summary, sensitive-file report, checksum, and target restore command.
+Use the codex-rehome workflow. Create a standard <source OS>-to-<target OS> Codex migration package, include Codex data folders and these project folders: <paths>. Exclude auth files, browser login state, .env files, private keys, sockets, .git, node_modules, and virtualenvs. Put the zip on Desktop and tell me the zip path, size, manifest summary, sensitive-file report, checksum, and target restore command.
 ```
 
 Before finalizing, report:

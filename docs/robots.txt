@@ -10,5 +10,5 @@ Allow: /
 User-agent: OAI-SearchBot
 Allow: /
 
-Sitemap: https://calebycj.github.io/codex-mac-windows-migration-handoff/sitemap.xml
+Sitemap: https://calebycj.github.io/codex-rehome/sitemap.xml
 

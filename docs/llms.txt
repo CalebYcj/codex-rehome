@@ -1,8 +1,8 @@
-# Codex Mac Windows Migration Handoff
+# Codex Rehome
 
-Codex Mac Windows Migration Handoff is an open-source Codex skill and script toolkit for migrating OpenAI Codex Desktop between macOS and Windows computers.
+Codex Rehome is an open-source Codex skill and script toolkit for migrating OpenAI Codex Desktop between macOS and Windows computers.
 
-Repository: https://github.com/CalebYcj/codex-mac-windows-migration-handoff
+Repository: https://github.com/CalebYcj/codex-rehome
 
 ## Summary
 
@@ -28,8 +28,8 @@ Supported migration directions:
 
 ## Script map
 
-- Package on Mac: `codex-mac-windows-migration-handoff/scripts/create_mac_codex_migration_package.sh`
-- Package on Windows: `codex-mac-windows-migration-handoff/scripts/create_windows_codex_migration_package.ps1`
+- Package on Mac: `codex-rehome/scripts/create_mac_codex_migration_package.sh`
+- Package on Windows: `codex-rehome/scripts/create_windows_codex_migration_package.ps1`
 - Restore to Mac: `Restore-Codex-To-Mac.sh` in the generated package, or `scripts/restore_codex_to_mac.sh`
 - Restore to Windows: `Restore-Codex-To-Windows.ps1` in the generated package, or `scripts/restore_codex_to_windows.ps1`
 - Verify Mac restore: `Verify-Codex-Mac-Restore.sh`
@@ -45,13 +45,13 @@ Do not rewrite old Codex session JSONL files in bulk. Preserve old paths in hist
 
 See feature status for supported directions, default exclusions, and target verification steps:
 
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/validation-status.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/validation-status.md
 
 ## Important docs
 
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/migrate-codex-between-mac-and-windows.md
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/migrate-codex-from-mac-to-windows.md
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/backup-codex-conversations-and-sessions.md
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/restore-codex-skills-plugins-and-projects.md
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/troubleshooting.md
-- https://github.com/CalebYcj/codex-mac-windows-migration-handoff/blob/main/docs/validation-status.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/migrate-codex-between-mac-and-windows.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/migrate-codex-from-mac-to-windows.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/backup-codex-conversations-and-sessions.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/restore-codex-skills-plugins-and-projects.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/troubleshooting.md
+- https://github.com/CalebYcj/codex-rehome/blob/main/docs/validation-status.md

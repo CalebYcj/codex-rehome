@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex Rehome"
+  short_description: "Move Codex history between Mac and Windows"
+  default_prompt: "Use $codex-rehome to move Codex data, project files, and conversation continuity between Mac and Windows computers."
+
+policy:
+  allow_implicit_invocation: true

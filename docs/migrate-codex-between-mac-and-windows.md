@@ -1,6 +1,6 @@
 # How to Migrate OpenAI Codex Desktop Between Mac and Windows
 
-This guide explains how to use `codex-mac-windows-migration-handoff` when the source and target computers may be Mac or Windows.
+This guide explains how to use `codex-rehome` when the source and target computers may be Mac or Windows.
 
 The basic flow is always the same:
 
@@ -27,7 +27,7 @@ The basic flow is always the same:
 Run from Terminal:
 
 ```bash
-cd /path/to/codex-mac-windows-migration-handoff
+cd /path/to/codex-rehome
 bash scripts/create_mac_codex_migration_package.sh \
   --mode standard \
   --project "$HOME/Documents/New project"
@@ -41,7 +41,7 @@ Run from PowerShell:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\codex-mac-windows-migration-handoff\scripts\create_windows_codex_migration_package.ps1 `
+.\codex-rehome\scripts\create_windows_codex_migration_package.ps1 `
   -Mode standard `
   -Project "$env:USERPROFILE\Documents\New project"
 ```

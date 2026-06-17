@@ -1,6 +1,6 @@
-# Codex Mac Windows Migration Handoff
+# Codex Rehome
 
-Codex Mac Windows Migration Handoff is an open-source Codex skill for moving OpenAI Codex Desktop between macOS and Windows computers. It helps package, transfer, restore, and verify Codex conversations, sessions, memories, skills, plugins, MCP/connectors, generated images, project folders, and path mappings.
+Codex Rehome is an open-source Codex skill for moving OpenAI Codex Desktop between macOS and Windows computers. It helps package, transfer, restore, and verify Codex conversations, sessions, memories, skills, plugins, MCP/connectors, generated images, project folders, and path mappings.
 
 Use this project when you need to migrate Codex Desktop from Mac to Windows, Windows to Mac, Windows to Windows, or Mac to Mac; back up Codex conversations; restore Codex skills and plugins; or hand off a local AI agent workspace to another computer.
 
@@ -38,4 +38,6 @@ Use this project when you need to migrate Codex Desktop from Mac to Windows, Win
 
 ## Repository
 
-GitHub: [CalebYcj/codex-mac-windows-migration-handoff](https://github.com/CalebYcj/codex-mac-windows-migration-handoff)
+GitHub: [CalebYcj/codex-rehome](https://github.com/CalebYcj/codex-rehome)
+
+Search GitHub for: `codex-rehome`

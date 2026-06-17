@@ -1,6 +1,6 @@
-# Codex Mac Windows Migration Handoff - 在 Mac 和 Windows 之间迁移 OpenAI Codex Desktop
+# Codex Rehome - 在 Mac 和 Windows 之间迁移 OpenAI Codex Desktop
 
-Codex Mac Windows Migration Handoff 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之间迁移 OpenAI Codex Desktop。它帮助用户和 AI agent 打包、传输、恢复并验证 Codex 对话、sessions、记忆、skills、plugins、MCP/connectors、生成图片、项目文件夹、路径映射和本地协作现场。
+Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之间迁移 OpenAI Codex Desktop。它帮助用户和 AI agent 打包、传输、恢复并验证 Codex 对话、sessions、记忆、skills、plugins、MCP/connectors、生成图片、项目文件夹、路径映射和本地协作现场。
 
 它支持四种方向：
 
@@ -10,6 +10,8 @@ Codex Mac Windows Migration Handoff 是一个开源 Codex skill，用来在 macO
 - Mac 转 Mac
 
 如果你正在搜索「Codex Mac 迁移 Windows」「Codex Windows 迁移 Mac」「Codex 对话迁移」「Codex sessions 备份恢复」「Codex skill 迁移工具」，这个项目就是为这个场景做的。
+
+在 GitHub 里直接搜索 `codex-rehome` 就能找到。
 
 这个项目不是普通的文件备份工具，而是一个面向 AI agent 的 Codex skill：目标是迁移“用户和 AI 的协作现场”。
 
@@ -27,7 +29,7 @@ Codex Mac Windows Migration Handoff 是一个开源 Codex skill，用来在 macO
 如果你是另一个正在帮用户迁移 Codex 的 AI agent，先读这一段：
 
 ```text
-使用 codex-mac-windows-migration-handoff/ 这个 skill。先确认源电脑和目标电脑分别是 Mac 还是 Windows；在源电脑打包 Codex 数据；选择 standard/full/full-with-secrets 模式；必要时包含项目文件夹；通过私密渠道传输迁移包；在目标电脑关闭 Codex 后运行对应系统的恢复脚本；最后运行对应验证脚本。
+使用 codex-rehome/ 这个 skill。先确认源电脑和目标电脑分别是 Mac 还是 Windows；在源电脑打包 Codex 数据；选择 standard/full/full-with-secrets 模式；必要时包含项目文件夹；通过私密渠道传输迁移包；在目标电脑关闭 Codex 后运行对应系统的恢复脚本；最后运行对应验证脚本。
 ```
 
 适用场景：
@@ -67,7 +69,7 @@ Codex skills 迁移, Codex generated images 迁移
 ## 仓库内容
 
 ```text
-codex-mac-windows-migration-handoff/
+codex-rehome/
   SKILL.md
   agents/openai.yaml
   references/path-map.md
@@ -83,22 +85,22 @@ codex-mac-windows-migration-handoff/
 
 ## 安装到 Codex
 
-把整个 `codex-mac-windows-migration-handoff` 文件夹复制到：
+把整个 `codex-rehome` 文件夹复制到：
 
 ```text
-~/.codex/skills/codex-mac-windows-migration-handoff
+~/.codex/skills/codex-rehome
 ```
 
 也可以作为项目级 skill 放到：
 
 ```text
-<项目目录>/.agents/skills/codex-mac-windows-migration-handoff
+<项目目录>/.agents/skills/codex-rehome
 ```
 
 然后新开一个 Codex 对话，说：
 
 ```text
-使用 $codex-mac-windows-migration-handoff，帮我把旧电脑上的 Codex 数据、对话和项目迁移到新电脑。
+使用 $codex-rehome，帮我把旧电脑上的 Codex 数据、对话和项目迁移到新电脑。
 ```
 
 ## 会迁移哪些东西
@@ -149,7 +151,7 @@ full-with-secrets
 建议先完全退出 Mac 上的 Codex，再在终端里运行：
 
 ```bash
-cd /path/to/codex-mac-windows-migration-handoff
+cd /path/to/codex-rehome
 bash scripts/create_mac_codex_migration_package.sh \
   --project "$HOME/Documents/New project"
 ```
@@ -170,14 +172,14 @@ bash scripts/create_mac_codex_migration_package.sh \
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\codex-mac-windows-migration-handoff\scripts\create_windows_codex_migration_package.ps1 `
+.\codex-rehome\scripts\create_windows_codex_migration_package.ps1 `
   -Project "$env:USERPROFILE\Documents\New project"
 ```
 
 如果需要更完整的环境清单，但不包含 secrets：
 
 ```powershell
-.\codex-mac-windows-migration-handoff\scripts\create_windows_codex_migration_package.ps1 `
+.\codex-rehome\scripts\create_windows_codex_migration_package.ps1 `
   -Mode full `
   -Project "$env:USERPROFILE\Documents\New project"
 ```

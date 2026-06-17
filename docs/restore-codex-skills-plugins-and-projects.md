@@ -1,6 +1,6 @@
 # How to Restore Codex Skills, Plugins, and Projects
 
-This guide explains how to restore Codex skills, plugin cache, generated images, and project folders after creating a migration package with `codex-mac-windows-migration-handoff`.
+This guide explains how to restore Codex skills, plugin cache, generated images, and project folders after creating a migration package with `codex-rehome`.
 
 For the full direction picker, see [How to migrate Codex between Mac and Windows](migrate-codex-between-mac-and-windows.md).
 

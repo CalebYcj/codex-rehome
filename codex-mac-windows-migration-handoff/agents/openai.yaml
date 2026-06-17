@@ -1,7 +1,0 @@
-﻿interface:
-  display_name: "Codex Computer Migration Handoff"
-  short_description: "Move Codex history between Mac and Windows"
-  default_prompt: "Use $codex-mac-windows-migration-handoff to migrate Codex data, project files, and conversation continuity between Mac and Windows computers."
-
-policy:
-  allow_implicit_invocation: true
