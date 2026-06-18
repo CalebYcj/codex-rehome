@@ -131,7 +131,7 @@ This skill can help package and restore:
 
 Project folders are not automatically part of Codex data. Always decide whether to include them. On Mac restores, pass `--restore-projects` to copy packaged projects into `~/Documents/Codex-Restored-Projects`.
 
-Restored project files are not automatically registered in the Codex project sidebar. After restore, reopen the restored project folder in Codex unless a future verifier explicitly reports project UI registration.
+On Mac, schema v3 restore registers restored project folders with Codex Desktop by running `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>`. This is the observed durable path for making restored projects appear in the app-visible project list; editing `.codex-global-state.json` alone is not enough because the running app can overwrite it on quit.
 
 ## Documentation
 
@@ -271,7 +271,7 @@ These inventory scripts report Codex data folders, approximate sizes, and likely
 - Do not restore browser cookies, Login Data, Local Storage, `.env`, API keys, or private keys by default.
 - Restore scripts merge by default. Do not use `--replace-codex-home` / `-ReplaceCodexHome` unless the user explicitly accepts overwriting the target Codex home.
 - Do not overwrite `state_*.sqlite`, `memories_*.sqlite`, or `goals_*.sqlite` by default. Use `--replace-state` / `-ReplaceState` only when replacing target state is intentional.
-- Schema v3 restores can prepare UI-ready project/thread data, but app-visible sidebar readiness must be judged after closing and reopening Codex Desktop.
+- Schema v3 restores prepare UI-ready project/thread data and, on Mac, invoke `codex app <restored-project-path>` for project registration. If the verifier reports `app_project_registration_ready=false`, run that command manually for each restored project path.
 - After a cross-OS restore, old absolute paths in previous conversations may not resolve. Reopen the matching project folder from its new target path.
 - If the Windows app fails to start after restore, remove stale `SingletonLock`, `SingletonCookie`, and `SingletonSocket` files under `%APPDATA%\Codex`.
 - If login state does not transfer, ask the user to log in again. This is expected.

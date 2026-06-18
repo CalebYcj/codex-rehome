@@ -40,9 +40,15 @@ Default behavior is a merge restore:
     and chrome-native-hosts-v2.json
   - does not overwrite state_*.sqlite, memories_*.sqlite, or goals_*.sqlite
     unless --replace-state is passed
+  - after project restore, opens each restored project with the bundled
+    "codex app <path>" command so Codex Desktop registers it
 
 --replace-codex-home is destructive and replaces ~/.codex after backing it up.
 Even in replace mode, target login/config identity files are preserved.
+Set CODEX_REHOME_SKIP_APP_REGISTRATION=1 for isolated tests that must not open
+Codex Desktop.
+Set CODEX_REHOME_CODEX_APP_PATH=/path/to/codex to override the bundled CLI path
+for tests or nonstandard installs.
 EOF
       exit 0
       ;;
@@ -438,6 +444,8 @@ def map_path(value):
     for old, new in path_pairs:
         if old and old in s:
             s = s.replace(old, new)
+    s = s.replace("\\\\?\\/", "/")
+    s = s.replace("\\\\?/", "/")
     return s
 
 def selected_or_exported_ids():
@@ -476,7 +484,8 @@ def rewrite_jsonl_paths():
             backup = path.with_name(path.name + f".backup-pathmap-{stamp}")
             if not backup.exists():
                 shutil.copy2(path, backup)
-            path.write_text(new_text, encoding="utf-8", newline="\n")
+            with path.open("w", encoding="utf-8", newline="\n") as f:
+                f.write(new_text)
             changed += 1
     return changed
 
@@ -610,9 +619,15 @@ def merge_global_state():
     atom["heartbeat-thread-permissions-by-id"] = perms
     data["electron-persisted-atom-state"] = atom
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    with state_path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
     return len(target_projects)
 
+path_pairs = sorted(
+    list(dict.fromkeys(path_pairs)),
+    key=lambda item: len(item[0]) if item and item[0] else 0,
+    reverse=True,
+)
 rewritten = rewrite_jsonl_paths()
 imported = merge_sqlite_threads()
 registered = merge_global_state()
@@ -623,12 +638,81 @@ report = {
     "restored_projects_registered": registered,
     "restart_required": True,
 }
-(codex_home / "codex-rehome-ui-ready-import-report.json").write_text(
-    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-    encoding="utf-8",
-)
+with (codex_home / "codex-rehome-ui-ready-import-report.json").open("w", encoding="utf-8", newline="\n") as f:
+    f.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
 print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
 PY
+}
+
+register_restored_projects_with_codex_app() {
+  if [[ "$RESTORE_PROJECTS" != "true" ]]; then
+    return
+  fi
+  if [[ "${CODEX_REHOME_SKIP_APP_REGISTRATION:-}" == "1" ]]; then
+    echo "Skipping Codex Desktop project registration because CODEX_REHOME_SKIP_APP_REGISTRATION=1"
+    write_registration_report "skipped" "CODEX_REHOME_SKIP_APP_REGISTRATION=1" ""
+    return
+  fi
+  local codex_app="${CODEX_REHOME_CODEX_APP_PATH:-/Applications/Codex.app/Contents/Resources/codex}"
+  if [[ ! -x "$codex_app" ]]; then
+    echo "Codex app CLI not found at $codex_app; project files restored, but app-visible project registration was not invoked."
+    write_registration_report "missing_cli" "$codex_app" ""
+    return
+  fi
+  local registered=0
+  local failed=0
+  local paths=()
+  shopt -s nullglob
+  for project_path in "$PROJECTS_DIR"/*; do
+    [[ -d "$project_path" ]] || continue
+    echo "Registering restored project with Codex Desktop: $project_path"
+    if "$codex_app" app "$project_path"; then
+      registered=$((registered + 1))
+      paths+=("$project_path")
+    else
+      failed=$((failed + 1))
+      echo "Warning: Codex Desktop project registration failed for: $project_path" >&2
+    fi
+  done
+  shopt -u nullglob
+  if [[ "$registered" -gt 0 && "$failed" -eq 0 ]]; then
+    write_registration_report "invoked" "codex app registration invoked" "${paths[@]}"
+  elif [[ "$registered" -gt 0 ]]; then
+    write_registration_report "partial" "some codex app registrations failed" "${paths[@]}"
+  else
+    write_registration_report "none" "no restored project directories were registered" ""
+  fi
+}
+
+write_registration_report() {
+  local status="$1"
+  local message="$2"
+  shift 2
+  local report="$DST_CODEX_HOME/codex-rehome-project-registration-report.json"
+  local py
+  if py="$(find_python3)"; then
+    "$py" - "$report" "$status" "$message" "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report = Path(sys.argv[1])
+status = sys.argv[2]
+message = sys.argv[3]
+paths = [p for p in sys.argv[4:] if p]
+payload = {
+    "status": status,
+    "message": message,
+    "method": "codex app <project-path>",
+    "registered_project_paths": paths,
+}
+report.parent.mkdir(parents=True, exist_ok=True)
+with report.open("w", encoding="utf-8", newline="\n") as f:
+    f.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+PY
+  else
+    printf '{"status":"%s","message":"%s","method":"codex app <project-path>","registered_project_paths":[]}\n' "$status" "$message" > "$report"
+  fi
 }
 
 normalize_package_permissions
@@ -678,9 +762,10 @@ copy_file_preserve "$ROOT/mac_only/Library/Preferences/com.openai.sky.CUAService
 restore_projects
 
 import_ui_ready_metadata
+register_restored_projects_with_codex_app
 
 rm -f "$HOME/Library/Application Support/Codex/SingletonLock" \
   "$HOME/Library/Application Support/Codex/SingletonCookie" \
   "$HOME/Library/Application Support/Codex/SingletonSocket"
 
-echo "Done. Merge restore completed. Restart Codex Desktop before judging sidebar/project visibility."
+echo "Done. Merge restore completed. If restored projects were present, Codex Desktop project registration was invoked with codex app <path>."

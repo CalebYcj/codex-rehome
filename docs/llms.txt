@@ -43,7 +43,7 @@ Windows packages use package schema version 3, forward-slash zip entries, LF/no-
 
 Restore scripts default to merge restore. They preserve target login/config identity files and do not overwrite `state_*.sqlite`, `memories_*.sqlite`, or `goals_*.sqlite` unless `--replace-state` or `-ReplaceState` is passed. Whole-home replacement requires `--replace-codex-home` or `-ReplaceCodexHome`.
 
-Windows packages can include highlighted session JSONL files with `-SelectedChat`. These are copied to `selected_chats/`, restored into `home/.codex/sessions` when needed, and indexed in `session_index.jsonl`; the Mac verifier reports selected chat readiness across sessions, session index, SQLite threads, rollout paths, Mac cwd/path mapping, session JSONL metadata, old source path removal, and global project registry. App-visible sidebar readiness still requires restarting Codex Desktop and checking the app/sidebar after restore.
+Windows packages can include highlighted session JSONL files with `-SelectedChat`. These are copied to `selected_chats/`, restored into `home/.codex/sessions` when needed, and indexed in `session_index.jsonl`; the Mac verifier reports selected chat readiness across sessions, session index, SQLite threads, rollout paths, Mac cwd/path mapping, session JSONL metadata, old source path removal, global project registry, and Codex app project registration. On Mac, restored project folders must be registered with `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>`; the restore script invokes this automatically after `--restore-projects`.
 
 Do not rewrite old Codex session JSONL files in bulk. Preserve old paths in history and reopen matching project folders on the target computer.
 

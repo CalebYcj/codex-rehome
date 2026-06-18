@@ -65,9 +65,9 @@ Do not treat the skill as only a script. Use the instructions to decide mode, sa
    - Mac target: run `scripts/verify_mac_codex_restore.sh --json` or the package copy `Verify-Codex-Mac-Restore.sh --json`.
    - For Mac verification, do not call UI/sidebar readiness complete unless selected chat IDs exist both under restored `~/.codex/sessions` and in `~/.codex/session_index.jsonl`, with `forbidden_files.total == 0`.
    - For schema v3 Mac verification, also require selected chats to exist in `state_*.sqlite.threads`, have existing `rollout_path` files, have target Mac `cwd` values, have remapped session JSONL cwd metadata, have no old source path left in selected JSONL files, and have restored projects in `.codex-global-state.json`.
-   - App-visible sidebar readiness still requires closing and reopening Codex Desktop after restore. If the app/server `list_projects` or the visible sidebar still misses the restored project after restart, report FAIL and identify the missing readiness layer.
-   - Reopen the project folder from its new target location if old conversations reference source paths like `/Users/<name>/...` or `C:\Users\<name>\...`.
-   - If project folders were restored, reopen them from `~/Documents/Codex-Restored-Projects` or the custom `--projects-dir`. Project file restore is not the same as Codex project UI registration; say "project files restored, user must reopen project folder in Codex" unless a verifier proves registration.
+   - Mac project UI registration must use the bundled official entry point: `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>`. The Mac restore script invokes this automatically after `--restore-projects`; the verifier reports `project_ui_registration` and `ui_readiness.app_project_registration_ready`.
+   - Do not treat hand-written `.codex-global-state.json` project entries as sufficient. A running Codex Desktop process can overwrite them on quit; `codex app <path>` is the observed durable action that makes `list_projects` include the restored project.
+   - If `app_project_registration_ready=false`, run `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>` manually for each restored project, then re-check app/server `list_projects` or the visible sidebar.
 
 ## Known Source Findings
 
@@ -89,12 +89,12 @@ Real Mac source validation found this useful shape:
 
 - All directions use the same neutral package layout with target-specific restore scripts.
 - Windows packages use schema version 3, forward-slash zip entries, LF/no-BOM checksums, `MANIFEST.txt`, and `MANIFEST.json` so macOS can unzip and verify them directly.
-- Windows packages can include `selected_chats/` via `-SelectedChat`; Mac verification reports selected chat count, restored-session matches, `session_index.jsonl` matches, SQLite thread readiness, path mapping readiness, and global project registry readiness.
+- Windows packages can include `selected_chats/` via `-SelectedChat`; Mac verification reports selected chat count, restored-session matches, `session_index.jsonl` matches, SQLite thread readiness, path mapping readiness, global project registry readiness, and Codex app project registration readiness.
 - Schema v3 packages include `metadata/thread_index_export.json`, `metadata/path_map.json`, `metadata/selected_chats.json`, and `metadata/project_ui_registry_export.json`.
 - Always run the target verifier before telling the user migration is complete.
 - Mac restore normalizes package permissions, fails if `home/.codex` is missing, defaults to merge restore, and can restore project folders with `--restore-projects`.
 - Mac restore scripts may prompt if any Codex process is running during a real restore; isolated `/tmp/codex-*` test restores continue without blocking.
-- Project folders are packaged under `projects/`. On Mac, `--restore-projects` copies them to `~/Documents/Codex-Restored-Projects` by default.
+- Project folders are packaged under `projects/`. On Mac, `--restore-projects` copies them to `~/Documents/Codex-Restored-Projects` by default and then calls `codex app <restored-project-path>` so Codex Desktop registers/opens each restored project.
 
 ## Scripts
 

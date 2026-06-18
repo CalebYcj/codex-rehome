@@ -290,7 +290,11 @@ appdata_roaming/Codex -> ~/Library/Application Support/Codex
 appdata_roaming/com.openai.codex -> ~/Library/Application Support/com.openai.codex
 appdata_roaming/OpenAI/Codex -> ~/Library/Application Support/OpenAI/Codex
 
-Project folders, if included, are under projects\. Move them to your desired project location and reopen the folder in Codex.
+Project folders, if included, are under projects/. On Mac, Restore-Codex-To-Mac.sh --restore-projects copies them to ~/Documents/Codex-Restored-Projects by default and invokes:
+
+  /Applications/Codex.app/Contents/Resources/codex app <restored-project-path>
+
+This official Codex Desktop entry point registers/opens restored projects in the app-visible project list. Hand-editing .codex-global-state.json alone is not enough, because a running Codex Desktop process can overwrite that file on quit.
 
 If Codex asks you to log in again, log in normally.
 

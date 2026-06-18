@@ -667,11 +667,16 @@ Mac restore:
 
 Project folders, if included, are under projects/. By default, the Mac restore script copies them to ~/Documents/Codex-Restored-Projects when --restore-projects is passed.
 
+For Mac restores with projects, the restore script invokes:
+  /Applications/Codex.app/Contents/Resources/codex app <restored-project-path>
+
+This official Codex Desktop entry point registers/opens restored projects in the app-visible project list. Hand-editing .codex-global-state.json alone is not enough, because a running Codex Desktop process can overwrite that file on quit.
+
 Selected chat files, if included, are under selected_chats/. They are duplicated there for inspection and should also appear in home/.codex/sessions when restored.
 
 Restore scripts merge into the target Codex home by default. Existing target login/config identity files are preserved. Use --replace-codex-home / -ReplaceCodexHome only when you intentionally want a destructive full replacement. State databases are not overwritten unless --replace-state / -ReplaceState is passed.
 
-Schema v3 packages include metadata/thread_index_export.json, metadata/path_map.json, and metadata/project_ui_registry_export.json for UI-ready Mac restore checks.
+Schema v3 packages include metadata/thread_index_export.json, metadata/path_map.json, and metadata/project_ui_registry_export.json for UI-ready Mac restore checks, plus a project registration report after Mac restore.
 
 By default this package excludes browser login state, auth.json, .env files, and private keys. If it was created with full-with-secrets, treat it like a password vault.
 "@
@@ -740,6 +745,7 @@ $manifestJson = [ordered]@{
     notes = @(
         "Path mappings are recorded rather than applied to JSONL sessions in place.",
         "Schema v3 metadata exports thread rows, path mapping, and non-sensitive project UI registry hints for target restore.",
+        "On Mac, project restore invokes /Applications/Codex.app/Contents/Resources/codex app <restored-project-path> so Codex Desktop registers restored projects.",
         "Use docs/SENSITIVE-FILES.txt to review suspected sensitive files without exposing values.",
         "Run the restore script for the target OS only after closing Codex on that target."
     )

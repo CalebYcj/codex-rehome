@@ -260,13 +260,109 @@ selected_chats_in_sessions_count() {
 }
 
 project_paths_lines() {
+  local map="$PACKAGE_ROOT/metadata/path_map.json"
+  local py
+  if [[ -f "$map" ]] && py="$(find_python3)"; then
+    "$py" - "$map" "$PROJECTS_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path_map = Path(sys.argv[1])
+projects_dir = Path(sys.argv[2]).expanduser()
+try:
+    data = json.loads(path_map.read_text(encoding="utf-8", errors="ignore"))
+except Exception:
+    data = {}
+seen = set()
+for entry in data.get("projects", []) or []:
+    name = entry.get("package_project_name") or Path(entry.get("source_path", "")).name
+    if not name:
+        continue
+    target = str(projects_dir / name)
+    if target not in seen:
+        print(target)
+        seen.add(target)
+PY
+    return
+  fi
   [[ -d "$PROJECTS_DIR" ]] || return
   find "$PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort
 }
 
 restored_project_count() {
+  local map="$PACKAGE_ROOT/metadata/path_map.json"
+  local py
+  if [[ -f "$map" ]] && py="$(find_python3)"; then
+    "$py" - "$map" "$PROJECTS_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path_map = Path(sys.argv[1])
+projects_dir = Path(sys.argv[2]).expanduser()
+try:
+    data = json.loads(path_map.read_text(encoding="utf-8", errors="ignore"))
+except Exception:
+    data = {}
+targets = []
+for entry in data.get("projects", []) or []:
+    name = entry.get("package_project_name") or Path(entry.get("source_path", "")).name
+    if name:
+        target = str(projects_dir / name)
+        if target not in targets and Path(target).is_dir():
+            targets.append(target)
+print(len(targets))
+PY
+    return
+  fi
   [[ -d "$PROJECTS_DIR" ]] || { echo 0; return; }
   find "$PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '
+}
+
+app_registration_kv() {
+  local report="$CODEX_HOME/codex-rehome-project-registration-report.json"
+  if [[ ! -f "$report" ]]; then
+    cat <<'EOF'
+APP_REGISTRATION_STATUS=missing
+APP_REGISTRATION_COUNT=0
+APP_REGISTRATION_METHOD=
+APP_REGISTRATION_MESSAGE='No codex app project registration report found'
+EOF
+    return
+  fi
+  local py
+  if ! py="$(find_python3)"; then
+    cat <<'EOF'
+APP_REGISTRATION_STATUS=unknown
+APP_REGISTRATION_COUNT=0
+APP_REGISTRATION_METHOD=
+APP_REGISTRATION_MESSAGE='Python unavailable; cannot parse project registration report'
+EOF
+    return
+  fi
+  "$py" - "$report" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+except Exception:
+    data = {}
+status = str(data.get("status") or "unknown")
+method = str(data.get("method") or "")
+message = str(data.get("message") or "")
+paths = data.get("registered_project_paths") or []
+if not isinstance(paths, list):
+    paths = []
+print(f"APP_REGISTRATION_STATUS={shlex.quote(status)}")
+print(f"APP_REGISTRATION_COUNT={len([p for p in paths if p])}")
+print(f"APP_REGISTRATION_METHOD={shlex.quote(method)}")
+print(f"APP_REGISTRATION_MESSAGE={shlex.quote(message)}")
+PY
 }
 
 ui_ready_kv() {
@@ -476,6 +572,7 @@ SELECTED_CHATS="$(selected_chats_count)"
 SELECTED_CHATS_IN_SESSIONS="$(selected_chats_in_sessions_count)"
 SELECTED_CHATS_IN_SESSION_INDEX="$(selected_chats_in_session_index_count)"
 eval "$(ui_ready_kv)"
+eval "$(app_registration_kv)"
 FORBIDDEN_CODEX="$(forbidden_count_in_codex_home)"
 FORBIDDEN_PROJECTS="$(forbidden_count_in_root "$PROJECTS_DIR")"
 FORBIDDEN_TOTAL="$((FORBIDDEN_CODEX + FORBIDDEN_PROJECTS))"
@@ -490,6 +587,7 @@ if [[ "$SELECTED_CHATS" -eq 0 || "$SELECTED_CHATS_WITH_TARGET_CWD" -eq "$SELECTE
 if [[ "$SELECTED_CHATS" -eq 0 || "$SELECTED_CHATS_WITH_SESSION_META_TARGET_CWD" -eq "$SELECTED_CHATS" ]]; then SESSION_JSONL_PATH_MAPPING_READY="true"; else SESSION_JSONL_PATH_MAPPING_READY="false"; fi
 if [[ "$SELECTED_CHATS" -eq 0 || "$SELECTED_CHATS_WITHOUT_SOURCE_PATH_IN_JSONL" -eq "$SELECTED_CHATS" ]]; then SOURCE_PATH_REMOVED_READY="true"; else SOURCE_PATH_REMOVED_READY="false"; fi
 if [[ "$RESTORED_PROJECT_COUNT" -eq 0 || "$RESTORED_PROJECTS_IN_GLOBAL_STATE" -eq "$RESTORED_PROJECT_COUNT" ]]; then GLOBAL_PROJECT_REGISTRY_READY="true"; else GLOBAL_PROJECT_REGISTRY_READY="false"; fi
+if [[ "$RESTORED_PROJECT_COUNT" -eq 0 || ( "$APP_REGISTRATION_STATUS" == "invoked" && "$APP_REGISTRATION_COUNT" -ge "$RESTORED_PROJECT_COUNT" ) ]]; then APP_PROJECT_REGISTRATION_READY="true"; else APP_PROJECT_REGISTRATION_READY="false"; fi
 
 if [[ "$JSON" == "true" ]]; then
   PROJECT_PATHS_JSON="$(project_paths_lines | json_string_array_from_lines)"
@@ -537,11 +635,14 @@ if [[ "$JSON" == "true" ]]; then
     "session_jsonl_path_mapping_ready": $SESSION_JSONL_PATH_MAPPING_READY,
     "source_path_removed_ready": $SOURCE_PATH_REMOVED_READY,
     "global_project_registry_ready": $GLOBAL_PROJECT_REGISTRY_READY,
-    "app_restart_required": true
+    "app_project_registration_ready": $APP_PROJECT_REGISTRATION_READY,
+    "app_restart_required": false
   },
   "project_ui_registration": {
-    "status": "global_registry_checked",
-    "message": "project files restored and global registry checked; restart Codex Desktop before judging app-visible sidebar readiness"
+    "status": "$(json_escape "$APP_REGISTRATION_STATUS")",
+    "method": "$(json_escape "$APP_REGISTRATION_METHOD")",
+    "registered_project_count": $APP_REGISTRATION_COUNT,
+    "message": "$(json_escape "$APP_REGISTRATION_MESSAGE")"
   },
   "forbidden_files": {
     "codex_home": $FORBIDDEN_CODEX,
@@ -592,17 +693,20 @@ echo "  selected_chats_without_source_path_in_jsonl: $SELECTED_CHATS_WITHOUT_SOU
 echo "  selected_chats_with_fresh_updated_at: $SELECTED_CHATS_WITH_FRESH_UPDATED_AT"
 echo "  restored_projects_in_global_state: $RESTORED_PROJECTS_IN_GLOBAL_STATE"
 echo "  restored_projects_in_thread_hints: $RESTORED_PROJECTS_IN_THREAD_HINTS"
+echo "  app_registration_status: $APP_REGISTRATION_STATUS"
+echo "  app_registration_count: $APP_REGISTRATION_COUNT"
 echo "  forbidden_files_total: $FORBIDDEN_TOTAL"
 echo "  selected_chats_in_session_index_ready: $UI_LEFT_SIDEBAR_READY"
 echo "  state_threads_ready: $STATE_THREADS_READY"
 echo "  rollout_paths_ready: $ROLLOUT_PATHS_READY"
 echo "  global_project_registry_ready: $GLOBAL_PROJECT_REGISTRY_READY"
+echo "  app_project_registration_ready: $APP_PROJECT_REGISTRATION_READY"
 echo
 echo "Restored project paths:"
 project_paths_lines | sed 's/^/  /' || true
-echo "Project UI registration: global registry checked; restart Codex Desktop before judging sidebar visibility"
+echo "Project UI registration: $APP_REGISTRATION_STATUS via $APP_REGISTRATION_METHOD"
 echo
 echo "Next checks:"
 echo "  1. Open Codex and confirm old threads are visible."
-echo "  2. Restart Codex Desktop before judging sidebar/project visibility."
+echo "  2. If app_project_registration_ready is false, run: /Applications/Codex.app/Contents/Resources/codex app <restored-project-path>"
 echo "  3. Reconnect GitHub, Gmail, Chrome, Feishu, or other services if prompted."
