@@ -24,6 +24,8 @@ If you are an AI agent helping a user migrate Codex, read this first:
 
 ```text
 Use the skill in codex-rehome/. Identify the source OS and target OS, package the source computer's Codex data, choose standard/full/full-with-secrets mode, include project folders when needed, transfer the package privately, run the target OS restore script after Codex is closed, then run the matching verifier.
+
+Default restore is merge-safe: it adds migrated sessions, skills, plugins, generated images, and session index entries while preserving the target machine's login/config identity files. Destructive full replacement requires an explicit `--replace-codex-home` or `-ReplaceCodexHome` flag.
 ```
 
 Primary use cases:
@@ -129,6 +131,8 @@ This skill can help package and restore:
 
 Project folders are not automatically part of Codex data. Always decide whether to include them. On Mac restores, pass `--restore-projects` to copy packaged projects into `~/Documents/Codex-Restored-Projects`.
 
+Restored project files are not automatically registered in the Codex project sidebar. After restore, reopen the restored project folder in Codex unless a future verifier explicitly reports project UI registration.
+
 ## Documentation
 
 | Guide | What it answers |
@@ -214,7 +218,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\Restore-Codex-To-Windows.ps1
 ```
 
-The restore script backs up existing Windows Codex data before copying the migrated data.
+The restore script backs up existing Windows Codex data, then merges migrated data into the target. It preserves target `auth.json`, `config.toml`, `installation_id`, `models_cache.json`, and `chrome-native-hosts-v2.json`. Use `-ReplaceCodexHome` only when you intentionally want a destructive full replacement, and `-ReplaceState` only when you want to overwrite existing state/memory/goal databases.
 
 Then verify:
 
@@ -242,6 +246,8 @@ Then verify:
 bash ./Verify-Codex-Mac-Restore.sh --json
 ```
 
+The Mac verifier reports both file-level restore and sidebar readiness. For selected chats, readiness requires the chat to exist under `~/.codex/sessions` and in `~/.codex/session_index.jsonl`.
+
 ## Inventory Helpers
 
 To inspect a Windows machine before or after migration:
@@ -263,6 +269,8 @@ These inventory scripts report Codex data folders, approximate sizes, and likely
 - Codex data and project files are separate. Always ask whether project folders should be included.
 - The package can contain sensitive data: conversations, logs, memories, generated images, local paths, and, in `full-with-secrets`, auth files or tokens.
 - Do not restore browser cookies, Login Data, Local Storage, `.env`, API keys, or private keys by default.
+- Restore scripts merge by default. Do not use `--replace-codex-home` / `-ReplaceCodexHome` unless the user explicitly accepts overwriting the target Codex home.
+- Do not overwrite `state_*.sqlite`, `memories_*.sqlite`, or `goals_*.sqlite` by default. Use `--replace-state` / `-ReplaceState` only when replacing target state is intentional.
 - After a cross-OS restore, old absolute paths in previous conversations may not resolve. Reopen the matching project folder from its new target path.
 - If the Windows app fails to start after restore, remove stale `SingletonLock`, `SingletonCookie`, and `SingletonSocket` files under `%APPDATA%\Codex`.
 - If login state does not transfer, ask the user to log in again. This is expected.

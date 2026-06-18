@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$PackageSchemaVersion = "2"
+$PackageSchemaVersion = "3"
 
 if ($Mode -eq "full-with-secrets" -and -not $IUnderstandSecrets) {
     throw "Refusing full-with-secrets without -IUnderstandSecrets. This mode may package auth tokens, .env files, browser login state, and private keys."
@@ -129,6 +129,133 @@ function Count-ImmediateDirectories {
     return @(Get-ChildItem -LiteralPath $Path -Directory -Force -ErrorAction SilentlyContinue).Count
 }
 
+function Count-JsonlEntries {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 0 }
+    return @([System.IO.File]::ReadLines($Path) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+}
+
+function Read-JsonlRows {
+    param([string]$Path)
+    $rows = @()
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $rows }
+    Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_)) { return }
+        try { $rows += ($_ | ConvertFrom-Json -ErrorAction Stop) } catch {}
+    }
+    return $rows
+}
+
+function Get-SessionEntryFromJsonl {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+
+    $sessionId = ""
+    $threadName = ""
+    $updatedAt = ""
+    $firstUser = ""
+
+    foreach ($line in [System.IO.File]::ReadLines($Path)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $row = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+        $payload = $null
+        if ($row.PSObject.Properties.Name -contains "payload") { $payload = $row.payload }
+
+        if (($row.type -eq "session_meta") -or ($payload -and $payload.type -eq "session_meta")) {
+            if ($payload -and $payload.id) { $sessionId = [string]$payload.id }
+            elseif ($row.id) { $sessionId = [string]$row.id }
+
+            if ($payload -and $payload.thread_name) { $threadName = [string]$payload.thread_name }
+            elseif ($payload -and $payload.name) { $threadName = [string]$payload.name }
+            elseif ($payload -and $payload.title) { $threadName = [string]$payload.title }
+        }
+
+        if (-not $sessionId) {
+            if ($row.id) { $sessionId = [string]$row.id }
+            elseif ($payload -and $payload.id) { $sessionId = [string]$payload.id }
+        }
+
+        if ($row.timestamp) { $updatedAt = [string]$row.timestamp }
+        elseif ($payload -and $payload.timestamp) { $updatedAt = [string]$payload.timestamp }
+        elseif ($row.updated_at) { $updatedAt = [string]$row.updated_at }
+        elseif ($payload -and $payload.updated_at) { $updatedAt = [string]$payload.updated_at }
+
+        if (-not $firstUser -and $payload -and $payload.message -and $payload.message.role -eq "user") {
+            $content = $payload.message.content
+            if ($content -is [string]) {
+                $firstUser = (($content -replace "`r?`n", " ").Trim())
+                if ($firstUser.Length -gt 80) { $firstUser = $firstUser.Substring(0, 80) }
+            }
+        }
+    }
+
+    if (-not $sessionId) { $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($Path) }
+    if (-not $threadName) { $threadName = if ($firstUser) { $firstUser } else { [System.IO.Path]::GetFileNameWithoutExtension($Path) } }
+
+    return [ordered]@{
+        id = $sessionId
+        thread_name = $threadName
+        updated_at = $updatedAt
+    }
+}
+
+function Ensure-SelectedChatInSessions {
+    param([string]$ChatPath)
+
+    $sessionsRoot = Join-Path $Stage "home\.codex\sessions"
+    New-Item -ItemType Directory -Force -Path $sessionsRoot | Out-Null
+
+    $resolvedChat = (Resolve-Path -LiteralPath $ChatPath).Path
+    $sourceSessions = Join-Path $env:USERPROFILE ".codex\sessions"
+    $alreadyInSourceSessions = $false
+    if (Test-Path -LiteralPath $sourceSessions -PathType Container) {
+        $sourceSessionsFull = (Resolve-Path -LiteralPath $sourceSessions).Path
+        $alreadyInSourceSessions = $resolvedChat.StartsWith($sourceSessionsFull, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    if (-not $alreadyInSourceSessions) {
+        $target = Join-Path $sessionsRoot ("selected_chats\" + (Split-Path -Leaf $ChatPath))
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $ChatPath -Destination $target -Force
+    }
+}
+
+function Ensure-SessionIndex {
+    $codexHome = Join-Path $Stage "home\.codex"
+    $sessionsRoot = Join-Path $codexHome "sessions"
+    $indexPath = Join-Path $codexHome "session_index.jsonl"
+    New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    foreach ($row in (Read-JsonlRows -Path $indexPath)) {
+        if ($row.id -and -not $seen.ContainsKey([string]$row.id)) {
+            $rows.Add($row)
+            $seen[[string]$row.id] = $true
+        }
+    }
+
+    foreach ($root in @($sessionsRoot, (Join-Path $Stage "selected_chats"))) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        Get-ChildItem -LiteralPath $root -Filter "*.jsonl" -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $entry = Get-SessionEntryFromJsonl -Path $_.FullName
+            if ($entry -and $entry.id -and -not $seen.ContainsKey([string]$entry.id)) {
+                $rows.Add([ordered]@{
+                    id = [string]$entry.id
+                    thread_name = [string]$entry.thread_name
+                    updated_at = [string]$entry.updated_at
+                })
+                $seen[[string]$entry.id] = $true
+            }
+        }
+    }
+
+    $lines = foreach ($row in $rows) { $row | ConvertTo-Json -Compress -Depth 5 }
+    Write-Utf8NoBomLf -Path $indexPath -Lines $lines
+}
+
 function New-CrossPlatformZip {
     param(
         [Parameter(Mandatory=$true)][string]$SourceDirectory,
@@ -197,10 +324,13 @@ foreach ($projectPath in $Project) {
 foreach ($chatPath in $SelectedChat) {
     if (Test-Path -LiteralPath $chatPath -PathType Leaf) {
         Copy-Item -LiteralPath $chatPath -Destination (Join-Path $Stage "selected_chats\$(Split-Path -Leaf $chatPath)") -Force
+        Ensure-SelectedChatInSessions -ChatPath $chatPath
     } else {
         Write-Warning "Missing selected chat: $chatPath"
     }
 }
+
+Ensure-SessionIndex
 
 $SensitiveReport = Join-Path $Docs "SENSITIVE-FILES.txt"
 $sensitivePaths = @(
@@ -269,6 +399,8 @@ Project folders, if included, are under projects/. By default, the Mac restore s
 
 Selected chat files, if included, are under selected_chats/. They are duplicated there for inspection and should also appear in home/.codex/sessions when restored.
 
+Restore scripts merge into the target Codex home by default. Existing target login/config identity files are preserved. Use --replace-codex-home / -ReplaceCodexHome only when you intentionally want a destructive full replacement. State databases are not overwritten unless --replace-state / -ReplaceState is passed.
+
 By default this package excludes browser login state, auth.json, .env files, and private keys. If it was created with full-with-secrets, treat it like a password vault.
 "@
 Write-RawUtf8NoBomLf -Path (Join-Path $Stage "README-Restore.txt") -Text $readme
@@ -295,6 +427,7 @@ $counts = [ordered]@{
     plugin_manifests = Count-Files -Path (Join-Path $codexHome "plugins\cache") -Filter "plugin.json"
     generated_images = Count-Files -Path (Join-Path $codexHome "generated_images")
     sqlite_files = Count-Files -Path $codexHome -Filter "*.sqlite"
+    session_index_entries = Count-JsonlEntries -Path (Join-Path $codexHome "session_index.jsonl")
     projects = Count-ImmediateDirectories -Path $projectsRoot
     selected_chats = Count-Files -Path (Join-Path $Stage "selected_chats") -Filter "*.jsonl"
 }

@@ -44,7 +44,7 @@ Do not treat the skill as only a script. Use the instructions to decide mode, sa
    - Best practice: install/open Codex once on the target computer, then close Codex before restoring.
    - For the cleanest package, run the packaging script after closing Codex. If running from inside Codex, tell the user that active SQLite/log files can change while copying; verify package size and rerun if needed.
    - Include optional project folders with repeated `--project /path/to/project` arguments.
-   - On Windows, include highlighted chat/session JSONL files for audit with repeated `-SelectedChat <path>` arguments. These files are copied to `selected_chats/` and should also exist in the normal restored session tree.
+   - On Windows, include highlighted chat/session JSONL files for audit with repeated `-SelectedChat <path>` arguments. These files are copied to `selected_chats/`, forced into the restorable `home/.codex/sessions` tree when needed, and indexed in `home/.codex/session_index.jsonl`.
    - Use the script's default exclusions for runtime/cache/dev files such as `.tmp`, `process_manager`, `vendor_imports`, `.git`, `node_modules`, `.venv`, sockets, and browser login databases. These exclusions are necessary because real Mac packages can fail on socket files and unreadable Git/cache objects.
 
 4. Transfer the generated `.zip`.
@@ -54,15 +54,18 @@ Do not treat the skill as only a script. Use the instructions to decide mode, sa
 5. On the target computer, unzip and run the restore script for that OS.
    - Windows target: run `Restore-Codex-To-Windows.ps1`. If execution policy blocks it, run `Set-ExecutionPolicy -Scope Process Bypass` in the same PowerShell session.
    - Mac target: run `bash Restore-Codex-To-Mac.sh --restore-projects` when the package includes project folders. Use `--projects-dir <dir>` to choose a custom project destination; otherwise projects restore to `~/Documents/Codex-Restored-Projects`.
-   - Restore scripts back up existing target directories before copying.
+   - Restore scripts default to merge restore, not whole-home replacement. They merge sessions, archived sessions, skills, plugin cache, generated images, and `session_index.jsonl`; they preserve target `auth.json`, `config.toml`, `installation_id`, `models_cache.json`, and `chrome-native-hosts-v2.json`.
+   - Use destructive replacement only when explicitly requested: `Restore-Codex-To-Mac.sh --replace-codex-home` or `Restore-Codex-To-Windows.ps1 -ReplaceCodexHome`.
+   - State databases (`state_*.sqlite`, `memories_*.sqlite`, `goals_*.sqlite`) are not overwritten by default. Use `--replace-state` / `-ReplaceState` only when the user intentionally wants package state to replace target state.
    - If Codex fails to start, close Codex and delete stale `SingletonLock`, `SingletonCookie`, and `SingletonSocket` under the target Codex app support directory.
 
 6. Verify continuity.
    - Open Codex and check recent threads, skills, plugins, memories, generated images, and automations.
    - Windows target: run `scripts/verify_windows_codex_restore.ps1` or the package copy `Verify-Codex-Windows-Restore.ps1`.
    - Mac target: run `scripts/verify_mac_codex_restore.sh --json` or the package copy `Verify-Codex-Mac-Restore.sh --json`.
+   - For Mac verification, do not call UI/sidebar readiness complete unless selected chat IDs exist both under restored `~/.codex/sessions` and in `~/.codex/session_index.jsonl`, with `forbidden_files.total == 0`.
    - Reopen the project folder from its new target location if old conversations reference source paths like `/Users/<name>/...` or `C:\Users\<name>\...`.
-   - If project folders were restored, reopen them from `~/Documents/Codex-Restored-Projects` or the custom `--projects-dir`.
+   - If project folders were restored, reopen them from `~/Documents/Codex-Restored-Projects` or the custom `--projects-dir`. Project file restore is not the same as Codex project UI registration; say "project files restored, user must reopen project folder in Codex" unless a verifier proves registration.
 
 ## Known Source Findings
 
@@ -83,10 +86,10 @@ Real Mac source validation found this useful shape:
 ## Feature Notes
 
 - All directions use the same neutral package layout with target-specific restore scripts.
-- Windows packages use schema version 2, forward-slash zip entries, LF/no-BOM checksums, `MANIFEST.txt`, and `MANIFEST.json` so macOS can unzip and verify them directly.
-- Windows packages can include `selected_chats/` via `-SelectedChat`; Mac verification reports both selected chat count and whether those chats match restored sessions.
+- Windows packages use schema version 3, forward-slash zip entries, LF/no-BOM checksums, `MANIFEST.txt`, and `MANIFEST.json` so macOS can unzip and verify them directly.
+- Windows packages can include `selected_chats/` via `-SelectedChat`; Mac verification reports selected chat count, restored-session matches, and `session_index.jsonl` matches.
 - Always run the target verifier before telling the user migration is complete.
-- Mac restore normalizes package permissions, fails if `home/.codex` is missing, and can restore project folders with `--restore-projects`.
+- Mac restore normalizes package permissions, fails if `home/.codex` is missing, defaults to merge restore, and can restore project folders with `--restore-projects`.
 - Mac restore scripts may prompt if any Codex process is running during a real restore; isolated `/tmp/codex-*` test restores continue without blocking.
 - Project folders are packaged under `projects/`. On Mac, `--restore-projects` copies them to `~/Documents/Codex-Restored-Projects` by default.
 

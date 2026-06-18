@@ -80,6 +80,22 @@ json_string_array_from_lines() {
   printf ']'
 }
 
+find_python3() {
+  local cmd path
+  for cmd in python3 /usr/bin/python3 python; do
+    path="$(command -v "$cmd" 2>/dev/null || true)"
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      *WindowsApps*) continue ;;
+    esac
+    if "$path" -c 'import json' >/dev/null 2>&1; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 checksum_status() {
   if [[ ! -f "$PACKAGE_ROOT/SHA256SUMS.txt" ]]; then
     echo "missing"
@@ -120,8 +136,105 @@ forbidden_count_in_root() {
   \) 2>/dev/null | wc -l | tr -d ' '
 }
 
+forbidden_count_in_codex_home() {
+  [[ -d "$CODEX_HOME" ]] || { echo 0; return; }
+  find "$CODEX_HOME" \( \
+    \( -name 'auth.json' ! -path "$CODEX_HOME/auth.json" \) -o \
+    -name '.env' -o -name '.env.*' -o \
+    -name '*.pem' -o -name '*.key' -o \
+    -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' -o \
+    -name 'Cookies' -o -name 'Cookies-journal' -o \
+    -name 'Login Data' -o -name 'Login Data-journal' -o \
+    -name 'Login Data For Account' -o -name 'Login Data For Account-journal' -o \
+    -name 'Local Storage' -o -name 'Session Storage' -o \
+    -name '.git' -o -name 'node_modules' -o -name '.venv' -o -name 'venv' -o \
+    -name 'SingletonLock' -o -name 'SingletonCookie' -o -name 'SingletonSocket' -o \
+    -name '*.sock' -o -name '*.ipc' \
+  \) 2>/dev/null | wc -l | tr -d ' '
+}
+
 selected_chats_count() {
   count_files "$PACKAGE_ROOT/selected_chats" "*.jsonl"
+}
+
+session_index_entries_count() {
+  local index="$CODEX_HOME/session_index.jsonl"
+  [[ -f "$index" ]] || { echo 0; return; }
+  grep -cve '^[[:space:]]*$' "$index" 2>/dev/null || echo 0
+}
+
+selected_chats_in_session_index_count() {
+  local selected="$PACKAGE_ROOT/selected_chats"
+  local index="$CODEX_HOME/session_index.jsonl"
+  [[ -d "$selected" && -f "$index" ]] || { echo 0; return; }
+  local py
+  if py="$(find_python3)"; then
+    "$py" - "$selected" "$index" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+selected = Path(sys.argv[1])
+index = Path(sys.argv[2])
+
+def selected_id(path):
+    sid = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if row.get("type") == "session_meta" or payload.get("type") == "session_meta":
+                    sid = str(payload.get("id") or row.get("id") or sid)
+                    if sid:
+                        return sid
+                if not sid:
+                    sid = str(row.get("id") or payload.get("id") or "")
+    except Exception:
+        pass
+    return sid or path.stem
+
+index_ids = set()
+try:
+    with index.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            sid = str(row.get("id") or "")
+            if sid:
+                index_ids.add(sid)
+except Exception:
+    pass
+
+count = 0
+for path in selected.glob("*.jsonl"):
+    if selected_id(path) in index_ids:
+        count += 1
+print(count)
+PY
+  else
+    local found=0 chat first_id
+    shopt -s nullglob
+    for chat in "$selected"/*.jsonl; do
+      first_id="$(grep -m 1 -Eo '"id"[[:space:]]*:[[:space:]]*"[^"]+"' "$chat" 2>/dev/null | head -n 1 | sed -E 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
+      if [[ -n "$first_id" ]] && grep -F "\"id\":\"$first_id\"" "$index" >/dev/null 2>&1; then
+        found=$((found + 1))
+      fi
+    done
+    shopt -u nullglob
+    echo "$found"
+  fi
 }
 
 selected_chats_in_sessions_count() {
@@ -163,12 +276,19 @@ SKILLS="$(count_files "$CODEX_HOME/skills" "SKILL.md")"
 PLUGIN_MANIFESTS="$(count_files "$CODEX_HOME/plugins/cache" "plugin.json")"
 GENERATED_IMAGES="$(count_files "$CODEX_HOME/generated_images" "*")"
 SQLITE_FILES="$(count_files "$CODEX_HOME" "*.sqlite")"
+SESSION_INDEX_ENTRIES="$(session_index_entries_count)"
 RESTORED_PROJECT_COUNT="$(restored_project_count)"
 SELECTED_CHATS="$(selected_chats_count)"
 SELECTED_CHATS_IN_SESSIONS="$(selected_chats_in_sessions_count)"
-FORBIDDEN_CODEX="$(forbidden_count_in_root "$CODEX_HOME")"
+SELECTED_CHATS_IN_SESSION_INDEX="$(selected_chats_in_session_index_count)"
+FORBIDDEN_CODEX="$(forbidden_count_in_codex_home)"
 FORBIDDEN_PROJECTS="$(forbidden_count_in_root "$PROJECTS_DIR")"
 FORBIDDEN_TOTAL="$((FORBIDDEN_CODEX + FORBIDDEN_PROJECTS))"
+if [[ "$SELECTED_CHATS" -eq 0 || "$SELECTED_CHATS_IN_SESSION_INDEX" -eq "$SELECTED_CHATS" ]]; then
+  UI_LEFT_SIDEBAR_READY="true"
+else
+  UI_LEFT_SIDEBAR_READY="false"
+fi
 
 if [[ "$JSON" == "true" ]]; then
   PROJECT_PATHS_JSON="$(project_paths_lines | json_string_array_from_lines)"
@@ -192,11 +312,21 @@ if [[ "$JSON" == "true" ]]; then
     "plugin_manifests": $PLUGIN_MANIFESTS,
     "generated_images": $GENERATED_IMAGES,
     "sqlite_files": $SQLITE_FILES,
+    "session_index_entries": $SESSION_INDEX_ENTRIES,
     "restored_project_count": $RESTORED_PROJECT_COUNT,
     "selected_chats": $SELECTED_CHATS,
-    "selected_chats_in_restored_sessions": $SELECTED_CHATS_IN_SESSIONS
+    "selected_chats_in_restored_sessions": $SELECTED_CHATS_IN_SESSIONS,
+    "selected_chats_in_session_index": $SELECTED_CHATS_IN_SESSION_INDEX
   },
   "restored_project_paths": $PROJECT_PATHS_JSON,
+  "ui_readiness": {
+    "selected_chats_in_sessions_ready": $(test "$SELECTED_CHATS_IN_SESSIONS" -eq "$SELECTED_CHATS" && echo true || echo false),
+    "selected_chats_in_session_index_ready": $UI_LEFT_SIDEBAR_READY
+  },
+  "project_ui_registration": {
+    "status": "not_auto_registered",
+    "message": "project files restored, user must reopen project folder in Codex"
+  },
   "forbidden_files": {
     "codex_home": $FORBIDDEN_CODEX,
     "projects": $FORBIDDEN_PROJECTS,
@@ -233,13 +363,17 @@ echo "  skills: $SKILLS"
 echo "  plugin_manifests: $PLUGIN_MANIFESTS"
 echo "  generated_images: $GENERATED_IMAGES"
 echo "  sqlite_files: $SQLITE_FILES"
+echo "  session_index_entries: $SESSION_INDEX_ENTRIES"
 echo "  restored_project_count: $RESTORED_PROJECT_COUNT"
 echo "  selected_chats: $SELECTED_CHATS"
 echo "  selected_chats_in_restored_sessions: $SELECTED_CHATS_IN_SESSIONS"
+echo "  selected_chats_in_session_index: $SELECTED_CHATS_IN_SESSION_INDEX"
 echo "  forbidden_files_total: $FORBIDDEN_TOTAL"
+echo "  selected_chats_in_session_index_ready: $UI_LEFT_SIDEBAR_READY"
 echo
 echo "Restored project paths:"
 project_paths_lines | sed 's/^/  /' || true
+echo "Project UI registration: project files restored, user must reopen project folder in Codex"
 echo
 echo "Next checks:"
 echo "  1. Open Codex and confirm old threads are visible."

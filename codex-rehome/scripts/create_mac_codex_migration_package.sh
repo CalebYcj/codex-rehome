@@ -302,51 +302,12 @@ EOF
 
 cp -p "$STAGE/README-Restore.txt" "$STAGE/README-Windows-Restore.txt"
 
-cat > "$STAGE/Restore-Codex-To-Windows.ps1" <<'EOF'
-$ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-
-function Backup-IfExists {
-    param([string]$Path)
-    if (Test-Path -LiteralPath $Path) {
-        Move-Item -LiteralPath $Path -Destination "$Path.backup-$Stamp"
-    }
-}
-
-function Restore-Directory {
-    param([string]$Source, [string]$Destination)
-    if (-not (Test-Path -LiteralPath $Source)) { return }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
-    Backup-IfExists -Path $Destination
-    Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
-    Write-Host "Restored: $Destination"
-}
-
-if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match "Codex" }) {
-    Write-Host "Close Codex before continuing."
-    Read-Host "Press Enter after Codex is closed"
-}
-
-Restore-Directory (Join-Path $Root "home\.codex") (Join-Path $env:USERPROFILE ".codex")
-Restore-Directory (Join-Path $Root "appdata_roaming\Codex") (Join-Path $env:APPDATA "Codex")
-Restore-Directory (Join-Path $Root "appdata_roaming\com.openai.codex") (Join-Path $env:APPDATA "com.openai.codex")
-Restore-Directory (Join-Path $Root "appdata_roaming\OpenAI\Codex") (Join-Path $env:APPDATA "OpenAI\Codex")
-Restore-Directory (Join-Path $Root "appdata_local\Codex") (Join-Path $env:LOCALAPPDATA "Codex")
-Restore-Directory (Join-Path $Root "appdata_local\com.openai.codex") (Join-Path $env:LOCALAPPDATA "com.openai.codex")
-Restore-Directory (Join-Path $Root "appdata_local\com.openai.sky.CUAService") (Join-Path $env:LOCALAPPDATA "com.openai.sky.CUAService")
-Restore-Directory (Join-Path $Root "appdata_local\com.openai.sky.CUAService.cli") (Join-Path $env:LOCALAPPDATA "com.openai.sky.CUAService.cli")
-
-foreach ($File in @(
-    (Join-Path $env:APPDATA "Codex\SingletonLock"),
-    (Join-Path $env:APPDATA "Codex\SingletonCookie"),
-    (Join-Path $env:APPDATA "Codex\SingletonSocket")
-)) {
-    if (Test-Path -LiteralPath $File) { Remove-Item -LiteralPath $File -Force }
-}
-
-Write-Host "Done. Open Codex and log in again if prompted."
-EOF
+if [[ -f "$SCRIPT_DIR/restore_codex_to_windows.ps1" ]]; then
+  cp -p "$SCRIPT_DIR/restore_codex_to_windows.ps1" "$STAGE/Restore-Codex-To-Windows.ps1"
+else
+  echo "Missing restore_codex_to_windows.ps1" >&2
+  exit 1
+fi
 
 if [[ -f "$SCRIPT_DIR/verify_windows_codex_restore.ps1" ]]; then
   cp -p "$SCRIPT_DIR/verify_windows_codex_restore.ps1" "$STAGE/Verify-Codex-Windows-Restore.ps1"

@@ -42,6 +42,8 @@ Standard mode excludes sensitive or machine-specific files by default:
 
 The target computer should log in again manually when Codex, GitHub, browser integrations, Feishu, Gmail, or other external services request it.
 
+Restore scripts use merge restore by default. They add packaged sessions, archived sessions, skills, plugin cache, generated images, and `session_index.jsonl` entries while preserving target login/config identity files. Full `~/.codex` replacement requires `--replace-codex-home` on Mac or `-ReplaceCodexHome` on Windows. State database replacement requires `--replace-state` or `-ReplaceState`.
+
 ## Target Verification
 
 After restoring, run the verifier for the target OS:
@@ -58,10 +60,12 @@ bash ./Verify-Codex-Mac-Restore.sh --json
 
 Then open Codex, check recent threads, and reopen migrated project folders from their new target paths.
 
+For Mac restores with `selected_chats/`, verifier readiness requires selected chat IDs to exist both in restored `~/.codex/sessions` and in `~/.codex/session_index.jsonl`. Project file restore is reported separately from Codex project UI registration; if UI registration is not proven, reopen the project folder manually in Codex.
+
 ## Platform Notes
 
 Intel Mac and Apple Silicon should not affect the core Codex data migration because architecture-specific dependency folders and binary-heavy runtime paths are excluded by default. Reinstall or rebuild project dependencies such as `node_modules`, virtual environments, compiled artifacts, or native tools on the target machine.
 
 Project folders are packaged under `projects/`. Mac restores can copy them automatically with `Restore-Codex-To-Mac.sh --restore-projects`, which defaults to `~/Documents/Codex-Restored-Projects`; pass `--projects-dir <dir>` to choose another location.
 
-Windows-to-Mac packages are generated with schema version 2, forward-slash zip entries, LF/no-BOM `SHA256SUMS.txt`, and both text and JSON manifests. Mac verification checks package checksums, selected chats when present, restored project folders, and forbidden-file counts.
+Windows-to-Mac packages are generated with schema version 3, forward-slash zip entries, LF/no-BOM `SHA256SUMS.txt`, generated `session_index.jsonl` when needed, and both text and JSON manifests. Mac verification checks package checksums, selected chats when present, `session_index.jsonl` readiness, restored project folders, and forbidden-file counts.

@@ -117,6 +117,10 @@ codex-rehome/
 
 项目文件夹不属于 Codex 自身数据，需要单独决定是否一起打包。
 
+恢复脚本默认采用 merge restore：把迁移包里的 sessions、archived sessions、skills、plugins、generated images 和 session_index 追加/合并到目标电脑现有 Codex 数据里。默认不会整体替换目标 `~/.codex` 或 `%USERPROFILE%\.codex`，也会保留目标电脑已有的登录和配置身份文件。
+
+只有明确传入 `--replace-codex-home`（Mac）或 `-ReplaceCodexHome`（Windows）时，才会进行破坏性的整目录替换。默认也不会覆盖 `state_*.sqlite`、`memories_*.sqlite`、`goals_*.sqlite`；只有传入 `--replace-state` 或 `-ReplaceState` 才会覆盖这些状态数据库。
+
 ## 文档
 
 | 文档 | 解决的问题 |
@@ -207,6 +211,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\Verify-Codex-Windows-Restore.ps1
 ```
 
+默认恢复会合并到现有 Codex 数据里，不会覆盖目标机器上的 `auth.json`、`config.toml`、`installation_id`、`models_cache.json`、`chrome-native-hosts-v2.json`。如果你真的想整目录替换，才使用 `-ReplaceCodexHome`。
+
 ## Mac 端恢复流程
 
 在 Mac 上：
@@ -226,6 +232,8 @@ bash ./Restore-Codex-To-Mac.sh --restore-projects
 ```bash
 bash ./Verify-Codex-Mac-Restore.sh --json
 ```
+
+Mac verifier 会区分“文件已经复制过去”和“Codex 左侧栏索引是否准备好”。如果使用了 selected chats，必须同时看到 selected chat 存在于 `~/.codex/sessions` 和 `~/.codex/session_index.jsonl`，才算 UI 侧栏 readiness 通过。
 
 ## 路径对应关系
 
@@ -253,6 +261,8 @@ Windows 端主要数据：
 
 - 不要只迁移 Codex 数据，要确认用户是否还要迁移项目文件夹。
 - 默认不要迁移浏览器 Cookies、Login Data、Local Storage、`.env`、API key、私钥。
+- 默认恢复是 merge，不是 replace。不要使用 `--replace-codex-home` 或 `-ReplaceCodexHome`，除非用户明确接受覆盖目标 Codex home 的风险。
+- 默认不要覆盖 `state_*.sqlite`、`memories_*.sqlite`、`goals_*.sqlite`。只有用户明确要求时才使用 `--replace-state` 或 `-ReplaceState`。
 - 如果用户要求 `full-with-secrets`，必须明确提醒风险。
 - 跨系统恢复后，旧对话里的绝对路径可能不能直接使用，需要在目标电脑重新打开对应项目目录。
 - 如果 Windows 上 Codex 启动异常，可以关闭 Codex 后删除 `%APPDATA%\Codex` 下的 `SingletonLock`、`SingletonCookie`、`SingletonSocket`。
