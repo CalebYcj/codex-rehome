@@ -25,6 +25,23 @@ Treat this folder as an agent workflow plus executable helpers:
 
 Do not treat the skill as only a script. Use the instructions to decide mode, safety boundaries, transfer channel, and verification, then call the scripts for repeatable file operations.
 
+## Core Model
+
+Restoring a visible Codex project with its conversations is not a plain file copy. Treat every project/conversation migration as four layers:
+
+1. File layer: copy sessions, `session_index.jsonl`, skills, plugins, selected SQLite files, generated artifacts, and the project folder itself.
+2. Path mapping layer: rewrite source-machine paths to target-machine paths in SQLite rows and restored session JSONL metadata such as `session_meta`, `turn_context`, and workspace roots.
+3. Index layer: make the conversation discoverable through Codex's thread index/state, especially `state_*.sqlite.threads`, `rollout_path`, `cwd`, title/preview, timestamps, archived state, and `session_index.jsonl`.
+4. App registration layer: make Codex Desktop register/open the restored workspace through its own project-opening entry point.
+
+The app registration layer is required. Do not treat UI project recovery as a JSON/SQLite hand-editing problem. Hand-written `.codex-global-state.json` entries and repaired `state_*.sqlite` rows can make internal thread reads work while the left sidebar still misses the project. On Mac, the observed durable command is:
+
+```bash
+/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>
+```
+
+Windows is expected to need the same class of official app/open-workspace operation, such as `codex app <restored-project-path>` or the equivalent Codex Desktop project-opening mechanism. If a target app does not show the project after file/path/index restore, investigate the app registration layer before adding more JSON/SQLite patches.
+
 ## Workflow
 
 1. Identify source and target OS, usernames, and transfer channel.

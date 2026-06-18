@@ -8,6 +8,23 @@ Find it on GitHub by searching `codex-rehome`.
 
 中文说明: 这是一个用于在 Mac 和 Windows 电脑之间迁移 OpenAI Codex Desktop 的开源 Codex skill，支持 Mac 转 Windows、Windows 转 Mac、Windows 转 Windows、Mac 转 Mac，以及迁移对话、sessions、记忆、skills、plugins、MCP、生成物和项目文件夹。
 
+## Core Lesson
+
+Restoring Codex project conversations is not just copying `.codex` files. A visible project restore has four layers:
+
+1. File layer: sessions, `session_index.jsonl`, skills, plugins, SQLite state, generated artifacts, and project folders.
+2. Path mapping layer: source paths must become target paths in SQLite rows and session JSONL metadata.
+3. Index layer: conversations must be discoverable through Codex's thread index/state, including `state_*.sqlite.threads`, `rollout_path`, `cwd`, titles, and timestamps.
+4. App registration layer: Codex Desktop must register/open the restored workspace through its own entry point.
+
+Do not treat UI project recovery as a manual JSON/SQLite patching problem. On Mac, the durable app-visible registration step is:
+
+```bash
+/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>
+```
+
+Windows is expected to need the same class of official open-workspace operation, such as `codex app <restored-project-path>` or the equivalent Codex Desktop mechanism.
+
 ## Quick Links
 
 - [Mac/Windows migration guide](docs/migrate-codex-between-mac-and-windows.md)

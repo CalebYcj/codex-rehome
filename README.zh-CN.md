@@ -15,6 +15,23 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 
 这个项目不是普通的文件备份工具，而是一个面向 AI agent 的 Codex skill：目标是迁移“用户和 AI 的协作现场”。
 
+## 核心经验
+
+恢复 Codex 的“项目 + 对话”不是单纯复制 `.codex` 文件。真正能让左侧栏显示项目，至少要过四层：
+
+1. 文件层：复制 sessions、`session_index.jsonl`、skills、plugins、SQLite 状态、生成物和项目文件夹。
+2. 路径映射层：把源机器路径改成目标机器路径，不只改 SQLite，也要改 session JSONL 里的 `session_meta`、`turn_context`、workspace roots 等。
+3. 索引层：让对话进入 Codex 的 thread index/state，包括 `state_*.sqlite.threads`、`rollout_path`、`cwd`、标题、时间戳和 `session_index.jsonl`。
+4. 应用注册层：让 Codex Desktop 通过自己的打开项目入口正式注册/打开恢复后的 workspace。
+
+不要把 UI 项目恢复当成 JSON/SQLite 手工修复问题。Mac 上已经验证过真正有效的应用注册入口是：
+
+```bash
+/Applications/Codex.app/Contents/Resources/codex app <恢复后的项目路径>
+```
+
+Windows 端也应该优先寻找同类官方打开 workspace 机制，例如 `codex app <恢复后的项目路径>` 或 Codex Desktop 对应的 open project 入口。
+
 ## 快速入口
 
 - [如何在 Mac 和 Windows 之间迁移 Codex](docs/migrate-codex-between-mac-and-windows.md)

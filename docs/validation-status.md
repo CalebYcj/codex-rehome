@@ -62,6 +62,8 @@ Then open Codex, check recent threads, and reopen migrated project folders from 
 
 For Mac restores with `selected_chats/`, verifier readiness requires selected chat IDs to exist in restored `~/.codex/sessions`, `~/.codex/session_index.jsonl`, and target `state_*.sqlite.threads`. It also checks that rollout paths exist, thread cwd values point to restored Mac project paths, selected JSONL metadata has been path-mapped, old Windows source paths are gone from selected JSONL files, and restored projects are present in `.codex-global-state.json`.
 
+The validation model has four layers: file layer, path mapping layer, index layer, and app registration layer. File/path/index readiness can make internal thread reads work, but it is not enough to make the Codex Desktop project sidebar show the restored workspace.
+
 Data-layer readiness is not the same as live desktop frontend readiness. On Mac, project folders must be registered through the bundled Codex CLI with `codex app <restored-project-path>`; hand-editing `.codex-global-state.json` alone can be overwritten by the running desktop app. Current schema v3 restore invokes `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>` after project restore and records the result in `codex-rehome-project-registration-report.json`.
 
 ## Platform Notes

@@ -8,6 +8,10 @@ Repository: https://github.com/CalebYcj/codex-rehome
 
 Use this project to package, transfer, restore, and verify Codex Desktop conversations, sessions, memories, skills, plugins, MCP/connectors, generated images, project folders, and path mappings when moving Codex between computers.
 
+Core model: restoring visible project conversations has four layers, not one. The file layer copies sessions, `session_index.jsonl`, skills, plugins, SQLite state, generated artifacts, and project folders. The path mapping layer rewrites source paths to target paths in SQLite and session JSONL metadata. The index layer makes conversations discoverable through `state_*.sqlite.threads`, `rollout_path`, `cwd`, titles, timestamps, and `session_index.jsonl`. The app registration layer makes Codex Desktop register/open the restored workspace through its own official entry point.
+
+Do not treat UI project recovery as manual JSON/SQLite patching. On Mac, the observed durable app-visible registration command is `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>`. Windows should use the same class of official open-workspace operation, such as `codex app <restored-project-path>` or the equivalent Codex Desktop mechanism.
+
 Supported migration directions:
 
 - Mac to Windows: supported.
