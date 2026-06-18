@@ -12,6 +12,8 @@ Core model: restoring visible project conversations has four layers, not one. Th
 
 Do not treat UI project recovery as manual JSON/SQLite patching. On Mac, the observed durable app-visible registration command is `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>`. Windows should use the same class of official open-workspace operation, such as `codex app <restored-project-path>` or the equivalent Codex Desktop mechanism.
 
+Plain user flow: old computer/source AI packages Codex data and chosen project folders into a private zip; the user transfers the zip privately; new computer/target AI restores the zip after Codex is installed and logged in, maps paths, merges indexes, restores projects, registers/opens projects in Codex Desktop, and runs verification. When explaining this project to a non-technical user, first say which stage they are in and what action is needed next.
+
 Supported migration directions:
 
 - Mac to Windows: supported.

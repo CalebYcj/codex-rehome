@@ -44,6 +44,13 @@ Windows is expected to need the same class of official app/open-workspace operat
 
 ## Workflow
 
+Before running commands, tell the user which stage they are in and what they need to do next. Use plain language:
+
+- Old computer/source stage: "I will help package your old Codex conversations, projects, skills, and local state into a zip. You choose what to include; then you transfer the zip privately to the new computer."
+- Transfer stage: "Move the zip with Feishu, cloud drive, AirDrop, external disk, LAN share, or another private channel. Do not post it publicly."
+- New computer/target stage: "Install and log in to Codex first. Then give me the zip; I will unzip it, run the restore script, map old paths to this computer, merge conversation indexes, restore project folders, and register/open the projects in Codex Desktop."
+- Verification stage: "I will run the verifier and tell you what came back: sessions, selected chats, projects, forbidden files, and app-visible project registration."
+
 1. Identify source and target OS, usernames, and transfer channel.
    - Mac paths usually include `~/.codex`, `~/Library/Application Support/Codex`, `~/Library/Application Support/com.openai.codex`, and `~/Library/Application Support/OpenAI/Codex`.
    - Mac support paths can also include `~/Library/Caches/Codex`, `~/Library/Logs/com.openai.codex`, Chrome native host manifests, and Codex preferences.

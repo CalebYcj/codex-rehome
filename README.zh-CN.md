@@ -32,6 +32,17 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 
 Windows 端也应该优先寻找同类官方打开 workspace 机制，例如 `codex app <恢复后的项目路径>` 或 Codex Desktop 对应的 open project 入口。
 
+## 普通用户怎么用
+
+你可以把这个 GitHub 链接，或者这段 README 的截图，直接发给旧电脑和新电脑上的 AI/Codex。
+
+1. 旧电脑：让 AI 使用 `codex-rehome` 帮你打包旧电脑上的 Codex 数据。它会帮你确认要带走哪些对话、哪些项目文件夹，然后生成一个私密 zip。
+2. 中间传输：你把这个 zip 通过飞书、网盘、移动硬盘、局域网共享等方式发到新电脑。不要把 zip 公开发布。
+3. 新电脑：先安装并登录 Codex。然后把 zip 丢给新电脑上的 AI/Codex，让它帮你解压、运行恢复脚本、把旧路径映射成新电脑路径、合并对话索引、恢复项目文件夹，并把项目注册/打开到 Codex Desktop 里。
+4. 最后检查：让 AI 跑 verifier，告诉你 sessions、selected chats、项目文件夹、敏感文件排除、以及 Codex 左侧项目注册是否正常。
+
+一句话版本：旧电脑的 AI 负责打包，你负责把 zip 传过去，新电脑的 AI 负责恢复和检查。
+
 ## 快速入口
 
 - [如何在 Mac 和 Windows 之间迁移 Codex](docs/migrate-codex-between-mac-and-windows.md)

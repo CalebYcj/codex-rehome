@@ -25,6 +25,17 @@ Do not treat UI project recovery as a manual JSON/SQLite patching problem. On Ma
 
 Windows is expected to need the same class of official open-workspace operation, such as `codex app <restored-project-path>` or the equivalent Codex Desktop mechanism.
 
+## Plain User Flow
+
+You can use this project by giving the GitHub link or a screenshot of this README to the AI/Codex on each computer.
+
+1. Old computer: ask the AI to use `codex-rehome` to package your old Codex data. The AI should help you choose which conversations and project folders to include, then create a private zip file.
+2. Transfer: send that zip to yourself through Feishu, cloud drive, external disk, LAN share, or another private channel. Do not publish the zip.
+3. New computer: install and log in to Codex first. Then give the zip to the AI/Codex on the new computer. The AI should unzip it, run the restore script, map old paths to the new computer, merge the conversation index, restore project folders, and register/open the projects in Codex Desktop.
+4. Check: the AI should run the verifier and tell you whether sessions, selected chats, projects, forbidden files, and app-visible project registration look correct.
+
+In short: old computer AI packages, you move the zip, new computer AI restores and checks.
+
 ## Quick Links
 
 - [Mac/Windows migration guide](docs/migrate-codex-between-mac-and-windows.md)
