@@ -8,6 +8,10 @@ Find it on GitHub by searching `codex-rehome`.
 
 中文说明: 这是一个用于在 Mac 和 Windows 电脑之间迁移 OpenAI Codex Desktop 的开源 Codex skill，支持 Mac 转 Windows、Windows 转 Mac、Windows 转 Windows、Mac 转 Mac，以及迁移对话、sessions、记忆、skills、plugins、MCP、生成物和项目文件夹。
 
+给中文用户的简单说法：这不是让你手动复制几个文件夹，而是让旧电脑上的 Codex/AI 帮你把 Codex 数据和选中的项目文件打成一个私密 zip，再让新电脑上的 Codex/AI 解压、恢复、改路径、注册项目并检查结果。适合换电脑、离职交接、重装系统、把旧 Codex 对话和项目带到新电脑继续参考的场景。
+
+重要预期：跨系统迁移后，历史对话通常可以迁过去并继续查看；项目文件也可以恢复到新电脑的新路径。但是旧对话框里绑定的原始工作目录不一定能原样继续执行，尤其是 Windows 路径和 macOS 路径完全不同。更稳妥的做法是把旧对话当作历史记录和上下文参考，在新电脑上从恢复后的项目文件夹重新打开一个项目对话继续工作。
+
 ## Core Lesson
 
 Restoring Codex project conversations is not just copying `.codex` files. A visible project restore has four layers:
@@ -160,6 +164,22 @@ This skill can help package and restore:
 Project folders are not automatically part of Codex data. Always decide whether to include them. On Mac restores, pass `--restore-projects` to copy packaged projects into `~/Documents/Codex-Restored-Projects`.
 
 On Mac, schema v3 restore registers restored project folders with Codex Desktop by running `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>`. This is the observed durable path for making restored projects appear in the app-visible project list; editing `.codex-global-state.json` alone is not enough because the running app can overwrite it on quit.
+
+## Known Limits / What This Cannot Guarantee
+
+This project tries to restore the useful local Codex workspace, but some things are intentionally not promised:
+
+- Old chat windows may not keep a live working-directory handle after a cross-OS move. The conversation text and session history can be restored, but a thread that originally worked inside `C:\...` may not be able to keep editing that same folder after it becomes `/Users/...` on Mac. Use the restored old conversation as context, then reopen the restored project folder in Codex and continue in a new project thread when needed.
+- Project files are only included when they are passed with `--project` or `-Project`. Codex history and project source files are separate.
+- App sidebar visibility is not guaranteed by file copy alone. The restore scripts attempt Codex Desktop project registration with `codex app <restored-project-path>`, but if the desktop app or packaged-app permissions block it, the user must manually open the restored folder from Codex Desktop.
+- Login state and browser sessions are not migrated by default. Expect to log in again to Codex, GitHub, Feishu, Gmail, browser extensions, or MCP connectors.
+- Secrets are excluded by default: auth files, tokens, cookies, `.env`, private keys, browser Login Data, Local Storage, `.git`, `node_modules`, and virtual environments.
+- Native dependencies are not portable. Reinstall or rebuild `node_modules`, Python virtualenvs, compiled binaries, game/tool runtimes, and OS-specific dependencies on the target computer.
+- Running processes, open terminal sessions, unsaved editor buffers, in-memory app state, and live GUI layout are not migrated.
+- Cross-account or cross-workspace restoration can be incomplete. A conversation restored under a different Codex/OpenAI/GitHub account may be visible as local history but still need fresh authorization to access remote services.
+- The verifier can check files, indexes, path mapping, selected chats, forbidden files, and best-effort project registration. It cannot guarantee that every old thread will resume exactly as if it had never moved computers.
+
+中文边界说明：这个工具能尽量把“对话记录、索引、skills、plugins、生成物、项目文件夹和路径映射”搬过去，但不能保证旧聊天框里的原工作目录句柄跨系统复活。尤其是 Win 转 Mac / Mac 转 Win 时，旧对话更适合作为历史上下文；真正继续干活时，建议在新电脑上重新打开恢复后的项目文件夹，再开新对话接着做。
 
 ## Documentation
 
