@@ -44,6 +44,24 @@ Windows 端也需要同类官方打开 workspace 机制。Windows 恢复脚本�
 
 一句话版本：旧电脑的 AI 负责打包，你负责把 zip 传过去，新电脑的 AI 负责恢复和检查。
 
+## 小红书 Red Skill 版本
+
+仓库提供了一个中文优先的 Red Skill 版本。用户安装后不需要先理解命令，只要告诉 Agent 自己处于“原电脑”“新电脑”还是“准备重装系统”，Agent 就会进入对应流程。
+
+- Red Skill 源文件：[redskill/SKILL.md](redskill/SKILL.md)
+- 可分发压缩包：`codex-rehome-redskill.zip`
+- 自动构建脚本：[scripts/build_redskill_package.ps1](scripts/build_redskill_package.ps1)
+
+在 Windows 上重新生成上传目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_redskill_package.ps1
+```
+
+生成后，优先把 `dist/redskill/codex-rehome/` 文件夹上传到小红书创作服务平台。`dist/redskill/redskill-upload.json` 里已经准备了名称、简介、原创声明、GitHub 地址和建议标签。
+
+注意区分两种包：公开的 Red Skill 包只包含说明和脚本，可以公开分发；旧电脑实际生成的迁移 ZIP 可能包含私人对话、记忆、项目和本地路径，只能私下传输，不能上传到 Red Skill、GitHub 或公开笔记。
+
 ## 重装系统怎么用
 
 如果你不是换电脑，而是同一台 Windows 电脑要重装系统，这个场景也适用。区别是：**迁移包不能放在 C 盘会被清掉的位置。**

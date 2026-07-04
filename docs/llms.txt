@@ -16,6 +16,8 @@ Plain user flow: old computer/source AI packages Codex data and chosen project f
 
 Same-computer reinstall flow: before wiping Windows, source AI must create the package on a non-system partition or external disk, not Desktop, Downloads, `%USERPROFILE%`, or any C: path that will be erased. Use the Windows package script with `-Out "D:\Codex-Rehome-Backup"` or another surviving location, save the GitHub URL/README screenshot/restore prompt next to the zip, verify zip + manifests + checksums exist there, then reinstall. After reinstall, install and log in to Codex, give the zip and saved prompt to the new system's Codex, restore, register projects, and verify.
 
+Red Skill distribution: `redskill/SKILL.md` is a Chinese-first, stage-based entry for Xiaohongshu Red Skill. Run `scripts/build_redskill_package.ps1` to generate `dist/redskill/codex-rehome/`, `codex-rehome-redskill.zip`, and upload metadata. The public Red Skill package contains only instructions and deterministic scripts. Never upload a user-generated migration ZIP to Red Skill, GitHub, or a public note because that package can contain private conversations, projects, memories, generated artifacts, and local paths.
+
 Supported migration directions:
 
 - Mac to Windows: supported.

@@ -16,6 +16,28 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 2. 你负责把 zip 私密传到新电脑。
 3. 新电脑 AI 负责恢复、检查，并把项目重新打开到 Codex Desktop 里。
 
+## 小红书 Red Skill
+
+这个仓库现在提供中文优先的 Red Skill 版本。用户从小红书安装后，只需要告诉 Agent 自己处于“原电脑”“新电脑”还是“准备重装系统”，Agent 会按对应阶段继续。
+
+- Red Skill 源文件：[redskill/SKILL.md](redskill/SKILL.md)
+- 可直接分发的压缩包：`codex-rehome-redskill.zip`
+- 构建脚本：[scripts/build_redskill_package.ps1](scripts/build_redskill_package.ps1)
+
+重新生成小红书上传目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_redskill_package.ps1
+```
+
+输出内容：
+
+- `dist/redskill/codex-rehome/`：优先上传到小红书创作服务平台的 Skill 文件夹。
+- `dist/redskill/codex-rehome-redskill.zip`：同内容的备份压缩包。
+- `dist/redskill/redskill-upload.json`：建议填写的名称、简介、原创声明、仓库地址和标签。
+
+这里的公开 Red Skill 包只包含说明和脚本，不包含用户对话、项目或登录信息。真正迁移时由旧电脑生成的私人迁移 ZIP 可能包含个人数据，只能私下传给新电脑，绝对不要上传到 Red Skill、GitHub 或公开笔记。
+
 ## 重要预期
 
 跨系统迁移后，历史对话通常可以迁过去并继续查看；项目文件也可以恢复到新电脑的新路径。但是旧对话框里绑定的原始工作目录不一定能原样继续执行，尤其是 Windows 路径和 macOS 路径完全不同。
@@ -59,6 +81,8 @@ Windows 打包时可以这样指定输出位置：
 Codex Rehome is an open-source Codex skill for moving OpenAI Codex Desktop between macOS and Windows computers. It helps package and restore Codex conversations, sessions, memories, skills, plugins, MCP/connectors, generated images, project folders, path mappings, and restore verification scripts.
 
 Use this project when you need to migrate Codex Desktop from Mac to Windows, Windows to Mac, Windows to Windows, Mac to Mac, or preserve Codex before reinstalling the same computer's operating system; back up Codex conversations and sessions; restore Codex skills and plugins; or hand off a local AI agent workspace to another computer.
+
+A Chinese-first Red Skill distribution package is available as `codex-rehome-redskill.zip`. Its source is under `redskill/`, and `scripts/build_redskill_package.ps1` rebuilds the upload folder and metadata. The public Red Skill package contains instructions and scripts only; never upload a user-generated private migration ZIP to Red Skill or a public repository.
 
 ## Core Lesson
 
