@@ -4,6 +4,8 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 
 这个项目适合这些场景：换电脑、离职交接、重装系统、把旧电脑上的 Codex 历史对话和项目带到新电脑、备份 Codex conversations/sessions、恢复 Codex skills/plugins，或者把一个本地 AI agent 工作现场交接到另一台电脑。
 
+新版也开始加入 **Claude Code -> Codex Bridge**：当本机存在真实 Claude Code / Claude Desktop agent transcript 时，可以把 Claude 侧的项目历史整理成 Codex 可读的交接包。它不是把 Claude 对话原样伪装成 Codex 左侧栏历史，而是让 Codex 打开一个交接项目，读懂 Claude 之前做了什么、还差什么、下一步怎么接着做。
+
 在 GitHub 里搜索 `codex-rehome` 就能找到这个项目。
 
 ## 快速理解
@@ -15,6 +17,14 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 1. 旧电脑 AI 负责打包。
 2. 你负责把 zip 私密传到新电脑。
 3. 新电脑 AI 负责恢复、检查，并把项目重新打开到 Codex Desktop 里。
+
+Claude Code 转 Codex 的一句话流程：
+
+1. 先让 AI 探测本机有没有真实 Claude Code 历史。
+2. 如果有 transcript，就导出成 Codex handoff 项目。
+3. 用 Codex 打开这个 handoff 项目继续工作。
+
+如果只是安装了 Claude Desktop 免费账号，但日志显示 `Claude Code requires a Pro or Max subscription`，说明当前机器没有可导出的 Claude Code 会话。这个状态会被脚本明确报告，不会假装迁移成功。
 
 ## 小红书 Red Skill
 
@@ -142,6 +152,8 @@ Primary use cases:
 - Codex memories, skills, plugins, automations, and generated image transfer
 - Project folder and old dialogue reproduction
 - AI agent workspace continuity across computers
+- Claude Code to Codex project handoff
+- Claude Desktop agent history detection
 - Feishu, cloud drive, external disk, or GitHub handoff
 
 Search keywords:
@@ -154,7 +166,8 @@ AI agent workspace migration, OpenAI Codex desktop migration,
 Codex session transfer, Codex backup restore, Codex Desktop Windows restore,
 Mac Codex to Windows Codex, Windows Codex to Mac Codex,
 Codex generated images migration, Codex MCP connector migration,
-Codex plugin restore
+Codex plugin restore, Claude Code to Codex, Claude to Codex handoff,
+Claude Code migration, Claude Desktop agent history, Codex Agent Bridge
 ```
 
 This repository contains a Codex skill for migrating Codex data, conversations, memories, skills, plugins, and project context between computers, including Mac to Windows, Windows to Mac, Windows to Windows, and Mac to Mac.
@@ -193,6 +206,9 @@ codex-rehome/
   scripts/collect_windows_codex_inventory.ps1
   scripts/verify_windows_codex_restore.ps1
   scripts/verify_mac_codex_restore.sh
+  scripts/inspect_claude_agent_sources.py
+  scripts/export_claude_to_codex_handoff.py
+  scripts/verify_agent_bridge_handoff.py
 ```
 
 There is also a backup archive:
@@ -232,6 +248,7 @@ This skill can help package and restore:
 - generated images and local artifacts
 - environment inventory and path mapping
 - optional project folders needed to reopen old conversations
+- Claude Code / Claude Desktop agent transcripts as a Codex-readable handoff package, when real local transcript files exist
 
 Project folders are not automatically part of Codex data. Always decide whether to include them. On Mac restores, pass `--restore-projects` to copy packaged projects into `~/Documents/Codex-Restored-Projects`.
 
@@ -331,6 +348,35 @@ For a fuller inventory without secrets:
 
 The output is a zip on the Windows Desktop by default.
 
+## Claude Code To Codex Bridge
+
+This is for users who used Claude Code or Claude Desktop agent mode and want Codex to continue from that work.
+
+First inspect local Claude sources:
+
+```powershell
+python .\codex-rehome\scripts\inspect_claude_agent_sources.py --json
+```
+
+If the result says `exportable_transcripts_found`, export a handoff:
+
+```powershell
+python .\codex-rehome\scripts\export_claude_to_codex_handoff.py `
+  --source "<claude-jsonl-file-or-session-directory>" `
+  --out "$env:USERPROFILE\Documents" `
+  --title "Claude To Codex Handoff"
+```
+
+Then verify:
+
+```powershell
+python .\codex-rehome\scripts\verify_agent_bridge_handoff.py "<handoff-folder>" --json
+```
+
+Open the generated handoff folder in Codex and ask Codex to read `next-steps-for-codex.md` first.
+
+Important boundary: if the detector reports `installed_but_no_entitled_claude_code_sessions`, Claude is installed but the current account does not have usable Claude Code sessions. On a free Claude account this commonly appears as `Claude Code requires a Pro or Max subscription`. In that case, there is no real local Claude Code history to migrate yet.
+
 ## Restore On Windows
 
 On Windows:
@@ -403,6 +449,7 @@ These inventory scripts report Codex data folders, approximate sizes, and likely
 - After a cross-OS restore, old absolute paths in previous conversations may not resolve. Reopen the matching project folder from its new target path.
 - If the Windows app fails to start after restore, remove stale `SingletonLock`, `SingletonCookie`, and `SingletonSocket` files under `%APPDATA%\Codex`.
 - If login state does not transfer, ask the user to log in again. This is expected.
+- For Claude Code Bridge, never claim success unless real local transcript files were found and a handoff folder passed `verify_agent_bridge_handoff.py`.
 
 ## FAQ
 

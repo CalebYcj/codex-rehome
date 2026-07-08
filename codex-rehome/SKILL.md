@@ -1,6 +1,6 @@
 ---
 name: codex-rehome
-description: "Use when the user wants to migrate, back up, restore, or reproduce a Codex Desktop workspace between Mac and Windows computers, or preserve Codex before reinstalling the same computer's operating system; relevant for Codex conversations, sessions, memories, skills, plugins, MCP/connectors, automations, generated images, app data, project folders, environment inventory, path mappings, secrets handling, and Feishu/cloud-drive/external-disk handoffs."
+description: "Use when the user wants to migrate, back up, restore, or reproduce a Codex Desktop workspace between Mac and Windows computers, preserve Codex before reinstalling an OS, or bridge Claude Code / Claude Desktop agent history into a Codex-readable handoff; relevant for Codex sessions, projects, skills, plugins, path mappings, restore verification, and Claude-to-Codex migration checks."
 ---
 
 # Codex Rehome
@@ -14,6 +14,7 @@ Supported directions:
 - Windows -> Windows
 - Mac -> Mac
 - Same computer OS reinstall: back up to a non-system partition or external disk before wiping the OS, then restore after reinstalling and logging in to Codex.
+- Claude Code / Claude Desktop agent history -> Codex handoff package, when real local Claude transcript files exist.
 
 ## Positioning
 
@@ -42,6 +43,52 @@ The app registration layer is required. Do not treat UI project recovery as a JS
 ```
 
 Windows needs the same class of official app/open-workspace operation. The Windows restore script attempts `codex app <restored-project-path>` after `-RestoreProjects`; if Windows packaged-app permissions block that CLI call, reopen the restored folder from Codex Desktop and rerun the verifier.
+
+## Agent Bridge: Claude Code To Codex
+
+Use this branch when the user says they want to move from Claude Code to Codex, bring Claude Code project history into Codex, or prepare for a Claude-to-GPT/Codex workflow switch. This is different from Codex-to-Codex rehome.
+
+Default promise: create a Codex-readable project handoff from real local Claude transcripts. Do not claim native Codex sidebar restoration for Claude sessions.
+
+Current supported source shapes:
+
+- Traditional Claude Code CLI: `~/.claude/projects`.
+- Claude Desktop on Windows: `%APPDATA%\Claude\claude-code-sessions`, `%APPDATA%\Claude\local-agent-mode-sessions`, and MSIX-virtualized equivalents under `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`.
+
+First run the read-only detector:
+
+```bash
+python scripts/inspect_claude_agent_sources.py --json
+```
+
+Interpret the status before exporting:
+
+- `exportable_transcripts_found`: real Claude JSONL transcripts exist. Continue with export.
+- `installed_but_no_entitled_claude_code_sessions`: Claude Desktop/Claude Code is installed, but the current account is blocked by the Pro/Max requirement or has no usable local sessions. Tell the user this clearly. Do not fake a migration.
+- `no_exportable_transcripts_found`: no supported local Claude transcript files were found. Ask the user to run Claude Code with an entitled account or provide a real local transcript package from another machine.
+
+When real transcript files exist, generate a Codex handoff folder:
+
+```bash
+python scripts/export_claude_to_codex_handoff.py \
+  --source "<claude-jsonl-file-or-session-directory>" \
+  --out "<output-parent-directory>" \
+  --title "Claude To Codex Handoff"
+```
+
+Use `--include-raw` only when the user understands that raw transcripts can contain prompts, code, terminal output, local paths, and secrets. By default, the exporter writes a readable handoff without copying raw JSONL files.
+
+Verify the handoff:
+
+```bash
+python scripts/verify_agent_bridge_handoff.py "<handoff-folder>" --json
+```
+
+Then open the generated handoff folder in Codex and instruct Codex to read `next-steps-for-codex.md`, `source-manifest.json`, and `claude-transcript.md`. Treat the transcript as historical context, not as live Claude tool state.
+
+Optional advanced backend: if the user has `cct` installed, it can be used for deeper Codex <-> Claude Code session transfer. Keep it optional and local-first; do not require it for the standard handoff flow.
+
+Do not include ChatGPT web export/import in this branch. It is intentionally out of scope for the current Claude Code Bridge version.
 
 ## Workflow
 
@@ -149,6 +196,9 @@ Set expectations before and after restore. This workflow restores the useful loc
 - `scripts/collect_mac_codex_inventory.sh`: Run on Mac before or after restore to summarize existing Codex data locations, sizes, and project folder candidates.
 - `scripts/verify_windows_codex_restore.ps1`: Run on Windows after restore to verify restored paths, counts, package metadata, selected chats, thread index readiness, restored projects, and app project registration readiness.
 - `scripts/verify_mac_codex_restore.sh`: Run on Mac after restore to verify restored paths, checksums, selected chats, forbidden-file counts, and restored project folders.
+- `scripts/inspect_claude_agent_sources.py`: Read-only detector for Claude Code CLI and Claude Desktop agent history sources, including Windows free-account/Pro-Max entitlement failures.
+- `scripts/export_claude_to_codex_handoff.py`: Converts real Claude JSONL transcripts into a Codex-readable handoff folder.
+- `scripts/verify_agent_bridge_handoff.py`: Verifies the generated Claude-to-Codex handoff folder.
 
 ## Handoff Checklist
 

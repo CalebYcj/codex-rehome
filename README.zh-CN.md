@@ -2,6 +2,8 @@
 
 Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之间迁移 OpenAI Codex Desktop。它帮助用户和 AI agent 打包、传输、恢复并验证 Codex 对话、sessions、记忆、skills、plugins、MCP/connectors、生成图片、项目文件夹、路径映射和本地协作现场。
 
+新版也开始加入 **Claude Code -> Codex Bridge**：如果本机存在真实 Claude Code / Claude Desktop agent transcript，可以把 Claude 侧项目历史整理成 Codex 可读的交接包。它不是把 Claude 对话原样恢复成 Codex 左侧栏历史，而是生成一个 Codex 可以打开、阅读和继续工作的项目交接文件夹。
+
 它支持四种方向：
 
 - Mac 转 Windows
@@ -9,6 +11,7 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 - Windows 转 Windows
 - Mac 转 Mac
 - 同一台电脑重装系统前备份，重装后恢复
+- Claude Code / Claude Desktop agent 历史转 Codex 项目交接包
 
 如果你正在搜索「Codex Mac 迁移 Windows」「Codex Windows 迁移 Mac」「Codex 对话迁移」「Codex sessions 备份恢复」「Codex skill 迁移工具」，这个项目就是为这个场景做的。
 
@@ -43,6 +46,14 @@ Windows 端也需要同类官方打开 workspace 机制。Windows 恢复脚本�
 4. 最后检查：让 AI 跑 verifier，告诉你 sessions、selected chats、项目文件夹、敏感文件排除、以及 Codex 左侧项目注册是否正常。
 
 一句话版本：旧电脑的 AI 负责打包，你负责把 zip 传过去，新电脑的 AI 负责恢复和检查。
+
+Claude Code 转 Codex 时，流程更像“交接”：
+
+1. 先让 AI 检查本机是否真的有 Claude Code transcript。
+2. 如果有，就导出成 Codex handoff 项目。
+3. 用 Codex 打开这个 handoff 项目，让 Codex 读取 Claude 的历史上下文继续做。
+
+如果只是安装了 Claude Desktop 免费账号，但日志里显示 `Claude Code requires a Pro or Max subscription`，说明当前机器没有真实可导出的 Claude Code 会话。这个状态应该明确告诉用户，不能假装迁移成功。
 
 ## 小红书 Red Skill 版本
 
@@ -132,7 +143,9 @@ Codex Windows 转 Windows, Codex Mac 转 Mac, Codex 历史对话迁移,
 Codex skill 备份, Codex memory 转移, Codex 项目交接,
 AI agent 工作区迁移, OpenAI Codex 桌面端迁移,
 Codex sessions 备份, Codex 对话恢复, Codex 插件迁移,
-Codex skills 迁移, Codex generated images 迁移
+Codex skills 迁移, Codex generated images 迁移,
+Claude Code 转 Codex, Claude to Codex handoff,
+Claude Desktop agent history, Codex Agent Bridge
 ```
 
 ## 这个仓库到底是什么
@@ -285,6 +298,37 @@ Set-ExecutionPolicy -Scope Process Bypass
 - **跨账号/跨 workspace 不保证完整接上。** 如果新电脑登录的是另一个 Codex/OpenAI/GitHub 账号，本地历史可能能看到，但远程服务权限仍然需要重新授权。
 
 一句话：这个工具主要解决“把 Codex 的历史对话、索引、skills、plugins、生成物和项目文件尽量带到新电脑”这件事；但跨系统后，真正继续做项目时，最好从恢复后的项目文件夹重新打开新对话。
+
+## Claude Code 转 Codex Bridge
+
+这个功能适合已经用过 Claude Code 或 Claude Desktop agent mode、现在想把那边的项目历史带到 Codex 继续做的人。
+
+先做只读探测：
+
+```powershell
+python .\codex-rehome\scripts\inspect_claude_agent_sources.py --json
+```
+
+如果结果是 `exportable_transcripts_found`，说明找到了真实 Claude transcript，可以导出交接包：
+
+```powershell
+python .\codex-rehome\scripts\export_claude_to_codex_handoff.py `
+  --source "<claude-jsonl-file-or-session-directory>" `
+  --out "$env:USERPROFILE\Documents" `
+  --title "Claude To Codex Handoff"
+```
+
+然后验证：
+
+```powershell
+python .\codex-rehome\scripts\verify_agent_bridge_handoff.py "<handoff-folder>" --json
+```
+
+最后用 Codex 打开生成的 handoff 文件夹，先让 Codex 读取 `next-steps-for-codex.md`。
+
+如果探测结果是 `installed_but_no_entitled_claude_code_sessions`，代表 Claude 已安装，但当前账号没有可用 Claude Code 会话。免费 Claude 账号常见表现就是日志里出现 `Claude Code requires a Pro or Max subscription`。这种情况下没有真实 Claude Code 历史可迁移。
+
+当前版本暂不做 ChatGPT 网页端导入。
 
 ## Windows 端恢复流程
 
