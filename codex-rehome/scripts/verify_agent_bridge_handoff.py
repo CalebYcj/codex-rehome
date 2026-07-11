@@ -43,7 +43,18 @@ def verify(path: Path) -> dict:
         except json.JSONDecodeError as exc:
             manifest = {"parse_error": str(exc)}
     transcript_size = (path / "claude-transcript.md").stat().st_size if (path / "claude-transcript.md").is_file() else 0
-    ok = not missing and not forbidden and transcript_size > 0 and not manifest.get("parse_error")
+    skill_index = path / "claude-skills-index.md"
+    skill_count = 0
+    if (path / "claude-skills").is_dir():
+        skill_count = len([item for item in (path / "claude-skills").iterdir() if item.is_dir()])
+    manifest_skill_count = int(manifest.get("skill_count") or 0) if isinstance(manifest, dict) else 0
+    project_index = path / "project-files-index.md"
+    project_count = 0
+    if (path / "project-files").is_dir():
+        project_count = len([item for item in (path / "project-files").iterdir() if item.is_dir()])
+    manifest_project_count = int(manifest.get("project_count") or 0) if isinstance(manifest, dict) else 0
+    has_content = transcript_size > 0 or skill_count > 0 or project_count > 0
+    ok = not missing and not forbidden and has_content and not manifest.get("parse_error")
     return {
         "ok": ok,
         "path": str(path),
@@ -51,6 +62,12 @@ def verify(path: Path) -> dict:
         "forbidden_file_count": len(forbidden),
         "forbidden_files": forbidden,
         "transcript_size": transcript_size,
+        "skill_index_exists": skill_index.is_file(),
+        "skill_count": skill_count,
+        "manifest_skill_count": manifest_skill_count,
+        "project_index_exists": project_index.is_file(),
+        "project_count": project_count,
+        "manifest_project_count": manifest_project_count,
         "manifest": manifest,
     }
 
@@ -68,6 +85,8 @@ def main() -> int:
         print(f"Missing required: {', '.join(report['missing_required']) or 'none'}")
         print(f"Forbidden files: {report['forbidden_file_count']}")
         print(f"Transcript size: {report['transcript_size']}")
+        print(f"Skills: {report['skill_count']}")
+        print(f"Projects: {report['project_count']}")
     return 0 if report["ok"] else 1
 
 

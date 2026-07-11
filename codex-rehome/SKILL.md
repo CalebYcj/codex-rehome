@@ -72,9 +72,13 @@ When real transcript files exist, generate a Codex handoff folder:
 ```bash
 python scripts/export_claude_to_codex_handoff.py \
   --source "<claude-jsonl-file-or-session-directory>" \
+  --skills-source "<claude-skills-directory>" \
+  --project-source "<project-folder-Claude-worked-on>" \
   --out "<output-parent-directory>" \
   --title "Claude To Codex Handoff"
 ```
+
+The handoff can include transcript JSONL, Claude skill folders, and project files. Use `--skills-source` for user or agent skill folders and `--project-source` for folders Claude actually edited. The result is a Codex-readable project handoff, not native Codex sidebar restoration for Claude sessions.
 
 Use `--include-raw` only when the user understands that raw transcripts can contain prompts, code, terminal output, local paths, and secrets. By default, the exporter writes a readable handoff without copying raw JSONL files.
 
@@ -197,7 +201,7 @@ Set expectations before and after restore. This workflow restores the useful loc
 - `scripts/verify_windows_codex_restore.ps1`: Run on Windows after restore to verify restored paths, counts, package metadata, selected chats, thread index readiness, restored projects, and app project registration readiness.
 - `scripts/verify_mac_codex_restore.sh`: Run on Mac after restore to verify restored paths, checksums, selected chats, forbidden-file counts, and restored project folders.
 - `scripts/inspect_claude_agent_sources.py`: Read-only detector for Claude Code CLI and Claude Desktop agent history sources, including Windows free-account/Pro-Max entitlement failures.
-- `scripts/export_claude_to_codex_handoff.py`: Converts real Claude JSONL transcripts into a Codex-readable handoff folder.
+- `scripts/export_claude_to_codex_handoff.py`: Converts real Claude JSONL transcripts, Claude skills, and project folders into a Codex-readable handoff folder.
 - `scripts/verify_agent_bridge_handoff.py`: Verifies the generated Claude-to-Codex handoff folder.
 
 ## Handoff Checklist

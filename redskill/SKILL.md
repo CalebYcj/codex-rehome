@@ -58,9 +58,13 @@ python .\scripts\inspect_claude_agent_sources.py --json
 ```powershell
 python .\scripts\export_claude_to_codex_handoff.py `
   --source "<claude-jsonl-file-or-session-directory>" `
+  --skills-source "$env:USERPROFILE\.claude\skills" `
+  --project-source "<Claude 实际操作过的项目文件夹>" `
   --out "$env:USERPROFILE\Documents" `
   --title "Claude To Codex Handoff"
 ```
+
+这个 handoff 可以同时包含 Claude 对话 transcript、Claude skills 和 Claude 实际操作过的项目文件。它是给 Codex 读取并继续工作的交接包，不是把 Claude 会话伪装成 Codex 左侧栏原生历史。
 
 验收：
 

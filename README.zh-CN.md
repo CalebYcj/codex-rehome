@@ -294,6 +294,8 @@ python .\codex-rehome\scripts\inspect_claude_agent_sources.py --json
 ```powershell
 python .\codex-rehome\scripts\export_claude_to_codex_handoff.py `
   --source "<claude-jsonl-file-or-session-directory>" `
+  --skills-source "$env:USERPROFILE\.claude\skills" `
+  --project-source "<Claude 实际操作过的项目文件夹>" `
   --out "$env:USERPROFILE\Documents" `
   --title "Claude To Codex Handoff"
 ```
@@ -305,6 +307,8 @@ python .\codex-rehome\scripts\verify_agent_bridge_handoff.py "<handoff-folder>" 
 ```
 
 最后用 Codex 打开生成的 handoff 文件夹，先让 Codex 读取 `next-steps-for-codex.md`。
+
+这个 handoff 可以同时包含三层：Claude transcript JSONL、Claude skills 文件夹、Claude 实际操作过的项目文件。它不会把 Claude 会话伪装成 Codex 左侧栏原生历史，而是生成一个 Codex 可读、可继续工作的项目交接包。
 
 如果探测结果是 `installed_but_no_entitled_claude_code_sessions`，代表 Claude 已安装，但当前账号没有可用 Claude Code 会话。免费 Claude 账号常见表现就是日志里出现 `Claude Code requires a Pro or Max subscription`。这种情况下没有真实 Claude Code 历史可迁移。
 

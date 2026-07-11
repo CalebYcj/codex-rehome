@@ -115,6 +115,84 @@ def inspect_root(root: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def skill_candidate_roots() -> list[dict[str, Any]]:
+    home = Path.home()
+    appdata = env_path("APPDATA")
+    localappdata = env_path("LOCALAPPDATA")
+    roots: list[dict[str, Any]] = [
+        {
+            "kind": "claude_user_skills",
+            "path": home / ".claude" / "skills",
+            "notes": "Claude user skill folders.",
+        }
+    ]
+    if appdata:
+        roots.append(
+            {
+                "kind": "claude_desktop_agent_skills",
+                "path": appdata / "Claude" / "local-agent-mode-sessions",
+                "notes": "Claude Desktop local agent mode skill cache.",
+            }
+        )
+    if localappdata:
+        packages = localappdata / "Packages"
+        if packages.exists():
+            for package in packages.glob("Claude_*"):
+                roots.append(
+                    {
+                        "kind": "msix_claude_agent_skills",
+                        "path": package
+                        / "LocalCache"
+                        / "Roaming"
+                        / "Claude"
+                        / "local-agent-mode-sessions",
+                        "notes": "MSIX-virtualized Claude Desktop skill cache.",
+                    }
+                )
+    return roots
+
+
+def find_skill_dirs(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    skills: list[Path] = []
+    for current, dirs, files in os.walk(root, followlinks=True):
+        current_path = Path(current)
+        lower_parts = {part.lower() for part in current_path.parts}
+        if lower_parts & {"node_modules", ".git", ".venv", "venv", "__pycache__"}:
+            dirs[:] = []
+            continue
+        if "SKILL.md" in files:
+            skills.append(current_path)
+            dirs[:] = []
+    skills.sort(key=lambda p: str(p).lower())
+    return skills
+
+
+def inspect_skill_root(root: dict[str, Any]) -> dict[str, Any]:
+    path = Path(root["path"])
+    skills = find_skill_dirs(path)
+    return {
+        "kind": root["kind"],
+        "path": str(path),
+        "exists": path.exists(),
+        "notes": root["notes"],
+        "skill_count": len(skills),
+        "recent_skills": [
+            {
+                "name": p.name,
+                "path": str(p),
+                "modified": int((p / "SKILL.md").stat().st_mtime),
+            }
+            for p in sorted(
+                skills,
+                key=lambda p: (p / "SKILL.md").stat().st_mtime,
+                reverse=True,
+            )[:20]
+        ],
+    }
+
+
 def log_candidates() -> list[Path]:
     out: list[Path] = []
     appdata = env_path("APPDATA")
@@ -179,6 +257,8 @@ def inspect_cct() -> dict[str, Any]:
 def build_report() -> dict[str, Any]:
     sources = [inspect_root(root) for root in candidate_roots()]
     exportable = sum(source["jsonl_count"] for source in sources)
+    skill_sources = [inspect_skill_root(root) for root in skill_candidate_roots()]
+    skill_count = sum(source["skill_count"] for source in skill_sources)
     logs = inspect_logs()
     if exportable:
         status = "exportable_transcripts_found"
@@ -192,6 +272,9 @@ def build_report() -> dict[str, Any]:
         "source_count": len(sources),
         "exportable_jsonl_count": exportable,
         "sources": sources,
+        "skill_source_count": len(skill_sources),
+        "exportable_skill_count": skill_count,
+        "skill_sources": skill_sources,
         "logs": logs,
         "optional_cct_backend": inspect_cct(),
     }
@@ -200,6 +283,7 @@ def build_report() -> dict[str, Any]:
 def print_text(report: dict[str, Any]) -> None:
     print(f"Status: {report['status']}")
     print(f"Exportable Claude JSONL transcripts: {report['exportable_jsonl_count']}")
+    print(f"Exportable Claude skills: {report['exportable_skill_count']}")
     if report["logs"]["has_pro_or_max_required_error"]:
         print("Claude Code entitlement: blocked by Pro/Max requirement")
     print("Sources:")

@@ -351,6 +351,8 @@ If the result says `exportable_transcripts_found`, export a handoff:
 ```powershell
 python .\codex-rehome\scripts\export_claude_to_codex_handoff.py `
   --source "<claude-jsonl-file-or-session-directory>" `
+  --skills-source "$env:USERPROFILE\.claude\skills" `
+  --project-source "<project-folder-Claude-worked-on>" `
   --out "$env:USERPROFILE\Documents" `
   --title "Claude To Codex Handoff"
 ```
@@ -362,6 +364,8 @@ python .\codex-rehome\scripts\verify_agent_bridge_handoff.py "<handoff-folder>" 
 ```
 
 Open the generated handoff folder in Codex and ask Codex to read `next-steps-for-codex.md` first.
+
+The handoff can include three layers: Claude transcript JSONL, Claude skill folders, and project files. Claude sessions are not restored as native Codex sidebar threads; Codex receives a readable project handoff and can continue from the copied project folder.
 
 Important boundary: if the detector reports `installed_but_no_entitled_claude_code_sessions`, Claude is installed but the current account does not have usable Claude Code sessions. On a free Claude account this commonly appears as `Claude Code requires a Pro or Max subscription`. In that case, there is no real local Claude Code history to migrate yet.
 
