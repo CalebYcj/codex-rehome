@@ -36,4 +36,10 @@ foreach ($Phrase in @("D:\Codex-Rehome-Backup", "Red Skill", "~/.codex", "Codex 
     }
 }
 
+foreach ($UnsafePlaceholder in @("<project>", "<restored-project-path>")) {
+    if ($Chinese.Contains($UnsafePlaceholder) -or $English.Contains($UnsafePlaceholder)) {
+        throw "README contains a placeholder GitHub may render as HTML: $UnsafePlaceholder"
+    }
+}
+
 Write-Output "PASS bilingual README contract"

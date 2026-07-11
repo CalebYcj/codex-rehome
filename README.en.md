@@ -70,7 +70,7 @@ A visible project restore has four layers:
 3. Make restored conversations discoverable through the thread index and state.
 4. Reopen/register restored workspaces through Codex Desktop's official project entry.
 
-File copy alone does not guarantee sidebar visibility. The restore workflow attempts `codex app <restored-project-path>` for each restored project. If operating-system permissions block it, reopen the restored folder manually in Codex Desktop and rerun verification.
+File copy alone does not guarantee sidebar visibility. The restore workflow attempts `codex app RESTORED_PROJECT_PATH` for each restored project. If operating-system permissions block it, reopen the restored folder manually in Codex Desktop and rerun verification.
 
 ## Important limits
 
@@ -107,7 +107,7 @@ Give the repository URL directly to Codex, or place the `codex-rehome/` folder a
 For project-local installation:
 
 ```text
-<project>/.agents/skills/codex-rehome
+PROJECT_PATH/.agents/skills/codex-rehome
 ```
 
 The complete agent workflow is in [codex-rehome/SKILL.md](codex-rehome/SKILL.md).

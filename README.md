@@ -97,7 +97,7 @@ Codex 会检查本机数据、让你选择内容并生成私人迁移 ZIP。
 也可以放到项目级目录：
 
 ```text
-<project>/.agents/skills/codex-rehome
+PROJECT_PATH/.agents/skills/codex-rehome
 ```
 
 Agent 的完整执行规则位于 [codex-rehome/SKILL.md](codex-rehome/SKILL.md)。
