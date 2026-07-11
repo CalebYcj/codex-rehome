@@ -1,23 +1,22 @@
-# Codex Rehome - 在 Mac 和 Windows 之间迁移 OpenAI Codex Desktop
+# Codex Rehome（Codex 搬家）
 
-Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之间迁移 OpenAI Codex Desktop。它帮助用户和 AI agent 打包、传输、恢复并验证 Codex 对话、sessions、记忆、skills、plugins、MCP/connectors、生成图片、项目文件夹、路径映射和本地协作现场。
+Codex Rehome 是一个迁移 Codex Desktop 本地工作台的开源 Skill。它支持 Windows ↔ Mac、同系统换机，以及重装系统前后的备份恢复。
 
-新版也开始加入 **Claude Code -> Codex Bridge**：如果本机存在真实 Claude Code / Claude Desktop agent transcript，可以把 Claude 侧项目历史整理成 Codex 可读的交接包。它不是把 Claude 对话原样恢复成 Codex 左侧栏历史，而是生成一个 Codex 可以打开、阅读和继续工作的项目交接文件夹。
+它迁移的是 Codex 对话、项目记录、Skills、Plugins、本地索引、生成物，以及你指定的项目文件。项目文件不属于 Codex 本地数据，需要明确选择后才会加入迁移包。
 
-它支持四种方向：
+## 最简单的用法
 
-- Mac 转 Windows
-- Windows 转 Mac
-- Windows 转 Windows
-- Mac 转 Mac
-- 同一台电脑重装系统前备份，重装后恢复
-- Claude Code / Claude Desktop agent 历史转 Codex 项目交接包
+1. **旧电脑**：把本仓库链接交给 Codex，告诉它使用 Codex Rehome 打包需要迁移的数据。
+2. **传输**：把生成的压缩包传到新电脑。
+3. **新电脑**：把压缩包和本仓库链接交给 Codex，让它恢复数据、更新路径、重新打开项目并检查结果。
 
-如果你正在搜索「Codex Mac 迁移 Windows」「Codex Windows 迁移 Mac」「Codex 对话迁移」「Codex sessions 备份恢复」「Codex skill 迁移工具」，这个项目就是为这个场景做的。
+一句话版本：旧电脑上的 Codex 按 Codex Rehome 的规则打包；你负责传输压缩包；新电脑上的 Codex 按同一套规则恢复和检查。
 
-在 GitHub 里直接搜索 `codex-rehome` 就能找到。
+## 重要边界
 
-这个项目不是普通的文件备份工具，而是一个面向 AI agent 的 Codex skill：目标是迁移“用户和 AI 的协作现场”。
+- 这不是 OpenAI 官方云同步，迁移压缩包由你自己传输。
+- 跨系统后，旧对话可以继续作为历史上下文；真正继续工作时，建议从恢复后的项目文件夹重新打开。
+- 登录状态、Cookies、API Key、`.env`、私钥、`.git`、`node_modules` 和虚拟环境默认不会迁移。
 
 ## 核心经验
 
@@ -36,28 +35,9 @@ Codex Rehome 是一个开源 Codex skill，用来在 macOS 和 Windows 电脑之
 
 Windows 端也需要同类官方打开 workspace 机制。Windows 恢复脚本在传入 `-RestoreProjects` 后会尝试执行 `codex app <恢复后的项目路径>`；如果 Windows packaged app 权限阻止 CLI 调用，就从 Codex Desktop 里手动重新打开恢复后的项目文件夹，再跑 verifier。
 
-## 普通用户怎么用
-
-你可以把这个 GitHub 链接，或者这段 README 的截图，直接发给旧电脑和新电脑上的 AI/Codex。
-
-1. 旧电脑：让 AI 使用 `codex-rehome` 帮你打包旧电脑上的 Codex 数据。它会帮你确认要带走哪些对话、哪些项目文件夹，然后生成一个私密 zip。
-2. 中间传输：你把这个 zip 通过飞书、网盘、移动硬盘、局域网共享等方式发到新电脑。不要把 zip 公开发布。
-3. 新电脑：先安装并登录 Codex。然后把 zip 丢给新电脑上的 AI/Codex，让它帮你解压、运行恢复脚本、把旧路径映射成新电脑路径、合并对话索引、恢复项目文件夹，并把项目注册/打开到 Codex Desktop 里。
-4. 最后检查：让 AI 跑 verifier，告诉你 sessions、selected chats、项目文件夹、敏感文件排除、以及 Codex 左侧项目注册是否正常。
-
-一句话版本：旧电脑的 AI 负责打包，你负责把 zip 传过去，新电脑的 AI 负责恢复和检查。
-
-Claude Code 转 Codex 时，流程更像“交接”：
-
-1. 先让 AI 检查本机是否真的有 Claude Code transcript。
-2. 如果有，就导出成 Codex handoff 项目。
-3. 用 Codex 打开这个 handoff 项目，让 Codex 读取 Claude 的历史上下文继续做。
-
-如果只是安装了 Claude Desktop 免费账号，但日志里显示 `Claude Code requires a Pro or Max subscription`，说明当前机器没有真实可导出的 Claude Code 会话。这个状态应该明确告诉用户，不能假装迁移成功。
-
 ## 小红书 Red Skill 版本
 
-仓库提供了一个中文优先的 Red Skill 版本。用户安装后不需要先理解命令，只要告诉 Agent 自己处于“原电脑”“新电脑”还是“准备重装系统”，Agent 就会进入对应流程。
+仓库提供了中文优先的 Red Skill「Codex 搬家」。用户安装后不需要先理解命令，只要告诉 Agent 自己处于“原电脑”“新电脑”还是“准备重装系统”，Agent 就会进入对应流程。
 
 - Red Skill 源文件：[redskill/SKILL.md](redskill/SKILL.md)
 - 可分发压缩包：`codex-rehome-redskill.zip`

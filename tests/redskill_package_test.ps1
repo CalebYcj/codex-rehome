@@ -34,11 +34,22 @@ try {
     }
 
     $uploadMetadata = Get-Content -LiteralPath $uploadMetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $expectedChineseName = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Q29kZXgg5pCs5a62'))
     if ($uploadMetadata.name -ne 'Codex Rehome') { throw 'Upload metadata name is incorrect' }
+    if ($uploadMetadata.title -ne $expectedChineseName) { throw 'Upload metadata title must match the Chinese public name' }
     if ($uploadMetadata.source_type -ne 'original') { throw 'Upload metadata must mark the Skill as original' }
     if ($uploadMetadata.repository -ne 'https://github.com/CalebYcj/codex-rehome') { throw 'Upload metadata repository is incorrect' }
     if ([string]::IsNullOrWhiteSpace($uploadMetadata.title) -or [string]::IsNullOrWhiteSpace($uploadMetadata.description)) {
         throw 'Upload metadata title and description are required'
+    }
+
+    $agentMetadataPath = Join-Path $skillRoot 'agents\openai.yaml'
+    if (-not (Test-Path -LiteralPath $agentMetadataPath -PathType Leaf)) {
+        throw 'Red Skill package is missing agents/openai.yaml'
+    }
+    $agentMetadata = Get-Content -LiteralPath $agentMetadataPath -Raw -Encoding UTF8
+    if (-not $agentMetadata.Contains(('display_name: "' + $expectedChineseName + '"'))) {
+        throw 'Agent display name must match the Chinese public name'
     }
 
     $skillText = Get-Content -LiteralPath $skillFile -Raw -Encoding UTF8

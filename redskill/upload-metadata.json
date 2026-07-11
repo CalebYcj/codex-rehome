@@ -1,7 +1,7 @@
 {
   "name": "Codex Rehome",
-  "title": "Codex 换电脑搬家",
-  "description": "把这个 Skill 交给原电脑上的 Codex，它会帮你打包对话、skills、plugins 和指定项目；把 ZIP 传到新电脑后，再让新电脑上的 Codex 合并恢复、映射路径、重新打开项目并检查结果。支持 Mac 与 Windows 四向迁移，也支持重装系统前备份。",
+  "title": "Codex 搬家",
+  "description": "换电脑、离职交接或重装系统时，用「Codex 搬家」迁移 Codex 本地工作台。旧电脑上的 Codex 按规则打包对话、Skills、Plugins 和指定项目；新电脑上的 Codex 合并恢复、映射路径、重新打开项目并检查。支持 Mac 与 Windows 四向迁移。",
   "source_type": "original",
   "repository": "https://github.com/CalebYcj/codex-rehome",
   "suggested_tags": [
