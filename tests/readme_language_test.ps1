@@ -20,6 +20,9 @@ if (-not $English.Contains("](README.md)")) {
 if ($Chinese -match "## English Overview") {
     throw "Chinese README still contains the appended English overview"
 }
+if (-not $Chinese.Contains("## For AI Agents") -or -not $English.Contains("## For AI Agents")) {
+    throw "Both READMEs must expose a concise For AI Agents section"
+}
 if ($Chinese.Length -ge 12000) {
     throw "Chinese README is still too long: $($Chinese.Length) characters"
 }

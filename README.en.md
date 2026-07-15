@@ -112,6 +112,10 @@ PROJECT_PATH/.agents/skills/codex-rehome
 
 The complete agent workflow is in [codex-rehome/SKILL.md](codex-rehome/SKILL.md).
 
+## For AI Agents
+
+Treat [codex-rehome/SKILL.md](codex-rehome/SKILL.md) as the execution source of truth. First identify whether the user is at the source, transfer, target, or reinstall stage and confirm both operating systems. Default to standard mode and merge-safe restore; select project folders separately, reopen/register restored projects, and run the verifier. Never migrate login or sensitive files by default.
+
 ## Documentation
 
 - [Choose a Mac/Windows migration direction](docs/migrate-codex-between-mac-and-windows.md)

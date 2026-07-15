@@ -102,6 +102,10 @@ PROJECT_PATH/.agents/skills/codex-rehome
 
 Agent 的完整执行规则位于 [codex-rehome/SKILL.md](codex-rehome/SKILL.md)。
 
+## For AI Agents（给 AI Agent）
+
+以 [codex-rehome/SKILL.md](codex-rehome/SKILL.md) 为执行真源。先判断用户处于原电脑、传输、新电脑还是重装系统阶段，并确认源/目标系统。默认使用 standard 模式和合并恢复；项目文件需单独选择，恢复后必须重新打开/注册项目并运行验证器。不要默认迁移登录信息或其他敏感文件。
+
 ## 详细文档
 
 - [四种 Mac/Windows 迁移方向](docs/migrate-codex-between-mac-and-windows.md)
