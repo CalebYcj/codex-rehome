@@ -156,6 +156,7 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
             "conversation_title",
         ),
         (ReferenceRewriteKind::ProjectPath, "project_path"),
+        (ReferenceRewriteKind::SessionPath, "session_path"),
     ];
     let recovery_statuses = [
         (RecoveryStatus::Prepared, "prepared"),

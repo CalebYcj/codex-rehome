@@ -39,6 +39,8 @@ type SessionDecision = (
     Vec<ReferenceRewrite>,
 );
 
+type RewriteMap = BTreeMap<(Uuid, String, ReferenceRewriteKind, String, String), ReferenceRewrite>;
+
 pub fn build_restore_plan(
     package: &PackagePreview,
     target: &TargetInventory,
@@ -134,10 +136,12 @@ pub fn build_restore_plan(
             .unwrap_or_else(|| original_target.clone());
         let base_rewrites = conversation_rewrites(
             payloads,
+            &verified.planning_payloads,
             conversation,
             &package.manifest.projects,
             &project_targets,
             None,
+            &existing_target,
         )?;
         let base_hash =
             rewritten_content_hash(source_bytes, &base_rewrites, &conversation.archive_path)?;
@@ -178,6 +182,7 @@ pub fn build_restore_plan(
                 source_bytes,
                 &original_target,
                 payloads,
+                &verified.planning_payloads,
                 &package.manifest.projects,
                 &project_targets,
                 &target_conversations,
@@ -195,6 +200,7 @@ pub fn build_restore_plan(
         for rewrite in selected_rewrites {
             insert_rewrite(
                 &mut rewrites,
+                rewrite.source_task_id,
                 rewrite.package_source,
                 rewrite.kind,
                 rewrite.from,
@@ -594,6 +600,7 @@ fn plan_branch_session(
     source_bytes: &[u8],
     original_target: &Path,
     payloads: &BTreeMap<String, VerifiedPayload>,
+    planning_payloads: &BTreeMap<String, Vec<u8>>,
     projects: &[crate::core::models::ProjectEntry],
     project_targets: &HashMap<Uuid, PathBuf>,
     target_conversations: &HashMap<Uuid, &crate::core::models::ConversationEntry>,
@@ -608,21 +615,22 @@ fn plan_branch_session(
         if source_ids.contains(&candidate) || planned_ids.contains(&candidate) {
             continue;
         }
-        let candidate_rewrites = conversation_rewrites(
-            payloads,
-            conversation,
-            projects,
-            project_targets,
-            Some((candidate, &title)),
-        )?;
-        let expected_hash = rewritten_content_hash(
-            source_bytes,
-            &candidate_rewrites,
-            &conversation.archive_path,
-        )?;
-
         if let Some(existing) = target_conversations.get(&candidate) {
             let existing_target = codex_target_path(codex_home, &existing.archive_path, target_os)?;
+            let candidate_rewrites = conversation_rewrites(
+                payloads,
+                planning_payloads,
+                conversation,
+                projects,
+                project_targets,
+                Some((candidate, &title)),
+                &existing_target,
+            )?;
+            let expected_hash = rewritten_content_hash(
+                source_bytes,
+                &candidate_rewrites,
+                &conversation.archive_path,
+            )?;
             if let TargetState::File(hash) = target_state(&existing_target, target_os)? {
                 if hash.eq_ignore_ascii_case(&expected_hash) {
                     return Ok((
@@ -641,6 +649,20 @@ fn plan_branch_session(
         }
 
         let candidate_target = branch_session_target(original_target, candidate, target_os)?;
+        let candidate_rewrites = conversation_rewrites(
+            payloads,
+            planning_payloads,
+            conversation,
+            projects,
+            project_targets,
+            Some((candidate, &title)),
+            &candidate_target,
+        )?;
+        let expected_hash = rewritten_content_hash(
+            source_bytes,
+            &candidate_rewrites,
+            &conversation.archive_path,
+        )?;
         let state = target_state(&candidate_target, target_os)?;
         if let TargetState::File(hash) = &state {
             if hash.eq_ignore_ascii_case(&expected_hash) {
@@ -686,10 +708,12 @@ fn derive_branch_id(package_id: Uuid, source_task_id: Uuid, attempt: u32) -> Uui
 
 fn conversation_rewrites(
     payloads: &BTreeMap<String, VerifiedPayload>,
+    planning_payloads: &BTreeMap<String, Vec<u8>>,
     conversation: &crate::core::models::ConversationEntry,
     projects: &[crate::core::models::ProjectEntry],
     project_targets: &HashMap<Uuid, PathBuf>,
     branch: Option<(Uuid, &str)>,
+    target_session: &Path,
 ) -> Result<Vec<ReferenceRewrite>, RehomeError> {
     let mut rewrites = BTreeMap::new();
     if let Some((target_task_id, target_title)) = branch {
@@ -707,6 +731,12 @@ fn conversation_rewrites(
         conversation,
         projects,
         project_targets,
+    )?;
+    add_session_path_rewrites(
+        &mut rewrites,
+        planning_payloads,
+        conversation.task_id,
+        target_session,
     )?;
     Ok(rewrites.into_values().collect())
 }
@@ -743,12 +773,28 @@ pub(crate) fn rewrite_jsonl_payload(
         }
         let mut value: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| package_invalid(format!("session JSONL is invalid: {error}")))?;
-        rewrite_json_value(&mut value, &selected);
+        if source == SESSION_INDEX_SOURCE {
+            rewrite_scoped_metadata_row(&mut value, &selected);
+        } else {
+            rewrite_json_value(&mut value, &selected);
+        }
         serde_json::to_writer(&mut output, &value)
             .map_err(|error| package_invalid(format!("could not encode session JSONL: {error}")))?;
         output.push(b'\n');
     }
     Ok(output)
+}
+
+fn rewrite_scoped_metadata_row(value: &mut serde_json::Value, rewrites: &[&ReferenceRewrite]) {
+    let Some(source_id) = metadata_id(value) else {
+        return;
+    };
+    let scoped = rewrites
+        .iter()
+        .copied()
+        .filter(|rewrite| rewrite.source_task_id.to_string() == source_id)
+        .collect::<Vec<_>>();
+    rewrite_json_value(value, &scoped);
 }
 
 fn rewrite_json_value(value: &mut serde_json::Value, rewrites: &[&ReferenceRewrite]) {
@@ -791,10 +837,12 @@ fn rewrite_known_metadata_fields(
                             && matches!(field.as_str(), "id" | "thread_id" | "conversation_id")
                     }
                     ReferenceRewriteKind::ConversationTitle => include_identity && field == "title",
-                    ReferenceRewriteKind::ProjectPath => matches!(
-                        field.as_str(),
-                        "project" | "project_path" | "cwd" | "rollout" | "rollout_path" | "path"
-                    ),
+                    ReferenceRewriteKind::ProjectPath => {
+                        matches!(field.as_str(), "project" | "project_path" | "cwd" | "path")
+                    }
+                    ReferenceRewriteKind::SessionPath => {
+                        matches!(field.as_str(), "rollout" | "rollout_path")
+                    }
                 }
         });
         if let Some(rewrite) = allowed {
@@ -817,10 +865,10 @@ fn rewrite_metadata_document(
     match &mut value {
         serde_json::Value::Array(values) => {
             for value in values {
-                rewrite_json_value(value, &selected);
+                rewrite_scoped_metadata_row(value, &selected);
             }
         }
-        serde_json::Value::Object(_) => rewrite_json_value(&mut value, &selected),
+        serde_json::Value::Object(_) => rewrite_scoped_metadata_row(&mut value, &selected),
         _ => return Err(package_invalid("bridge metadata JSON has an invalid shape")),
     }
     Ok(value)
@@ -855,8 +903,11 @@ fn ensure_target_hash(path: &Path, expected_hash: &str) -> Result<(), RehomeErro
 }
 
 fn jsonl_metadata_contains(current: &[u8], desired: &[u8]) -> Result<bool, RehomeError> {
-    let desired = jsonl_metadata_by_id(desired, true)?;
-    let current = jsonl_metadata_by_id(current, false)?;
+    let (desired, _) = jsonl_metadata_by_id(desired, true)?;
+    let (current, current_has_duplicates) = jsonl_metadata_by_id(current, false)?;
+    if current_has_duplicates {
+        return Ok(false);
+    }
     Ok(desired.iter().all(|(id, desired_value)| {
         current
             .get(id)
@@ -876,7 +927,7 @@ fn metadata_fields_match(current: &serde_json::Value, desired: &serde_json::Valu
 fn jsonl_metadata_by_id(
     bytes: &[u8],
     package_metadata: bool,
-) -> Result<BTreeMap<String, serde_json::Value>, RehomeError> {
+) -> Result<(BTreeMap<String, serde_json::Value>, bool), RehomeError> {
     let text = std::str::from_utf8(bytes).map_err(|_| {
         if package_metadata {
             package_invalid("session index is not UTF-8")
@@ -885,6 +936,7 @@ fn jsonl_metadata_by_id(
         }
     })?;
     let mut records = BTreeMap::new();
+    let mut has_duplicates = false;
     for line in text.lines().filter(|line| !line.is_empty()) {
         let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
             if package_metadata {
@@ -900,9 +952,16 @@ fn jsonl_metadata_by_id(
                 restore_failed("target session index entry is missing its conversation ID")
             }
         })?;
-        records.insert(id.to_owned(), value);
+        if records.insert(id.to_owned(), value).is_some() {
+            if package_metadata {
+                return Err(package_invalid(
+                    "session index contains duplicate conversation IDs",
+                ));
+            }
+            has_duplicates = true;
+        }
     }
-    Ok(records)
+    Ok((records, has_duplicates))
 }
 
 fn metadata_id(value: &serde_json::Value) -> Option<&str> {
@@ -1131,7 +1190,7 @@ fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 }
 
 fn add_branch_rewrites(
-    rewrites: &mut BTreeMap<(String, ReferenceRewriteKind, String, String), ReferenceRewrite>,
+    rewrites: &mut RewriteMap,
     payloads: &BTreeMap<String, VerifiedPayload>,
     conversation: &crate::core::models::ConversationEntry,
     target_task_id: Uuid,
@@ -1140,6 +1199,7 @@ fn add_branch_rewrites(
     for source in reference_sources(payloads, &conversation.archive_path) {
         insert_rewrite(
             rewrites,
+            conversation.task_id,
             source.clone(),
             ReferenceRewriteKind::ConversationId,
             conversation.task_id.to_string(),
@@ -1147,6 +1207,7 @@ fn add_branch_rewrites(
         );
         insert_rewrite(
             rewrites,
+            conversation.task_id,
             source,
             ReferenceRewriteKind::ConversationTitle,
             conversation.title.clone(),
@@ -1156,7 +1217,7 @@ fn add_branch_rewrites(
 }
 
 fn add_project_path_rewrites(
-    rewrites: &mut BTreeMap<(String, ReferenceRewriteKind, String, String), ReferenceRewrite>,
+    rewrites: &mut RewriteMap,
     payloads: &BTreeMap<String, VerifiedPayload>,
     conversation: &crate::core::models::ConversationEntry,
     projects: &[crate::core::models::ProjectEntry],
@@ -1178,6 +1239,7 @@ fn add_project_path_rewrites(
     for source in reference_sources(payloads, &conversation.archive_path) {
         insert_rewrite(
             rewrites,
+            conversation.task_id,
             source,
             ReferenceRewriteKind::ProjectPath,
             project.source_path.clone(),
@@ -1185,6 +1247,68 @@ fn add_project_path_rewrites(
         );
     }
     Ok(())
+}
+
+fn add_session_path_rewrites(
+    rewrites: &mut RewriteMap,
+    planning_payloads: &BTreeMap<String, Vec<u8>>,
+    source_task_id: Uuid,
+    target_session: &Path,
+) -> Result<(), RehomeError> {
+    let target = target_path_text(target_session)?.to_owned();
+    for source in [SESSION_INDEX_SOURCE, THREAD_METADATA_SOURCE] {
+        let Some(bytes) = planning_payloads.get(source) else {
+            continue;
+        };
+        for source_rollout in metadata_rollout_paths(bytes, source, source_task_id)? {
+            insert_rewrite(
+                rewrites,
+                source_task_id,
+                source.to_owned(),
+                ReferenceRewriteKind::SessionPath,
+                source_rollout,
+                target.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn metadata_rollout_paths(
+    bytes: &[u8],
+    source: &str,
+    source_task_id: Uuid,
+) -> Result<Vec<String>, RehomeError> {
+    let values = if source == SESSION_INDEX_SOURCE {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| package_invalid("session index is not UTF-8"))?;
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| {
+                    package_invalid(format!("session index JSONL is invalid: {error}"))
+                })
+            })
+            .collect::<Result<Vec<serde_json::Value>, RehomeError>>()?
+    } else {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|error| package_invalid(format!("bridge metadata JSON is invalid: {error}")))?
+            .as_array()
+            .cloned()
+            .ok_or_else(|| package_invalid("thread metadata must be a JSON array"))?
+    };
+    let source_task_id = source_task_id.to_string();
+    Ok(values
+        .iter()
+        .filter(|value| metadata_id(value) == Some(source_task_id.as_str()))
+        .filter_map(|value| {
+            value
+                .as_object()
+                .and_then(|object| object.get("rollout_path"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect())
 }
 
 fn reference_sources<'a>(
@@ -1202,19 +1326,21 @@ fn reference_sources<'a>(
 }
 
 fn insert_rewrite(
-    rewrites: &mut BTreeMap<(String, ReferenceRewriteKind, String, String), ReferenceRewrite>,
+    rewrites: &mut RewriteMap,
+    source_task_id: Uuid,
     package_source: String,
     kind: ReferenceRewriteKind,
     from: String,
     to: String,
 ) {
     let rewrite = ReferenceRewrite {
+        source_task_id,
         package_source: package_source.clone(),
         kind,
         from: from.clone(),
         to: to.clone(),
     };
-    rewrites.insert((package_source, kind, from, to), rewrite);
+    rewrites.insert((source_task_id, package_source, kind, from, to), rewrite);
 }
 
 fn is_package_only_metadata(source: &str) -> bool {
@@ -1335,31 +1461,42 @@ mod tests {
         let source = "codex/sessions/thread.jsonl";
         let old_id = "11111111-1111-4111-8111-111111111111";
         let new_id = "22222222-2222-4222-8222-222222222222";
+        let source_task_id = Uuid::parse_str(old_id).unwrap();
         let rewrites = vec![
             ReferenceRewrite {
+                source_task_id,
                 package_source: source.into(),
                 kind: ReferenceRewriteKind::ProjectPath,
                 from: "C:/old".into(),
                 to: "/Users/new".into(),
             },
             ReferenceRewrite {
+                source_task_id,
                 package_source: source.into(),
                 kind: ReferenceRewriteKind::ConversationId,
                 from: old_id.into(),
                 to: new_id.into(),
             },
             ReferenceRewrite {
+                source_task_id,
                 package_source: source.into(),
                 kind: ReferenceRewriteKind::ConversationTitle,
                 from: "Old title".into(),
                 to: "New title".into(),
             },
+            ReferenceRewrite {
+                source_task_id,
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::SessionPath,
+                from: "C:/old/session.jsonl".into(),
+                to: "/Users/new/session.jsonl".into(),
+            },
         ];
         let bytes = format!(
             concat!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{old_id}\",\"title\":\"Old title\",\"cwd\":\"C:/old\"}}}}\n",
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{old_id}\",\"title\":\"Old title\",\"cwd\":\"C:/old\",\"rollout_path\":\"C:/old/session.jsonl\"}}}}\n",
                 "{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"C:/old\"}}}}\n",
-                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Old title\"}},{{\"type\":\"input_text\",\"text\":\"{old_id}\"}},{{\"type\":\"input_text\",\"text\":\"C:/old\"}}]}}}}\n",
+                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Old title\"}},{{\"type\":\"input_text\",\"text\":\"{old_id}\"}},{{\"type\":\"input_text\",\"text\":\"C:/old\"}},{{\"type\":\"input_text\",\"text\":\"C:/old/session.jsonl\"}}]}}}}\n",
                 "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"Old title\"}},{{\"type\":\"output_text\",\"text\":\"{old_id}\"}},{{\"type\":\"output_text\",\"text\":\"C:/old\"}}]}}}}\n",
                 "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"output\":\"C:/old\",\"id\":\"{old_id}\",\"title\":\"Old title\"}}}}\n"
             ),
@@ -1376,10 +1513,18 @@ mod tests {
         assert_eq!(lines[0]["payload"]["id"], new_id);
         assert_eq!(lines[0]["payload"]["title"], "New title");
         assert_eq!(lines[0]["payload"]["cwd"], "/Users/new");
+        assert_eq!(
+            lines[0]["payload"]["rollout_path"],
+            "/Users/new/session.jsonl"
+        );
         assert_eq!(lines[1]["payload"]["cwd"], "/Users/new");
         assert_eq!(lines[2]["payload"]["content"][0]["text"], "Old title");
         assert_eq!(lines[2]["payload"]["content"][1]["text"], old_id);
         assert_eq!(lines[2]["payload"]["content"][2]["text"], "C:/old");
+        assert_eq!(
+            lines[2]["payload"]["content"][3]["text"],
+            "C:/old/session.jsonl"
+        );
         assert_eq!(lines[3]["payload"]["content"][0]["text"], "Old title");
         assert_eq!(lines[3]["payload"]["content"][1]["text"], old_id);
         assert_eq!(lines[3]["payload"]["content"][2]["text"], "C:/old");

@@ -155,10 +155,12 @@ pub enum ReferenceRewriteKind {
     ConversationId,
     ConversationTitle,
     ProjectPath,
+    SessionPath,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReferenceRewrite {
+    pub source_task_id: Uuid,
     pub package_source: String,
     pub kind: ReferenceRewriteKind,
     pub from: String,

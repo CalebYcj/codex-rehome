@@ -23,8 +23,11 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipWriter};
 const PACKAGE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PROJECT_ID: &str = "22222222-2222-4222-8222-222222222222";
 const TASK_ID: &str = "11111111-1111-4111-8111-111111111111";
+const SECOND_PROJECT_ID: &str = "33333333-3333-4333-8333-333333333333";
+const SECOND_TASK_ID: &str = "44444444-4444-4444-8444-444444444444";
 const PROJECT_SOURCE: &str = "projects/22222222-2222-4222-8222-222222222222/files/README.md";
 const SESSION_SOURCE: &str = "codex/sessions/2026/07/22/thread.jsonl";
+const SOURCE_ROLLOUT_PATH: &str = "C:/Users/OldUser/.codex/sessions/2026/07/22/thread.jsonl";
 const INDEX_SOURCE: &str = "codex/session_index.jsonl";
 const THREADS_SOURCE: &str = "codex/metadata/threads.json";
 
@@ -187,6 +190,17 @@ fn branch_import_is_deterministic_and_exposes_every_package_reference_rewrite(
         id_sources,
         vec![THREADS_SOURCE, INDEX_SOURCE, SESSION_SOURCE]
     );
+    let session_path_rewrites = first
+        .reference_rewrites
+        .iter()
+        .filter(|rewrite| rewrite.kind == ReferenceRewriteKind::SessionPath)
+        .collect::<Vec<_>>();
+    assert_eq!(session_path_rewrites.len(), 2);
+    assert!(session_path_rewrites.iter().all(|rewrite| {
+        rewrite.source_task_id == source_task_id
+            && rewrite.from == SOURCE_ROLLOUT_PATH
+            && Path::new(&rewrite.to) == session.target
+    }));
     assert!(first.reference_rewrites.iter().all(|rewrite| {
         !rewrite.package_source.is_empty() && !rewrite.from.is_empty() && !rewrite.to.is_empty()
     }));
@@ -370,11 +384,158 @@ fn all_skipped_fully_registered_sessions_do_not_emit_bridge_metadata_operations(
             &fixture.projects_root.join("visual"),
         ),
     )?;
-    write_ready_bridge_metadata(&fixture, Uuid::parse_str(TASK_ID)?)?;
+    write_ready_bridge_metadata(
+        &fixture,
+        Uuid::parse_str(TASK_ID)?,
+        "Synthetic migration thread",
+        &target_session_path(&fixture),
+    )?;
 
     let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
 
     assert_eq!(plan.sessions[0].action, SessionAction::Skip);
+    assert!(!plan.operations.iter().any(|operation| {
+        matches!(
+            operation.package_source.as_str(),
+            INDEX_SOURCE | THREADS_SOURCE
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn repeated_branch_uses_its_derived_session_path_in_ready_bridge_metadata(
+) -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    fixture.target.conversations = vec![conversation(checksum(b"original target\n"))];
+    write_target_session(&fixture, b"original target\n")?;
+    let first = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    let branch = first.sessions[0].clone();
+    let rewritten = rewritten_session_bytes(
+        branch.target_task_id,
+        &branch.title,
+        &fixture.projects_root.join("visual"),
+    );
+    fs::create_dir_all(branch.target.parent().unwrap())?;
+    fs::write(&branch.target, &rewritten)?;
+    let branch_relative = branch
+        .target
+        .strip_prefix(&fixture.target.codex_home)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    fixture.target.conversations.push(ConversationEntry {
+        task_id: branch.target_task_id,
+        project_id: Some(Uuid::parse_str(PROJECT_ID)?),
+        title: branch.title.clone(),
+        updated_at: "2026-07-22T00:00:00Z".into(),
+        content_hash: checksum(&rewritten),
+        archive_path: format!("codex/{branch_relative}"),
+    });
+    write_ready_bridge_metadata(
+        &fixture,
+        branch.target_task_id,
+        &branch.title,
+        &branch.target,
+    )?;
+
+    let second = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(second.sessions[0].action, SessionAction::Skip);
+    assert_eq!(second.sessions[0].target, branch.target);
+    assert!(!second.operations.iter().any(|operation| {
+        matches!(
+            operation.package_source.as_str(),
+            INDEX_SOURCE | THREADS_SOURCE
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn stale_source_rollout_path_is_not_ready() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let incoming = incoming_session_bytes();
+    fixture.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(
+        &fixture,
+        &rewritten_session_bytes(
+            Uuid::parse_str(TASK_ID)?,
+            "Synthetic migration thread",
+            &fixture.projects_root.join("visual"),
+        ),
+    )?;
+    write_ready_bridge_metadata(
+        &fixture,
+        Uuid::parse_str(TASK_ID)?,
+        "Synthetic migration thread",
+        Path::new(SOURCE_ROLLOUT_PATH),
+    )?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::Skip);
+    assert_eq!(
+        operation_for(&plan.operations, INDEX_SOURCE).action,
+        ChangeKind::Update
+    );
+    assert_eq!(
+        operation_for(&plan.operations, THREADS_SOURCE).action,
+        ChangeKind::Update
+    );
+    Ok(())
+}
+
+#[test]
+fn duplicate_target_index_rows_plan_a_repair() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let incoming = incoming_session_bytes();
+    fixture.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(
+        &fixture,
+        &rewritten_session_bytes(
+            Uuid::parse_str(TASK_ID)?,
+            "Synthetic migration thread",
+            &fixture.projects_root.join("visual"),
+        ),
+    )?;
+    write_ready_bridge_metadata(
+        &fixture,
+        Uuid::parse_str(TASK_ID)?,
+        "Synthetic migration thread",
+        &target_session_path(&fixture),
+    )?;
+    let index_path = fixture.target.codex_home.join("session_index.jsonl");
+    let row = fs::read(&index_path)?;
+    fs::write(&index_path, [row.as_slice(), row.as_slice()].concat())?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::Skip);
+    assert_eq!(
+        operation_for(&plan.operations, INDEX_SOURCE).action,
+        ChangeKind::Update
+    );
+    assert!(!plan
+        .operations
+        .iter()
+        .any(|operation| operation.package_source == THREADS_SOURCE));
+    Ok(())
+}
+
+#[test]
+fn bridge_metadata_rewrites_are_scoped_before_shared_titles_and_paths() -> Result<(), Box<dyn Error>>
+{
+    let fixture = shared_metadata_fixture()?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert!(
+        plan.sessions
+            .iter()
+            .all(|session| session.action == SessionAction::Skip),
+        "{:?}",
+        plan.sessions
+    );
     assert!(!plan.operations.iter().any(|operation| {
         matches!(
             operation.package_source.as_str(),
@@ -905,6 +1066,245 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
     })
 }
 
+fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let package_path = temp.path().join("shared-metadata.rehome");
+    let codex_home = temp.path().join("target").join(".codex");
+    let projects_root = temp.path().join("target").join("projects");
+    fs::create_dir_all(&codex_home)?;
+    create_target_database(&codex_home.join("state_5.sqlite"))?;
+
+    let package_id = Uuid::parse_str(PACKAGE_ID)?;
+    let first_id = Uuid::parse_str(TASK_ID)?;
+    let second_id = Uuid::parse_str(SECOND_TASK_ID)?;
+    let first_project_id = Uuid::parse_str(PROJECT_ID)?;
+    let second_project_id = Uuid::parse_str(SECOND_PROJECT_ID)?;
+    let derived_id = Uuid::new_v5(&package_id, first_id.as_bytes());
+    let source_project = "C:/Users/OldUser/Documents/shared";
+    let first_source = "codex/sessions/2026/07/22/first.jsonl";
+    let second_source = "codex/sessions/2026/07/22/second.jsonl";
+    let first_rollout = "C:/Users/OldUser/.codex/sessions/2026/07/22/first.jsonl";
+    let second_rollout = "C:/Users/OldUser/.codex/sessions/2026/07/22/second.jsonl";
+    let source_session = |id: Uuid| {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "id": id.to_string(),
+            "title": "Shared title",
+            "cwd": source_project,
+        }))
+        .unwrap();
+        bytes.push(b'\n');
+        bytes
+    };
+    let first_bytes = source_session(first_id);
+    let second_bytes = source_session(second_id);
+    let conversation = |task_id, project_id, content_hash, archive_path: &str| ConversationEntry {
+        task_id,
+        project_id: Some(project_id),
+        title: "Shared title".into(),
+        updated_at: "2026-07-22T00:00:00Z".into(),
+        content_hash,
+        archive_path: archive_path.into(),
+    };
+    let projects = vec![
+        ProjectEntry {
+            project_id: first_project_id,
+            name: "first-project".into(),
+            source_path: source_project.into(),
+            archive_path: format!("projects/{first_project_id}/files"),
+            file_count: 1,
+            content_bytes: 6,
+            git_remote: None,
+            git_branch: None,
+            git_head: None,
+        },
+        ProjectEntry {
+            project_id: second_project_id,
+            name: "second-project".into(),
+            source_path: source_project.into(),
+            archive_path: format!("projects/{second_project_id}/files"),
+            file_count: 1,
+            content_bytes: 7,
+            git_remote: None,
+            git_branch: None,
+            git_head: None,
+        },
+    ];
+    let manifest = PackageManifest {
+        format: "codex-rehome".into(),
+        schema_version: 1,
+        package_id,
+        created_at: "2026-07-22T00:00:00Z".into(),
+        source_os: SourceOs::Windows,
+        source_arch: "x86_64".into(),
+        source_device_id: Uuid::nil(),
+        mode: PackageMode::Full,
+        parent_checkpoint: None,
+        counts: ContentCounts {
+            projects: 2,
+            project_files: 2,
+            conversations: 2,
+            sqlite_threads: 2,
+            ..ContentCounts::default()
+        },
+        projects,
+        conversations: vec![
+            conversation(
+                first_id,
+                first_project_id,
+                checksum(&first_bytes),
+                first_source,
+            ),
+            conversation(
+                second_id,
+                second_project_id,
+                checksum(&second_bytes),
+                second_source,
+            ),
+        ],
+        exclusions: ExclusionSummary::default(),
+    };
+    let source_rows = [
+        serde_json::json!({
+            "id": first_id.to_string(),
+            "title": "Shared title",
+            "cwd": source_project,
+            "rollout_path": first_rollout,
+        }),
+        serde_json::json!({
+            "id": second_id.to_string(),
+            "title": "Shared title",
+            "cwd": source_project,
+            "rollout_path": second_rollout,
+        }),
+    ];
+    let mut index = Vec::new();
+    for row in &source_rows {
+        serde_json::to_writer(&mut index, row)?;
+        index.push(b'\n');
+    }
+    let threads = serde_json::to_vec(&source_rows)?;
+    write_package(
+        &package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, threads.as_slice()),
+            (INDEX_SOURCE, index.as_slice()),
+            (first_source, first_bytes.as_slice()),
+            (second_source, second_bytes.as_slice()),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/files/a.txt",
+                b"first\n",
+            ),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+            (
+                "projects/33333333-3333-4333-8333-333333333333/files/b.txt",
+                b"second\n",
+            ),
+            (
+                "projects/33333333-3333-4333-8333-333333333333/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    let first_target = codex_home
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("22")
+        .join("first.jsonl");
+    let branch_target = first_target
+        .parent()
+        .unwrap()
+        .join(format!("{derived_id}.jsonl"));
+    let second_target = first_target.parent().unwrap().join("second.jsonl");
+    fs::create_dir_all(first_target.parent().unwrap())?;
+    fs::write(&first_target, b"conflicting original\n")?;
+    let first_project_target = projects_root.join("first-project");
+    let second_project_target = projects_root.join("second-project");
+    let branch_bytes =
+        rewritten_session_bytes(derived_id, "Shared title · ReHome", &first_project_target);
+    let second_target_bytes =
+        rewritten_session_bytes(second_id, "Shared title", &second_project_target);
+    fs::write(&branch_target, &branch_bytes)?;
+    fs::write(&second_target, &second_target_bytes)?;
+
+    let ready_rows = [
+        (
+            derived_id,
+            "Shared title · ReHome",
+            first_project_target.as_path(),
+            branch_target.as_path(),
+        ),
+        (
+            second_id,
+            "Shared title",
+            second_project_target.as_path(),
+            second_target.as_path(),
+        ),
+    ];
+    let mut ready_index = Vec::new();
+    let connection = Connection::open(codex_home.join("state_5.sqlite"))?;
+    for (id, title, cwd, rollout_path) in ready_rows {
+        serde_json::to_writer(
+            &mut ready_index,
+            &serde_json::json!({
+                "id": id.to_string(),
+                "title": title,
+                "cwd": cwd.to_string_lossy(),
+                "rollout_path": rollout_path.to_string_lossy(),
+            }),
+        )?;
+        ready_index.push(b'\n');
+        connection.execute(
+            "INSERT INTO threads (id, title, cwd, rollout_path) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id.to_string(),
+                title,
+                cwd.to_string_lossy().as_ref(),
+                rollout_path.to_string_lossy().as_ref()
+            ],
+        )?;
+    }
+    fs::write(codex_home.join("session_index.jsonl"), ready_index)?;
+    let target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![
+            conversation(
+                first_id,
+                first_project_id,
+                checksum(b"conflicting original\n"),
+                first_source,
+            ),
+            conversation(
+                derived_id,
+                first_project_id,
+                checksum(&branch_bytes),
+                &format!("codex/sessions/2026/07/22/{derived_id}.jsonl"),
+            ),
+            conversation(
+                second_id,
+                second_project_id,
+                checksum(&second_target_bytes),
+                second_source,
+            ),
+        ],
+    };
+    Ok(PlannerFixture {
+        _temp: temp,
+        preview: inspect_package(&package_path)?,
+        target,
+        projects_root,
+        project_target: PathBuf::new(),
+    })
+}
+
 fn write_project_preview_payloads(
     path: &Path,
     manifest: &PackageManifest,
@@ -950,12 +1350,15 @@ fn create_target_database(path: &Path) -> Result<(), Box<dyn Error>> {
 fn write_ready_bridge_metadata(
     fixture: &PlannerFixture,
     task_id: Uuid,
+    title: &str,
+    rollout_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let project_path = fixture.projects_root.join("visual");
     let ready_index = serde_json::to_vec(&serde_json::json!({
         "id": task_id.to_string(),
-        "title": "Synthetic migration thread",
+        "title": title,
         "cwd": project_path.to_string_lossy(),
+        "rollout_path": rollout_path.to_string_lossy(),
         "target_only": "preserve me",
     }))?;
     let mut ready_index_line = ready_index;
@@ -966,11 +1369,12 @@ fn write_ready_bridge_metadata(
     )?;
     let connection = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
     connection.execute(
-        "INSERT INTO threads (id, title, cwd) VALUES (?1, ?2, ?3)",
+        "INSERT INTO threads (id, title, cwd, rollout_path) VALUES (?1, ?2, ?3, ?4)",
         params![
             task_id.to_string(),
-            "Synthetic migration thread",
-            project_path.to_string_lossy().as_ref()
+            title,
+            project_path.to_string_lossy().as_ref(),
+            rollout_path.to_string_lossy().as_ref()
         ],
     )?;
     Ok(())
@@ -1084,14 +1488,14 @@ fn incoming_session_bytes() -> Vec<u8> {
 
 fn thread_metadata_bytes() -> Vec<u8> {
     format!(
-        "[{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\"}}]"
+        "[{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\",\"rollout_path\":\"{SOURCE_ROLLOUT_PATH}\"}}]"
     )
     .into_bytes()
 }
 
 fn index_bytes() -> Vec<u8> {
     format!(
-        "{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\"}}\n"
+        "{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\",\"rollout_path\":\"{SOURCE_ROLLOUT_PATH}\"}}\n"
     )
     .into_bytes()
 }
