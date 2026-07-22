@@ -30,7 +30,7 @@ pub struct ContentCounts {
 pub struct ProjectEntry {
     pub project_id: Uuid,
     pub name: String,
-    pub source_path: PathBuf,
+    pub source_path: String,
     pub archive_path: String,
     pub file_count: u64,
     pub content_bytes: u64,
@@ -129,13 +129,31 @@ pub struct PackagePreview {
     pub forbidden_files_total: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Add,
+    Update,
+    Unchanged,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlannedOperation {
+    pub package_source: Option<String>,
+    pub target: PathBuf,
+    pub expected_previous_hash: Option<String>,
+    pub action: ChangeKind,
+    pub rollback_required: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestorePlan {
     pub package_path: PathBuf,
     pub package_id: Uuid,
     pub target_codex_home: PathBuf,
     pub projects_root: PathBuf,
-    pub project_targets: Vec<PathBuf>,
+    pub operations: Vec<PlannedOperation>,
     pub conflict_count: u64,
     pub required_bytes: u64,
 }
@@ -179,11 +197,23 @@ pub struct RollbackReport {
     pub success: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStatus {
+    Prepared,
+    Applying,
+    Verifying,
+    Committed,
+    RollingBack,
+    RolledBack,
+    RollbackFailed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingRecovery {
     pub transaction_id: Uuid,
     pub package_id: Uuid,
     pub created_at: String,
-    pub status: String,
+    pub status: RecoveryStatus,
     pub backup_root: PathBuf,
 }

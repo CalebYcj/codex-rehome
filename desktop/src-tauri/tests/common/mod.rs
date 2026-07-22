@@ -8,11 +8,11 @@ pub const PROJECT_ID: &str = "22222222-2222-4222-8222-222222222222";
 pub const FIXED_TIMESTAMP: &str = "2026-07-22T00:00:00Z";
 pub const WINDOWS_CWD: &str = r"C:\Users\OldUser\Documents\visual";
 const THREAD_TITLE: &str = "Synthetic migration thread";
-const SOURCE_ROLLOUT_PATH: &str =
-    r"C:\Users\OldUser\.codex\sessions\11111111-1111-4111-8111-111111111111.jsonl";
+const THREAD_PREVIEW: &str = "Synthetic migration thread preview";
+const SOURCE_ROLLOUT_PATH: &str = r"C:\Users\OldUser\.codex\sessions\2026\07\22\rollout-2026-07-22T00-00-00-11111111-1111-4111-8111-111111111111.jsonl";
 
 pub struct SyntheticCodexFixture {
-    pub temp_dir: TempDir,
+    _temp_dir: TempDir,
     pub root: PathBuf,
     pub codex_home: PathBuf,
     pub session_path: PathBuf,
@@ -91,24 +91,29 @@ pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>
         connection.execute(
             "CREATE TABLE threads (\
                 id TEXT PRIMARY KEY, \
-                project_id TEXT NOT NULL, \
+                cwd TEXT NOT NULL, \
+                rollout_path TEXT NOT NULL, \
                 title TEXT NOT NULL, \
                 updated_at TEXT NOT NULL, \
-                cwd TEXT NOT NULL, \
-                rollout_path TEXT NOT NULL\
+                archived INTEGER NOT NULL, \
+                has_user_event INTEGER NOT NULL, \
+                preview TEXT NOT NULL\
             )",
             [],
         )?;
         connection.execute(
-            "INSERT INTO threads (id, project_id, title, updated_at, cwd, rollout_path) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO threads (\
+                id, cwd, rollout_path, title, updated_at, archived, has_user_event, preview\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 THREAD_ID,
-                PROJECT_ID,
-                THREAD_TITLE,
-                FIXED_TIMESTAMP,
                 WINDOWS_CWD,
                 SOURCE_ROLLOUT_PATH,
+                THREAD_TITLE,
+                FIXED_TIMESTAMP,
+                0,
+                1,
+                THREAD_PREVIEW,
             ],
         )?;
     }
@@ -134,7 +139,7 @@ pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>
     write_file(&node_modules_file_path, "module.exports = 'excluded';\n")?;
 
     Ok(SyntheticCodexFixture {
-        temp_dir,
+        _temp_dir: temp_dir,
         root,
         codex_home,
         session_path,
