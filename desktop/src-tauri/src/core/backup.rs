@@ -328,6 +328,7 @@ pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
         }
         let transaction_id = journal_id_from_path(&path)?;
         let journal = load_validated_journal(&path, Some(transaction_id))?;
+        let restored_project_paths = restored_project_paths(&journal);
         summaries.push(TransactionSummary {
             transaction_id: journal.transaction_id,
             package_id: journal.package_id,
@@ -337,6 +338,7 @@ pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
             backup_root: journal.backup_root,
             target_codex_home: journal.target_codex_home,
             projects_root: journal.projects_root,
+            restored_project_paths,
             changed_files: journal.operations.len() as u64,
         });
     }
@@ -347,6 +349,60 @@ pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
             .then_with(|| right.transaction_id.cmp(&left.transaction_id))
     });
     Ok(summaries)
+}
+
+fn restored_project_paths(journal: &TransactionJournal) -> Vec<PathBuf> {
+    let Ok(canonical_projects_root) = fs::canonicalize(&journal.projects_root) else {
+        return Vec::new();
+    };
+    let mut restored = Vec::new();
+
+    for operation in &journal.operations {
+        let mut source_components = Path::new(&operation.package_source).components();
+        if source_components.next() != Some(Component::Normal("projects".as_ref())) {
+            continue;
+        }
+        let Some(Component::Normal(project_id)) = source_components.next() else {
+            continue;
+        };
+        if project_id
+            .to_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_none()
+            || source_components.next() != Some(Component::Normal("files".as_ref()))
+            || source_components.next().is_none()
+        {
+            continue;
+        }
+        let Ok(relative_target) = operation.target.strip_prefix(&journal.projects_root) else {
+            continue;
+        };
+        let mut target_components = relative_target.components();
+        let Some(Component::Normal(project_name)) = target_components.next() else {
+            continue;
+        };
+        if target_components.next().is_none() {
+            continue;
+        }
+
+        let candidate = journal.projects_root.join(project_name);
+        let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if canonical.parent() == Some(canonical_projects_root.as_path()) {
+            restored.push(canonical);
+        }
+    }
+
+    restored.sort();
+    restored.dedup();
+    restored
 }
 
 pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeError> {

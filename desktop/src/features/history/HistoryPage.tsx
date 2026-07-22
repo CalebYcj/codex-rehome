@@ -76,7 +76,9 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
               <div className="transaction-facts"><span>变更文件<strong>{transaction.changed_files}</strong></span><span>项目目录<strong>{transaction.projects_root}</strong></span><span>备份目录<strong>{transaction.backup_root}</strong></span></div>
               <div className="transaction-actions">
                 <button className="icon-text-button" type="button" onClick={() => void openPath(transaction.transaction_backup_path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示备份</button>
-                <button className="icon-text-button" type="button" onClick={() => void openPath(transaction.projects_root, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示项目</button>
+                {transaction.restored_project_paths.map((path) => (
+                  <button className="icon-text-button" type="button" aria-label={`显示项目 ${path}`} key={path} onClick={() => void openPath(path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示项目</button>
+                ))}
                 <button className="rollback-button" type="button" aria-label="回滚此事务" disabled={!committed || busy} onClick={() => void handleRollback(transaction)}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}回滚</button>
               </div>
             </article>

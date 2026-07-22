@@ -82,6 +82,10 @@ fn transaction_history_lists_committed_and_rolled_back_journals_without_mutation
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].transaction_id, report.transaction_id);
     assert_eq!(committed[0].status, RecoveryStatus::Committed);
+    assert_eq!(
+        committed[0].restored_project_paths,
+        vec![fs::canonicalize(harness.plan.projects_root.join("visual"))?]
+    );
     assert_eq!(harness.single_journal_status()?, RecoveryStatus::Committed);
 
     rollback(report.transaction_id)?;

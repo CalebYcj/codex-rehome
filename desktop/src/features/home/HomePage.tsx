@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 import { listTransactions } from "../../lib/api";
-import type { CodexInventory, TransactionSummary } from "../../lib/types";
+import type { CodexInventory, RecoveryStatus, TransactionSummary } from "../../lib/types";
 
 interface HomePageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
@@ -100,7 +100,7 @@ export default function HomePage({
           <div className="recent-row">
             <PackageCheck aria-hidden="true" />
             <div><strong>{recent.changed_files} 个文件变更</strong><span>{recent.created_at}</span></div>
-            <span className={`status status-${recent.status}`}>{recent.status === "committed" ? "已提交" : "已回滚"}</span>
+            <span className={`status status-${recent.status}`}>{recoveryStatusLabel(recent.status)}</span>
           </div>
         ) : (
           <p className="empty-state">暂无交接记录</p>
@@ -108,4 +108,17 @@ export default function HomePage({
       </section>
     </div>
   );
+}
+
+function recoveryStatusLabel(status: RecoveryStatus): string {
+  const labels: Record<RecoveryStatus, string> = {
+    prepared: "已准备",
+    applying: "恢复中",
+    verifying: "验证中",
+    committed: "已提交",
+    rolling_back: "回滚中",
+    rolled_back: "已回滚",
+    rollback_failed: "回滚失败",
+  };
+  return labels[status];
 }

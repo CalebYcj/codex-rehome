@@ -143,6 +143,7 @@ const committedTransaction = {
     "C:\\ReHome Backups\\88888888-8888-8888-8888-888888888888",
   target_codex_home: inventory.codex_home,
   projects_root: "C:\\Restored Projects",
+  restored_project_paths: ["C:\\Restored Projects\\rehome-app"],
   changed_files: 8,
 };
 
@@ -200,6 +201,17 @@ describe("ReHome Desktop workflows", () => {
     expect(counts).toHaveTextContent("3 个技能");
     expect(counts).toHaveTextContent("2 个插件");
     expect(counts).toHaveTextContent("4 张生成图片");
+  });
+
+  it.each([
+    ["rollback_failed", "回滚失败"],
+    ["prepared", "已准备"],
+  ] as const)("shows %s as %s in the recent handoff", async (status, label) => {
+    api.listTransactions.mockResolvedValue([{ ...committedTransaction, status }]);
+
+    render(<App />);
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
   });
 
   it("requires a project and a conversation or content category before package creation", async () => {

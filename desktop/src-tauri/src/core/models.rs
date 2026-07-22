@@ -298,5 +298,6 @@ pub struct TransactionSummary {
     pub transaction_backup_path: PathBuf,
     pub target_codex_home: PathBuf,
     pub projects_root: PathBuf,
+    pub restored_project_paths: Vec<PathBuf>,
     pub changed_files: u64,
 }

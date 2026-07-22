@@ -192,6 +192,7 @@ export interface TransactionSummary {
   transaction_backup_path: string;
   target_codex_home: string;
   projects_root: string;
+  restored_project_paths: string[];
   changed_files: number;
 }
 

@@ -128,19 +128,29 @@ fn authorize_open_path(
     };
 
     let transaction = transaction(transaction_id)?;
-    let mut roots = vec![transaction.target_codex_home, transaction.projects_root];
-    if !restored_only {
-        roots.push(transaction.backup_root);
-        roots.push(transaction.transaction_backup_path);
+    authorize_transaction_path(&canonical, &transaction, restored_only)?;
+    Ok(canonical)
+}
+
+fn authorize_transaction_path(
+    canonical: &Path,
+    transaction: &TransactionSummary,
+    restored_only: bool,
+) -> Result<(), RehomeError> {
+    let exact_restored_project = transaction.restored_project_paths.iter().any(|path| {
+        fs::canonicalize(path).is_ok_and(|canonical_project| canonical_project == canonical)
+    });
+    let exact_transaction_backup = !restored_only
+        && fs::canonicalize(&transaction.transaction_backup_path)
+            .is_ok_and(|canonical_backup| canonical_backup == canonical);
+
+    if exact_restored_project || exact_transaction_backup {
+        Ok(())
+    } else {
+        Err(open_failed(
+            "path is not an exact object owned by the selected transaction",
+        ))
     }
-    if roots.into_iter().any(|root| {
-        fs::canonicalize(root).is_ok_and(|canonical_root| canonical.starts_with(canonical_root))
-    }) {
-        return Ok(canonical);
-    }
-    Err(open_failed(
-        "path is outside the selected transaction's owned roots",
-    ))
 }
 
 fn canonical_existing(path: &Path) -> Result<PathBuf, RehomeError> {
@@ -166,4 +176,139 @@ fn current_source_os() -> SourceOs {
 
 fn open_failed(message: impl Into<String>) -> RehomeError {
     RehomeError::new(ErrorCode::RestoreFailed, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorize_transaction_path;
+    use crate::core::models::{RecoveryStatus, TransactionSummary};
+    use std::fs;
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    #[test]
+    fn transaction_open_authorization_accepts_exact_owned_objects() {
+        let fixture = open_fixture();
+
+        assert!(authorize_transaction_path(
+            &fixture.transaction_backup_path,
+            &fixture.summary,
+            false,
+        )
+        .is_ok());
+        assert!(authorize_transaction_path(
+            &fixture.restored_project_path,
+            &fixture.summary,
+            false,
+        )
+        .is_ok());
+        assert!(
+            authorize_transaction_path(&fixture.restored_project_path, &fixture.summary, true,)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn transaction_open_authorization_rejects_unrelated_descendants() {
+        let fixture = open_fixture();
+
+        assert!(authorize_transaction_path(
+            &fixture.unrelated_project_path,
+            &fixture.summary,
+            false,
+        )
+        .is_err());
+        assert!(authorize_transaction_path(
+            &fixture.unrelated_backup_path,
+            &fixture.summary,
+            false,
+        )
+        .is_err());
+        assert!(
+            authorize_transaction_path(&fixture.unrelated_codex_path, &fixture.summary, false,)
+                .is_err()
+        );
+        assert!(authorize_transaction_path(
+            &fixture.unrelated_project_path,
+            &fixture.summary,
+            true,
+        )
+        .is_err());
+        assert!(authorize_transaction_path(
+            &fixture.restored_project_child,
+            &fixture.summary,
+            true,
+        )
+        .is_err());
+        assert!(authorize_transaction_path(
+            &fixture.transaction_backup_path,
+            &fixture.summary,
+            true,
+        )
+        .is_err());
+    }
+
+    struct OpenFixture {
+        _root: tempfile::TempDir,
+        summary: TransactionSummary,
+        transaction_backup_path: std::path::PathBuf,
+        restored_project_path: std::path::PathBuf,
+        restored_project_child: std::path::PathBuf,
+        unrelated_project_path: std::path::PathBuf,
+        unrelated_backup_path: std::path::PathBuf,
+        unrelated_codex_path: std::path::PathBuf,
+    }
+
+    fn open_fixture() -> OpenFixture {
+        let root = tempdir().expect("temporary root");
+        let backup_root = root.path().join("backups");
+        let projects_root = root.path().join("projects");
+        let target_codex_home = root.path().join("codex-home");
+        let transaction_backup_path = backup_root.join("transaction");
+        let unrelated_backup_path = backup_root.join("unrelated");
+        let restored_project_path = projects_root.join("restored-project");
+        let restored_project_child = restored_project_path.join("src");
+        let unrelated_project_path = projects_root.join("unrelated-project");
+        let unrelated_codex_path = target_codex_home.join("sessions");
+        for path in [
+            &transaction_backup_path,
+            &unrelated_backup_path,
+            &restored_project_child,
+            &unrelated_project_path,
+            &unrelated_codex_path,
+        ] {
+            fs::create_dir_all(path).expect("fixture directory");
+        }
+
+        let transaction_backup_path = fs::canonicalize(transaction_backup_path).unwrap();
+        let unrelated_backup_path = fs::canonicalize(unrelated_backup_path).unwrap();
+        let restored_project_path = fs::canonicalize(restored_project_path).unwrap();
+        let restored_project_child = fs::canonicalize(restored_project_child).unwrap();
+        let unrelated_project_path = fs::canonicalize(unrelated_project_path).unwrap();
+        let unrelated_codex_path = fs::canonicalize(unrelated_codex_path).unwrap();
+
+        let summary = TransactionSummary {
+            transaction_id: Uuid::new_v4(),
+            package_id: Uuid::new_v4(),
+            created_at: "2026-07-23T09:00:00Z".into(),
+            status: RecoveryStatus::Committed,
+            backup_root,
+            transaction_backup_path: transaction_backup_path.clone(),
+            target_codex_home,
+            projects_root,
+            restored_project_paths: vec![restored_project_path.clone()],
+            changed_files: 1,
+        };
+
+        OpenFixture {
+            _root: root,
+            summary,
+            transaction_backup_path,
+            restored_project_path,
+            restored_project_child,
+            unrelated_project_path,
+            unrelated_backup_path,
+            unrelated_codex_path,
+        }
+    }
 }
