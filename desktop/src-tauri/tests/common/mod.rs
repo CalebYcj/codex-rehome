@@ -63,10 +63,13 @@ pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>
         format!(
             "{}\n",
             serde_json::to_string(&json!({
-                "thread_id": THREAD_ID,
-                "project_id": PROJECT_ID,
+                "type": "session_meta",
                 "timestamp": FIXED_TIMESTAMP,
-                "cwd": WINDOWS_CWD,
+                "payload": {
+                    "id": THREAD_ID,
+                    "project_id": PROJECT_ID,
+                    "cwd": WINDOWS_CWD,
+                }
             }))?
         ),
     )?;
@@ -77,7 +80,7 @@ pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>
             serde_json::to_string(&json!({
                 "id": THREAD_ID,
                 "project_id": PROJECT_ID,
-                "title": THREAD_TITLE,
+                "thread_name": THREAD_TITLE,
                 "updated_at": FIXED_TIMESTAMP,
                 "cwd": WINDOWS_CWD,
                 "rollout_path": SOURCE_ROLLOUT_PATH,

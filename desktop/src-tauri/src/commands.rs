@@ -205,9 +205,12 @@ mod tests {
             format!(
                 "{}\n",
                 json!({
-                    "thread_id": task_id,
-                    "cwd": project,
-                    "timestamp": "2026-07-23T10:00:00Z"
+                    "type": "session_meta",
+                    "timestamp": "2026-07-23T10:00:00Z",
+                    "payload": {
+                        "id": task_id,
+                        "cwd": project
+                    }
                 })
             ),
         )
@@ -219,7 +222,7 @@ mod tests {
                 json!({
                     "id": task_id,
                     "cwd": project,
-                    "title": "Production workflow",
+                    "thread_name": "Production workflow",
                     "updated_at": "2026-07-23T10:00:00Z"
                 })
             ),

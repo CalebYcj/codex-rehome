@@ -3,6 +3,7 @@ mod common;
 
 use common::{synthetic_codex_fixture, SyntheticCodexFixture, THREAD_ID};
 use rehome_desktop_lib::core::{
+    backup::claim_transaction_rollback,
     error::ErrorCode,
     models::{
         ChangeKind, ContentCounts, ConversationEntry, CreatePackageRequest, RecoveryStatus,
@@ -122,6 +123,26 @@ fn malformed_unrelated_journal_is_isolated_from_history_and_direct_rollback(
 
     let rollback_report = rollback(report.transaction_id)?;
     assert!(rollback_report.success);
+    Ok(())
+}
+
+#[test]
+fn os_rollback_claim_excludes_independent_owners_without_changing_the_journal(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore_by_id(harness.plan.plan_id, harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let before = fs::read(&journal_path)?;
+    let first_owner = claim_transaction_rollback(report.transaction_id)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(error.message.contains("already in progress"));
+    assert_eq!(fs::read(&journal_path)?, before);
+
+    drop(first_owner);
+    assert!(rollback(report.transaction_id)?.success);
     Ok(())
 }
 
@@ -1103,7 +1124,16 @@ impl RestoreHarness {
     }
 
     fn single_journal_status(&self) -> Result<RecoveryStatus, Box<dyn Error>> {
-        let entries = fs::read_dir(self.transactions_dir())?.collect::<Result<Vec<_>, _>>()?;
+        let entries = fs::read_dir(self.transactions_dir())?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "json")
+            })
+            .collect::<Vec<_>>();
         assert_eq!(entries.len(), 1);
         let journal: Value = serde_json::from_slice(&fs::read(entries[0].path())?)?;
         Ok(serde_json::from_value(journal["status"].clone())?)
@@ -1194,8 +1224,13 @@ fn align_fixture_project_metadata(fixture: &SyntheticCodexFixture) -> Result<(),
             .filter(|line| !line.is_empty())
         {
             let mut value = serde_json::from_str::<Value>(line)?;
-            value["project_id"] = Value::String(project_id.to_string());
-            value["cwd"] = Value::String(source_project.clone());
+            if value["type"] == "session_meta" {
+                value["payload"]["project_id"] = Value::String(project_id.to_string());
+                value["payload"]["cwd"] = Value::String(source_project.clone());
+            } else {
+                value["project_id"] = Value::String(project_id.to_string());
+                value["cwd"] = Value::String(source_project.clone());
+            }
             serde_json::to_writer(&mut output, &value)?;
             output.push(b'\n');
         }

@@ -735,8 +735,8 @@ fn bridge_applies_task_six_session_index_and_sqlite_plan() -> Result<(), Box<dyn
     let restored_jsonl = std::fs::read_to_string(&planned.target)?;
     let target_project = projects_root.join("visual").to_string_lossy().into_owned();
     let restored_row = serde_json::from_str::<Value>(restored_jsonl.trim())?;
-    assert_eq!(restored_row["cwd"], target_project);
-    assert_ne!(restored_row["cwd"], source_project);
+    assert_eq!(restored_row["payload"]["cwd"], target_project);
+    assert_ne!(restored_row["payload"]["cwd"], source_project);
     let index = std::fs::read_to_string(codex_home.join("session_index.jsonl"))?;
     assert_eq!(
         index
@@ -1272,8 +1272,13 @@ fn align_fixture_project_metadata(
         let mut output = Vec::new();
         for line in text.lines().filter(|line| !line.is_empty()) {
             let mut value = serde_json::from_str::<Value>(line)?;
-            value["project_id"] = Value::String(project_id.to_string());
-            value["cwd"] = Value::String(source_project.clone());
+            if value["type"] == "session_meta" {
+                value["payload"]["project_id"] = Value::String(project_id.to_string());
+                value["payload"]["cwd"] = Value::String(source_project.clone());
+            } else {
+                value["project_id"] = Value::String(project_id.to_string());
+                value["cwd"] = Value::String(source_project.clone());
+            }
             serde_json::to_writer(&mut output, &value)?;
             output.push(b'\n');
         }

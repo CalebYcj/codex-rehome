@@ -2,6 +2,7 @@ use crate::core::{
     error::{ErrorCode, RehomeError},
     models::{CodexInventory, ContentCounts, ConversationEntry, ProjectEntry, SourceOs},
     paths::normalize_entry,
+    session::{metadata_string, metadata_uuid, parse_session_metadata},
 };
 use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde_json::Value;
@@ -224,7 +225,7 @@ fn discovered_conversations(
                 continue;
             }
         };
-        let Some((task_id, session)) = session_identity(&bytes) else {
+        let Some(session) = parse_session_metadata(&bytes) else {
             push_warning_unique(
                 warnings,
                 format!(
@@ -234,7 +235,8 @@ fn discovered_conversations(
             );
             continue;
         };
-        let metadata = index.get(&task_id).unwrap_or(&session);
+        let task_id = session.task_id;
+        let metadata = index.get(&task_id).unwrap_or(&session.fields);
         let relative = match path.strip_prefix(codex_home).map(normalize_entry) {
             Ok(Ok(relative)) => relative,
             _ => {
@@ -250,12 +252,12 @@ fn discovered_conversations(
         };
         conversations.push(ConversationEntry {
             task_id,
-            project_id: associated_project_id(metadata, &session, projects),
-            title: json_string(metadata, &["title"])
-                .or_else(|| json_string(&session, &["title"]))
+            project_id: associated_project_id(metadata, &session.fields, projects),
+            title: metadata_string(metadata, &["title", "thread_name"])
+                .or_else(|| metadata_string(&session.fields, &["title", "thread_name"]))
                 .unwrap_or_else(|| "Codex conversation".to_owned()),
-            updated_at: json_string(metadata, &["updated_at", "timestamp"])
-                .or_else(|| json_string(&session, &["updated_at", "timestamp"]))
+            updated_at: metadata_string(metadata, &["updated_at", "timestamp"])
+                .or_else(|| metadata_string(&session.fields, &["updated_at", "timestamp"]))
                 .unwrap_or_default(),
             content_hash: format!("{:x}", Sha256::digest(&bytes)),
             archive_path: format!("codex/{relative}"),
@@ -287,21 +289,11 @@ fn read_session_index_entries(
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(id) = json_uuid(&value, &["id", "thread_id", "conversation_id"]) {
+        if let Some(id) = metadata_uuid(&value, &["id", "thread_id", "conversation_id"]) {
             entries.insert(id, value);
         }
     }
     entries
-}
-
-fn session_identity(bytes: &[u8]) -> Option<(Uuid, Value)> {
-    bytes.split(|byte| *byte == b'\n').find_map(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let line = std::str::from_utf8(line).ok()?;
-        let value = serde_json::from_str::<Value>(line).ok()?;
-        let id = json_uuid(&value, &["thread_id", "id", "conversation_id"])?;
-        Some((id, value))
-    })
 }
 
 pub(crate) fn associated_project_id(
@@ -309,8 +301,8 @@ pub(crate) fn associated_project_id(
     session: &Value,
     projects: &[ProjectEntry],
 ) -> Option<Uuid> {
-    let cwd = json_string(metadata, &["cwd", "workspace_root"])
-        .or_else(|| json_string(session, &["cwd", "workspace_root"]));
+    let cwd = metadata_string(metadata, &["cwd", "workspace_root"])
+        .or_else(|| metadata_string(session, &["cwd", "workspace_root"]));
     if let Some(cwd) = cwd {
         let path = PathBuf::from(&cwd);
         let canonical = fs::canonicalize(&path).unwrap_or(path);
@@ -323,23 +315,9 @@ pub(crate) fn associated_project_id(
         }
     }
 
-    json_uuid(metadata, &["project_id"])
-        .or_else(|| json_uuid(session, &["project_id"]))
+    metadata_uuid(metadata, &["project_id"])
+        .or_else(|| metadata_uuid(session, &["project_id"]))
         .filter(|id| projects.iter().any(|project| project.project_id == *id))
-}
-
-fn json_uuid(value: &Value, keys: &[&str]) -> Option<Uuid> {
-    keys.iter().find_map(|key| {
-        value
-            .get(*key)
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-    })
-}
-
-fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_owned))
 }
 
 fn nonempty_path(path: Option<PathBuf>) -> Option<PathBuf> {
@@ -879,10 +857,54 @@ fn file_name_is(path: &Path, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::collect_child_paths;
+    use crate::core::session::{metadata_string, parse_session_metadata};
     use std::{
         io,
         path::{Path, PathBuf},
     };
+    use uuid::Uuid;
+
+    #[test]
+    fn session_parser_accepts_current_nested_metadata_and_safe_legacy_metadata() {
+        let current_id = Uuid::new_v4();
+        let current = format!(
+            "{{\"type\":\"session_meta\",\"timestamp\":\"outer\",\"payload\":{{\"id\":\"{current_id}\",\"cwd\":\"C:/work/current\",\"title\":\"Current\"}}}}\n"
+        );
+        let parsed = parse_session_metadata(current.as_bytes()).expect("current metadata");
+        assert_eq!(parsed.task_id, current_id);
+        assert_eq!(
+            metadata_string(&parsed.fields, &["cwd"]).as_deref(),
+            Some("C:/work/current")
+        );
+        assert_eq!(
+            metadata_string(&parsed.fields, &["title"]).as_deref(),
+            Some("Current")
+        );
+        assert_eq!(
+            metadata_string(&parsed.fields, &["timestamp"]).as_deref(),
+            Some("outer")
+        );
+
+        let legacy_id = Uuid::new_v4();
+        let legacy = format!(
+            "{{\"thread_id\":\"{legacy_id}\",\"cwd\":\"C:/work/legacy\",\"timestamp\":\"legacy\"}}\n"
+        );
+        assert_eq!(
+            parse_session_metadata(legacy.as_bytes())
+                .expect("legacy metadata")
+                .task_id,
+            legacy_id
+        );
+    }
+
+    #[test]
+    fn session_parser_never_infers_identity_from_arbitrary_message_payloads() {
+        let message = format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"C:/private\"}}}}\n",
+            Uuid::new_v4()
+        );
+        assert!(parse_session_metadata(message.as_bytes()).is_none());
+    }
 
     #[test]
     fn individual_directory_entry_errors_warn_once_and_keep_readable_children() {

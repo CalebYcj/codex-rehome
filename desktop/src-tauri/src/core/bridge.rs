@@ -38,6 +38,7 @@ const INDEX_IMPORT_FIELDS: &[&str] = &[
     "project_path",
     "rollout",
     "rollout_path",
+    "thread_name",
     "title",
     "updated_at",
 ];
@@ -407,8 +408,11 @@ pub fn merge_session_index(
         object.remove("thread_id");
         object.remove("conversation_id");
         object.insert("id".into(), Value::String(id.clone()));
-        if !incoming_is_older {
+        if !incoming_is_older && incoming.contains_key("title") {
             object.insert("title".into(), Value::String(session.title.clone()));
+        }
+        if !incoming_is_older && incoming.contains_key("thread_name") {
+            object.insert("thread_name".into(), Value::String(session.title.clone()));
         }
         object.insert(
             "rollout_path".into(),

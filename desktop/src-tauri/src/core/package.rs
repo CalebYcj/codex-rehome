@@ -7,6 +7,7 @@ use crate::core::{
         ExclusionSummary, PackageManifest, PackageMode, PackagePreview, ProjectEntry,
     },
     paths::normalize_entry,
+    session::{metadata_string, metadata_uuid, session_metadata_from_value, SessionMetadata},
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
@@ -638,10 +639,12 @@ fn stage_conversations(
         let archive_path = normalize_entry(Path::new(&archive_path))?;
         let staged_payload = copy_source_to_staging(source, staging_root, &archive_path)?;
         let staged_path = staging_root.join(Path::new(&archive_path));
-        let Some((task_id, session_value)) = session_identity_from_file(&staged_path)? else {
+        let Some(session) = session_identity_from_file(&staged_path)? else {
             fs::remove_file(staged_path).map_err(io_package_error)?;
             continue;
         };
+        let task_id = session.task_id;
+        let session_value = session.fields;
         if !selected.contains(&task_id) {
             fs::remove_file(staged_path).map_err(io_package_error)?;
             continue;
@@ -661,10 +664,11 @@ fn stage_conversations(
         conversations.push(ConversationEntry {
             task_id,
             project_id: associated_project_id(metadata, &session_value, selection.projects),
-            title: json_string(metadata, &["title"])
+            title: metadata_string(metadata, &["title", "thread_name"])
+                .or_else(|| metadata_string(&session_value, &["title", "thread_name"]))
                 .unwrap_or_else(|| "Imported conversation".to_owned()),
-            updated_at: json_string(metadata, &["updated_at", "timestamp"])
-                .or_else(|| json_string(&session_value, &["updated_at", "timestamp"]))
+            updated_at: metadata_string(metadata, &["updated_at", "timestamp"])
+                .or_else(|| metadata_string(&session_value, &["updated_at", "timestamp"]))
                 .unwrap_or_default(),
             content_hash,
             archive_path,
@@ -702,7 +706,7 @@ fn read_selected_session_index(
         }
         let value: Value = serde_json::from_str(line)
             .map_err(|_| package_invalid("session index contains malformed JSONL"))?;
-        let Some(id) = json_uuid(&value, &["id", "thread_id"]) else {
+        let Some(id) = metadata_uuid(&value, &["id", "thread_id"]) else {
             continue;
         };
         if selected.contains(&id) {
@@ -1485,7 +1489,7 @@ fn source_fingerprint(path: &Path) -> Result<SourceFingerprint, RehomeError> {
     })
 }
 
-fn session_identity_from_file(path: &Path) -> Result<Option<(Uuid, Value)>, RehomeError> {
+fn session_identity_from_file(path: &Path) -> Result<Option<SessionMetadata>, RehomeError> {
     let file = fs::File::open(path).map_err(io_package_error)?;
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
@@ -1496,8 +1500,8 @@ fn session_identity_from_file(path: &Path) -> Result<Option<(Uuid, Value)>, Reho
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(id) = json_uuid(&value, &["thread_id", "id", "conversation_id"]) {
-            return Ok(Some((id, value)));
+        if let Some(metadata) = session_metadata_from_value(value) {
+            return Ok(Some(metadata));
         }
     }
     Ok(None)
@@ -1529,20 +1533,6 @@ fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> Result<b
 fn strip_line_ending(line: &[u8]) -> &[u8] {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     line.strip_suffix(b"\r").unwrap_or(line)
-}
-
-fn json_uuid(value: &Value, keys: &[&str]) -> Option<Uuid> {
-    keys.iter().find_map(|key| {
-        value
-            .get(*key)
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-    })
-}
-
-fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_owned))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

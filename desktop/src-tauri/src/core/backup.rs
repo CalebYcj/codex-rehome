@@ -287,21 +287,87 @@ fn inspect_applied_state(operation: &BackupOperation) -> Result<AppliedState, Re
 pub(crate) fn rollback_prepared(
     prepared: &mut PreparedTransaction,
 ) -> Result<RollbackReport, RehomeError> {
+    let _claim =
+        acquire_transaction_rollback(&prepared.journal_path, prepared.journal.transaction_id)?;
+    prepared.journal = load_validated_journal(
+        &prepared.journal_path,
+        Some(prepared.journal.transaction_id),
+    )?;
+    if prepared.journal.status == RecoveryStatus::RolledBack {
+        return Ok(already_rolled_back_report(prepared.journal.transaction_id));
+    }
     rollback_loaded(&prepared.journal_path, &mut prepared.journal)
 }
 
 pub fn rollback(transaction_id: Uuid) -> Result<RollbackReport, RehomeError> {
-    let journal_path = journal_path(transaction_id)?;
-    let mut journal = load_validated_journal(&journal_path, Some(transaction_id))?;
+    let claim = claim_transaction_rollback(transaction_id)?;
+    let mut journal = load_validated_journal(&claim.journal_path, Some(transaction_id))?;
     if journal.status == RecoveryStatus::RolledBack {
-        return Ok(RollbackReport {
-            transaction_id,
-            completed_at: timestamp(),
-            restored_files: 0,
-            success: true,
-        });
+        return Ok(already_rolled_back_report(transaction_id));
     }
-    rollback_loaded(&journal_path, &mut journal)
+    rollback_loaded(&claim.journal_path, &mut journal)
+}
+
+pub struct TransactionRollbackClaim {
+    _file: fs::File,
+    journal_path: PathBuf,
+}
+
+pub fn claim_transaction_rollback(
+    transaction_id: Uuid,
+) -> Result<TransactionRollbackClaim, RehomeError> {
+    let journal_path = journal_path(transaction_id)?;
+    load_validated_journal(&journal_path, Some(transaction_id))?;
+    acquire_transaction_rollback(&journal_path, transaction_id)
+}
+
+fn acquire_transaction_rollback(
+    journal_path: &Path,
+    transaction_id: Uuid,
+) -> Result<TransactionRollbackClaim, RehomeError> {
+    let transactions = journal_path
+        .parent()
+        .ok_or_else(|| rollback_failed("transaction journal has no parent directory"))?;
+    validate_directory_entry(transactions).map_err(|error| rollback_failed(error.message))?;
+    let lock_path = transactions.join(format!("{transaction_id}.rollback.lock"));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| rollback_failed(format!("could not open rollback lock: {error}")))?;
+    let metadata = fs::symlink_metadata(&lock_path)
+        .map_err(|error| rollback_failed(format!("could not inspect rollback lock: {error}")))?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(rollback_failed("rollback lock is not a regular file"));
+    }
+    if raw_file_link_count(&lock_path).map_err(|error| {
+        rollback_failed(format!("could not inspect rollback lock links: {error}"))
+    })? != 1
+        || file_identity_from_file(&file).map_err(|error| rollback_failed(error.message))?
+            != file_identity(&lock_path).map_err(|error| rollback_failed(error.message))?
+    {
+        return Err(rollback_failed("rollback lock identity is unsafe"));
+    }
+    file.try_lock().map_err(|error| {
+        rollback_failed(format!(
+            "transaction rollback is already in progress or the exclusive lock is unavailable: {error}"
+        ))
+    })?;
+    Ok(TransactionRollbackClaim {
+        _file: file,
+        journal_path: journal_path.to_path_buf(),
+    })
+}
+
+fn already_rolled_back_report(transaction_id: Uuid) -> RollbackReport {
+    RollbackReport {
+        transaction_id,
+        completed_at: timestamp(),
+        restored_files: 0,
+        success: true,
+    }
 }
 
 pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {

@@ -16,15 +16,17 @@ fn synthetic_fixture_contains_every_codex_and_project_element() -> Result<(), Bo
     assert_eq!(fixture.codex_home, fixture.root.join(".codex"));
 
     let session: Value = serde_json::from_str(&fs::read_to_string(&fixture.session_path)?)?;
-    assert_eq!(session["thread_id"], THREAD_ID);
-    assert_eq!(session["project_id"], PROJECT_ID);
+    assert_eq!(session["type"], "session_meta");
     assert_eq!(session["timestamp"], FIXED_TIMESTAMP);
-    assert_eq!(session["cwd"], WINDOWS_CWD);
+    assert_eq!(session["payload"]["id"], THREAD_ID);
+    assert_eq!(session["payload"]["project_id"], PROJECT_ID);
+    assert!(session["payload"].get("timestamp").is_none());
+    assert_eq!(session["payload"]["cwd"], WINDOWS_CWD);
 
     let index: Value = serde_json::from_str(&fs::read_to_string(&fixture.session_index_path)?)?;
     assert_eq!(index["id"], THREAD_ID);
-    assert_eq!(index["project_id"], session["project_id"]);
-    assert_eq!(index["title"], THREAD_TITLE);
+    assert_eq!(index["project_id"], session["payload"]["project_id"]);
+    assert_eq!(index["thread_name"], THREAD_TITLE);
     assert_eq!(index["updated_at"], FIXED_TIMESTAMP);
     assert_eq!(index["cwd"], WINDOWS_CWD);
     assert_eq!(index["rollout_path"], SOURCE_ROLLOUT_PATH);
@@ -109,7 +111,7 @@ fn synthetic_fixture_sqlite_thread_matches_session() -> Result<(), Box<dyn Error
     assert_eq!(row.1, index["cwd"].as_str().unwrap());
     assert_eq!(row.2, index["rollout_path"].as_str().unwrap());
     assert_eq!(row.3, THREAD_TITLE);
-    assert_eq!(row.3, index["title"].as_str().unwrap());
+    assert_eq!(row.3, index["thread_name"].as_str().unwrap());
     assert_eq!(row.4, FIXED_TIMESTAMP);
     assert_eq!(row.4, index["updated_at"].as_str().unwrap());
     assert_eq!(row.5, 0);
