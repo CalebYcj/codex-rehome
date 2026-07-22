@@ -2,9 +2,13 @@ mod common;
 
 use common::{synthetic_codex_fixture, WINDOWS_CWD};
 use rehome_desktop_lib::core::{
-    discovery::{discover_codex_with_context, resolve_codex_home, DiscoveryContext},
+    discovery::{
+        discover_codex_with_context, resolve_codex_home, resolve_codex_home_for_os,
+        DiscoveryContext,
+    },
     error::ErrorCode,
     exclusions::is_forbidden,
+    models::SourceOs,
     paths::{normalize_entry, validate_source_containment},
 };
 use serde_json::json;
@@ -137,17 +141,17 @@ fn codex_home_resolution_has_explicit_precedence() {
         ..context.clone()
     };
     assert_eq!(
-        resolve_codex_home(None, &windows_default).unwrap(),
+        resolve_codex_home_for_os(None, &windows_default, SourceOs::Windows).unwrap(),
         Path::new("windows-user").join(".codex")
     );
 
-    let unix_default = DiscoveryContext {
+    let mac_default = DiscoveryContext {
         codex_home_env: None,
-        user_profile: None,
+        user_profile: context.user_profile,
         home: context.home,
     };
     assert_eq!(
-        resolve_codex_home(None, &unix_default).unwrap(),
+        resolve_codex_home_for_os(None, &mac_default, SourceOs::Macos).unwrap(),
         Path::new("unix-user").join(".codex")
     );
 }

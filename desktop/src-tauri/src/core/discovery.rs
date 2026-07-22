@@ -33,10 +33,23 @@ pub fn resolve_codex_home(
     override_home: Option<PathBuf>,
     context: &DiscoveryContext,
 ) -> Result<PathBuf, RehomeError> {
+    resolve_codex_home_for_os(override_home, context, current_source_os())
+}
+
+pub fn resolve_codex_home_for_os(
+    override_home: Option<PathBuf>,
+    context: &DiscoveryContext,
+    source_os: SourceOs,
+) -> Result<PathBuf, RehomeError> {
+    let platform_default = match source_os {
+        SourceOs::Windows => nonempty_path(context.user_profile.clone())
+            .or_else(|| nonempty_path(context.home.clone())),
+        SourceOs::Macos => nonempty_path(context.home.clone()),
+    };
+
     override_home
         .or_else(|| nonempty_path(context.codex_home_env.clone()))
-        .or_else(|| nonempty_path(context.user_profile.clone()).map(|path| path.join(".codex")))
-        .or_else(|| nonempty_path(context.home.clone()).map(|path| path.join(".codex")))
+        .or_else(|| platform_default.map(|path| path.join(".codex")))
         .ok_or_else(|| {
             RehomeError::new(
                 ErrorCode::CodexNotFound,
