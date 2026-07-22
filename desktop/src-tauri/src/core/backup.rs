@@ -1,7 +1,10 @@
 use crate::core::{
     bridge::{validate_restore_target, validate_restore_target_ancestry},
     error::{ErrorCode, RehomeError},
-    models::{PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport, TransactionSummary},
+    models::{
+        PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport, TransactionHistory,
+        TransactionSummary,
+    },
     stable_fs::PinnedParent,
 };
 use chrono::{SecondsFormat, Utc};
@@ -302,13 +305,25 @@ pub fn rollback(transaction_id: Uuid) -> Result<RollbackReport, RehomeError> {
 }
 
 pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
+    Ok(list_transaction_history()?.transactions)
+}
+
+pub fn list_transaction_history() -> Result<TransactionHistory, RehomeError> {
     let Some(app_data) = existing_app_data_root()? else {
-        return Ok(Vec::new());
+        return Ok(TransactionHistory {
+            transactions: Vec::new(),
+            warnings: Vec::new(),
+        });
     };
     let transactions = app_data.join(TRANSACTIONS_DIRECTORY);
     let entries = match fs::read_dir(&transactions) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(TransactionHistory {
+                transactions: Vec::new(),
+                warnings: Vec::new(),
+            })
+        }
         Err(error) => {
             return Err(rollback_failed(format!(
                 "could not enumerate transaction journals: {error}"
@@ -321,26 +336,23 @@ pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
     entries.sort_by_key(|entry| entry.file_name());
 
     let mut summaries = Vec::new();
+    let mut warnings = Vec::new();
     for entry in entries {
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let transaction_id = journal_id_from_path(&path)?;
-        let journal = load_validated_journal(&path, Some(transaction_id))?;
-        let restored_project_paths = restored_project_paths(&journal);
-        summaries.push(TransactionSummary {
-            transaction_id: journal.transaction_id,
-            package_id: journal.package_id,
-            created_at: journal.created_at,
-            status: journal.status,
-            transaction_backup_path: journal.backup_root.join(journal.transaction_id.to_string()),
-            backup_root: journal.backup_root,
-            target_codex_home: journal.target_codex_home,
-            projects_root: journal.projects_root,
-            restored_project_paths,
-            changed_files: journal.operations.len() as u64,
-        });
+        let summary = journal_id_from_path(&path)
+            .and_then(|transaction_id| load_validated_journal(&path, Some(transaction_id)))
+            .map(transaction_summary_from_journal);
+        match summary {
+            Ok(summary) => summaries.push(summary),
+            Err(error) => warnings.push(format!(
+                "skipped transaction journal {}: {}",
+                entry.file_name().to_string_lossy(),
+                error.message
+            )),
+        }
     }
     summaries.sort_by(|left, right| {
         right
@@ -348,7 +360,46 @@ pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
             .cmp(&left.created_at)
             .then_with(|| right.transaction_id.cmp(&left.transaction_id))
     });
-    Ok(summaries)
+    Ok(TransactionHistory {
+        transactions: summaries,
+        warnings,
+    })
+}
+
+pub fn transaction_summary(
+    transaction_id: Uuid,
+) -> Result<Option<TransactionSummary>, RehomeError> {
+    let Some(app_data) = existing_app_data_root()? else {
+        return Ok(None);
+    };
+    let path = app_data
+        .join(TRANSACTIONS_DIRECTORY)
+        .join(format!("{transaction_id}.json"));
+    match fs::symlink_metadata(&path) {
+        Ok(_) => load_validated_journal(&path, Some(transaction_id))
+            .map(transaction_summary_from_journal)
+            .map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(rollback_failed(format!(
+            "could not inspect requested transaction journal: {error}"
+        ))),
+    }
+}
+
+fn transaction_summary_from_journal(journal: TransactionJournal) -> TransactionSummary {
+    let restored_project_paths = restored_project_paths(&journal);
+    TransactionSummary {
+        transaction_id: journal.transaction_id,
+        package_id: journal.package_id,
+        created_at: journal.created_at,
+        status: journal.status,
+        transaction_backup_path: journal.backup_root.join(journal.transaction_id.to_string()),
+        backup_root: journal.backup_root,
+        target_codex_home: journal.target_codex_home,
+        projects_root: journal.projects_root,
+        restored_project_paths,
+        changed_files: journal.operations.len() as u64,
+    }
 }
 
 fn restored_project_paths(journal: &TransactionJournal) -> Vec<PathBuf> {

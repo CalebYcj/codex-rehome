@@ -35,8 +35,8 @@ export default function HomePage({
   useEffect(() => {
     let active = true;
     void listTransactions()
-      .then((transactions) => {
-        if (active) setRecent(transactions[0] ?? null);
+      .then((history) => {
+        if (active) setRecent(history.transactions[0] ?? null);
       })
       .catch(() => undefined);
     return () => {

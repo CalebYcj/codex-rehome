@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { listTransactions, openPath, rollbackTransaction } from "../../lib/api";
-import { errorMessage, type RecoveryStatus, type TransactionSummary } from "../../lib/types";
+import { errorMessage, type RecoveryStatus, type RollbackAction, type TransactionSummary } from "../../lib/types";
 
 interface HistoryPageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
@@ -21,12 +21,15 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
   const [loading, setLoading] = useState(true);
   const [rollingBack, setRollingBack] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setTransactions(await listTransactions());
+      const history = await listTransactions();
+      setTransactions(history.transactions);
+      setWarnings(history.warnings);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -38,17 +41,25 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
     void refresh();
   }, [refresh]);
 
-  async function handleRollback(transaction: TransactionSummary) {
-    if (transaction.status !== "committed") return;
+  async function handleRollback(transaction: TransactionSummary, action: RollbackAction) {
     setRollingBack(transaction.transaction_id);
     setError(null);
     try {
-      await rollbackTransaction(transaction.transaction_id);
+      await rollbackTransaction(transaction.transaction_id, action);
       await refresh();
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
       setRollingBack(null);
+    }
+  }
+
+  async function handleReveal(path: string, transactionId: string) {
+    setError(null);
+    try {
+      await openPath(path, transactionId);
+    } catch (caught) {
+      setError(errorMessage(caught));
     }
   }
 
@@ -60,12 +71,15 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
       </header>
 
       {error && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{error}</p>}
+      {warnings.map((warning) => <p className="inline-state status-warning" role="status" key={warning}><AlertTriangle aria-hidden="true" />{warning}</p>)}
       {loading && !transactions.length && <p className="inline-state" role="status">正在读取事务记录...</p>}
       {!loading && !transactions.length && <div className="history-empty"><Clock3 aria-hidden="true" /><strong>暂无恢复事务</strong><span>完成一次接收后，事务会显示在这里。</span></div>}
 
       <div className="transaction-list">
         {transactions.map((transaction) => {
           const committed = transaction.status === "committed";
+          const resumable = isResumable(transaction.status);
+          const rollbackAction: RollbackAction = committed ? "rollback" : "resume";
           const busy = rollingBack === transaction.transaction_id;
           return (
             <article className="transaction-row" data-testid={`transaction-${transaction.transaction_id}`} key={transaction.transaction_id}>
@@ -75,11 +89,11 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
               </div>
               <div className="transaction-facts"><span>变更文件<strong>{transaction.changed_files}</strong></span><span>项目目录<strong>{transaction.projects_root}</strong></span><span>备份目录<strong>{transaction.backup_root}</strong></span></div>
               <div className="transaction-actions">
-                <button className="icon-text-button" type="button" onClick={() => void openPath(transaction.transaction_backup_path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示备份</button>
+                <button className="icon-text-button" type="button" onClick={() => void handleReveal(transaction.transaction_backup_path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示备份</button>
                 {transaction.restored_project_paths.map((path) => (
-                  <button className="icon-text-button" type="button" aria-label={`显示项目 ${path}`} key={path} onClick={() => void openPath(path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示项目</button>
+                  <button className="icon-text-button" type="button" aria-label={`显示项目 ${path}`} key={path} onClick={() => void handleReveal(path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示项目</button>
                 ))}
-                <button className="rollback-button" type="button" aria-label="回滚此事务" disabled={!committed || busy} onClick={() => void handleRollback(transaction)}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}回滚</button>
+                <button className="rollback-button" type="button" aria-label={resumable ? "继续回滚事务" : "回滚此事务"} disabled={(!committed && !resumable) || busy} onClick={() => void handleRollback(transaction, rollbackAction)}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{resumable ? "继续回滚" : "回滚"}</button>
               </div>
             </article>
           );
@@ -87,6 +101,10 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
       </div>
     </div>
   );
+}
+
+function isResumable(status: RecoveryStatus): boolean {
+  return ["prepared", "applying", "verifying", "rolling_back", "rollback_failed"].includes(status);
 }
 
 function statusLabel(status: RecoveryStatus): string {

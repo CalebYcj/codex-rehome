@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Native file and folder selection for ReHome workflows",
+  "description": "ReHome Desktop main window",
   "windows": ["main"],
-  "permissions": ["dialog:allow-open", "dialog:allow-save"]
+  "permissions": []
 }

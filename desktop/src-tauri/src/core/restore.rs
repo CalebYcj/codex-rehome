@@ -11,7 +11,7 @@ use crate::core::{
     models::{
         ChangeKind, PendingRecovery, ProjectRegistration, RecoveryStatus, ReferenceRewriteKind,
         RegistrationStatus, RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs,
-        TransactionSummary, VerificationReport,
+        TransactionHistory, TransactionSummary, VerificationReport,
     },
     package::{inspect_package_for_planning, VerifiedPackage},
 };
@@ -98,6 +98,16 @@ pub fn rollback(transaction_id: Uuid) -> Result<RollbackReport, RehomeError> {
 
 pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
     crate::core::backup::list_transactions()
+}
+
+pub fn list_transaction_history() -> Result<TransactionHistory, RehomeError> {
+    crate::core::backup::list_transaction_history()
+}
+
+pub fn transaction_summary(
+    transaction_id: Uuid,
+) -> Result<Option<TransactionSummary>, RehomeError> {
+    crate::core::backup::transaction_summary(transaction_id)
 }
 
 pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeError> {

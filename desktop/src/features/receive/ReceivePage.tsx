@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
+import { useState, type RefObject } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -17,14 +17,16 @@ import {
   buildRestorePlan,
   inspectPackage,
   openRestoredThread,
-  pickDirectory,
-  pickRehomePackage,
+  selectRestoreDestinations,
 } from "../../lib/api";
 import {
   errorMessage,
   registrationIsComplete,
   type CodexInventory,
   type PackagePreview,
+  type ProjectRegistration,
+  type RegistrationStatus,
+  type RestoreLocationSelection,
   type RestorePlan,
   type RestoreReport,
 } from "../../lib/types";
@@ -48,31 +50,25 @@ const verificationLabels: Array<[keyof RestoreReport["verification"], string]> =
 ];
 
 export default function ReceivePage({ headingRef, inventory }: ReceivePageProps) {
-  const [packagePath, setPackagePath] = useState<string | null>(null);
   const [preview, setPreview] = useState<PackagePreview | null>(null);
-  const [targetHome, setTargetHome] = useState(inventory?.codex_home ?? "");
-  const [projectsRoot, setProjectsRoot] = useState("");
-  const [backupRoot, setBackupRoot] = useState("");
+  const [locations, setLocations] = useState<RestoreLocationSelection | null>(null);
   const [plan, setPlan] = useState<RestorePlan | null>(null);
   const [codexClosed, setCodexClosed] = useState(false);
   const [report, setReport] = useState<RestoreReport | null>(null);
   const [phase, setPhase] = useState<"idle" | "inspecting" | "planning" | "restoring">("idle");
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!targetHome && inventory?.codex_home) setTargetHome(inventory.codex_home);
-  }, [inventory, targetHome]);
+  const [registrationStatuses, setRegistrationStatuses] = useState<Record<string, string>>({});
 
   async function choosePackage() {
-    const selected = await pickRehomePackage();
-    if (!selected) return;
     setError(null);
     setPlan(null);
     setReport(null);
-    setPackagePath(selected);
+    setLocations(null);
+    setRegistrationStatuses({});
     setPhase("inspecting");
     try {
-      setPreview(await inspectPackage(selected));
+      const inspected = await inspectPackage();
+      if (inspected) setPreview(inspected);
     } catch (caught) {
       setPreview(null);
       setError(errorMessage(caught));
@@ -81,34 +77,27 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
     }
   }
 
-  async function chooseTarget() {
-    const selected = await pickDirectory("选择目标 Codex Home", targetHome || undefined);
-    if (selected) {
-      setTargetHome(selected);
-      setPlan(null);
+  async function chooseLocations() {
+    if (!preview) return;
+    setError(null);
+    try {
+      const selected = await selectRestoreDestinations(preview.selection_id);
+      if (selected) {
+        setLocations(selected);
+        setPlan(null);
+      }
+    } catch (caught) {
+      setError(errorMessage(caught));
     }
-  }
-
-  async function chooseProjects() {
-    const selected = await pickDirectory("选择项目目录", projectsRoot || undefined);
-    if (selected) {
-      setProjectsRoot(selected);
-      setPlan(null);
-    }
-  }
-
-  async function chooseBackup() {
-    const selected = await pickDirectory("选择备份目录", backupRoot || undefined);
-    if (selected) setBackupRoot(selected);
   }
 
   async function handlePlan() {
-    if (!packagePath || !targetHome || !projectsRoot) return;
+    if (!preview || !locations) return;
     setError(null);
     setReport(null);
     setPhase("planning");
     try {
-      setPlan(await buildRestorePlan(packagePath, targetHome, projectsRoot));
+      setPlan(await buildRestorePlan(preview.selection_id, locations.selection_id));
     } catch (caught) {
       setPlan(null);
       setError(errorMessage(caught));
@@ -118,13 +107,12 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
   }
 
   async function handleRestore() {
-    if (!plan || !backupRoot || plan.conflict_count > 0 || !codexClosed) return;
+    if (!plan || plan.conflict_count > 0 || !codexClosed) return;
     setError(null);
     setPhase("restoring");
     try {
       setReport(await applyRestore(plan.plan_id, {
         codex_closed_confirmed: true,
-        backup_root: backupRoot,
         register_projects: true,
       }));
     } catch (caught) {
@@ -134,9 +122,22 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
     }
   }
 
-  const canPlan = Boolean(preview && targetHome && projectsRoot && backupRoot && phase === "idle");
+  async function handleOpenRestored(registration: ProjectRegistration) {
+    setError(null);
+    try {
+      const status = await openRestoredThread(registration.project_path, report!.transaction_id);
+      setRegistrationStatuses((current) => ({
+        ...current,
+        [registration.project_id]: registrationStatusMessage(status),
+      }));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }
+
+  const canPlan = Boolean(preview && locations && phase === "idle");
   const canRestore = Boolean(
-    plan && plan.conflict_count === 0 && codexClosed && backupRoot && phase === "idle" && !report,
+    plan && plan.conflict_count === 0 && codexClosed && phase === "idle" && !report,
   );
   const manualRegistration = report?.registrations.some(
     (registration) => !registrationIsComplete(registration.status),
@@ -152,7 +153,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
 
       <section className="workflow-section" aria-labelledby="receive-package-title">
         <div className="section-title-row"><div><span className="step-number">1</span><h2 id="receive-package-title">检查迁移包</h2></div></div>
-        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>ReHome 包</strong><small>{packagePath ?? "尚未选择"}</small></span></div><button className="secondary-button" type="button" onClick={() => void choosePackage()} disabled={phase !== "idle"}>{phase === "inspecting" ? <LoaderCircle className="spin" aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}选择 ReHome 包</button></div>
+        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>ReHome 包</strong><small>{preview?.package_path ?? "尚未选择"}</small></span></div><button className="secondary-button" type="button" onClick={() => void choosePackage()} disabled={phase !== "idle"}>{phase === "inspecting" ? <LoaderCircle className="spin" aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}选择 ReHome 包</button></div>
         {preview && (
           <div className="preview-band">
             <div className="preview-facts">
@@ -172,9 +173,9 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
 
       <section className="workflow-section" aria-labelledby="receive-target-title">
         <div className="section-title-row"><div><span className="step-number">2</span><h2 id="receive-target-title">选择目标位置</h2></div></div>
-        <PathPicker icon={HardDrive} label="Codex Home" value={targetHome || "未检测"} buttonLabel="选择 Codex 目录" onClick={chooseTarget} />
-        <PathPicker icon={FolderOpen} label="项目目录" value={projectsRoot || "尚未选择"} buttonLabel="选择项目目录" onClick={chooseProjects} />
-        <PathPicker icon={ShieldCheck} label="事务备份" value={backupRoot || "尚未选择"} buttonLabel="选择备份目录" onClick={chooseBackup} />
+        <PathPicker icon={HardDrive} label="Codex Home" value={locations?.target_codex_home ?? inventory?.codex_home ?? "未检测"} />
+        <PathPicker icon={FolderOpen} label="项目目录" value={locations?.projects_root ?? "尚未选择"} buttonLabel="选择恢复位置" onClick={chooseLocations} disabled={!preview} />
+        <PathPicker icon={ShieldCheck} label="事务备份" value={locations?.backup_root ?? "尚未选择"} />
         <div className="command-row"><p>恢复计划会重新校验包，并只保存受信任的 plan_id。</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}生成恢复计划</button></div>
       </section>
 
@@ -207,7 +208,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
           </div>
           {manualRegistration && <p className="manual-status" role="status"><AlertTriangle aria-hidden="true" />项目文件已恢复，需要在 Codex 中手动打开</p>}
           {report.registrations.map((registration) => (
-            <div className="registration-row" key={registration.project_id}><code>{registration.project_path}</code><button className="secondary-button" type="button" onClick={() => void openRestoredThread(registration.project_path, report.transaction_id)}><FolderOpen aria-hidden="true" />在 Codex 中打开</button></div>
+            <div className="registration-row" key={registration.project_id}><code>{registration.project_path}</code><button className="secondary-button" type="button" onClick={() => void handleOpenRestored(registration)}><FolderOpen aria-hidden="true" />在 Codex 中打开</button>{registrationStatuses[registration.project_id] && <span role="status">{registrationStatuses[registration.project_id]}</span>}</div>
           ))}
         </section>
       )}
@@ -215,8 +216,8 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
   );
 }
 
-function PathPicker({ icon: Icon, label, value, buttonLabel, onClick }: { icon: typeof FolderOpen; label: string; value: string; buttonLabel: string; onClick: () => Promise<void> }) {
-  return <div className="form-row"><div className="form-label"><Icon aria-hidden="true" /><span><strong>{label}</strong><small>{value}</small></span></div><button className="secondary-button" type="button" onClick={() => void onClick()}><FolderOpen aria-hidden="true" />{buttonLabel}</button></div>;
+function PathPicker({ icon: Icon, label, value, buttonLabel, onClick, disabled }: { icon: typeof FolderOpen; label: string; value: string; buttonLabel?: string; onClick?: () => Promise<void>; disabled?: boolean }) {
+  return <div className="form-row"><div className="form-label"><Icon aria-hidden="true" /><span><strong>{label}</strong><small>{value}</small></span></div>{buttonLabel && onClick && <button className="secondary-button" type="button" disabled={disabled} onClick={() => void onClick()}><FolderOpen aria-hidden="true" />{buttonLabel}</button>}</div>;
 }
 
 function ProgressSteps({ active, complete }: { active: boolean; complete: boolean }) {
@@ -236,4 +237,10 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function registrationStatusMessage(status: RegistrationStatus): string {
+  if (status === "registered") return "已在 Codex 中登记";
+  if (typeof status === "object") return status.invocation_failed.message;
+  return "项目文件已恢复，需要在 Codex 中手动打开";
 }

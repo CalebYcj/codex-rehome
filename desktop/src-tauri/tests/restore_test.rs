@@ -11,8 +11,8 @@ use rehome_desktop_lib::core::{
     package::{create_package, inspect_package},
     planner::build_restore_plan,
     restore::{
-        apply_restore, apply_restore_by_id, apply_restore_with_registrar, list_transactions,
-        recover_incomplete_transactions, rollback,
+        apply_restore, apply_restore_by_id, apply_restore_with_registrar, list_transaction_history,
+        list_transactions, recover_incomplete_transactions, rollback, transaction_summary,
     },
 };
 use rusqlite::Connection;
@@ -94,6 +94,34 @@ fn transaction_history_lists_committed_and_rolled_back_journals_without_mutation
     assert_eq!(rolled_back.len(), 1);
     assert_eq!(rolled_back[0].status, RecoveryStatus::RolledBack);
     assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    Ok(())
+}
+
+#[test]
+fn malformed_unrelated_journal_is_isolated_from_history_and_direct_rollback(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore_by_id(harness.plan.plan_id, harness.options())?;
+    fs::write(harness.transactions_dir().join("notes.json"), b"not-json")?;
+
+    let history = list_transaction_history()?;
+
+    assert_eq!(history.transactions.len(), 1);
+    assert_eq!(
+        history.transactions[0].transaction_id,
+        report.transaction_id
+    );
+    assert_eq!(history.warnings.len(), 1);
+    assert!(history.warnings[0].contains("notes.json"));
+    assert_eq!(
+        transaction_summary(report.transaction_id)?
+            .expect("requested transaction")
+            .status,
+        RecoveryStatus::Committed
+    );
+
+    let rollback_report = rollback(report.transaction_id)?;
+    assert!(rollback_report.success);
     Ok(())
 }
 

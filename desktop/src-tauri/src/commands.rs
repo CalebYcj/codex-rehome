@@ -1,188 +1,19 @@
-use crate::core::{
-    bridge::register_project_with_detected_cli,
-    discovery::discover_codex as core_discover_codex,
-    error::{ErrorCode, RehomeError},
-    models::{
-        CodexInventory, CreatePackageReport, CreatePackageRequest, PackagePreview, RecoveryStatus,
-        RegistrationStatus, RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs,
-        TargetInventory, TransactionSummary,
-    },
-    package::{create_package as core_create_package, inspect_package as core_inspect_package},
-    planner::build_restore_plan as core_build_restore_plan,
-    restore::{
-        apply_restore_by_id, list_transactions as core_list_transactions, rollback as core_rollback,
-    },
-};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
-use tauri::AppHandle;
-use tauri_plugin_opener::OpenerExt;
-use uuid::Uuid;
-
-#[tauri::command]
-pub fn discover_codex(override_home: Option<PathBuf>) -> Result<CodexInventory, RehomeError> {
-    core_discover_codex(override_home)
-}
-
-#[tauri::command]
-pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageReport, RehomeError> {
-    core_create_package(request)
-}
-
-#[tauri::command]
-pub fn inspect_package(path: PathBuf) -> Result<PackagePreview, RehomeError> {
-    core_inspect_package(&path)
-}
-
-#[tauri::command]
-pub fn build_restore_plan(
-    package_path: PathBuf,
-    target_codex_home: PathBuf,
-    projects_root: PathBuf,
-) -> Result<RestorePlan, RehomeError> {
-    let package = core_inspect_package(&package_path)?;
-    let inventory = core_discover_codex(Some(target_codex_home))?;
-    let target = TargetInventory {
-        codex_home: inventory.codex_home,
-        target_os: inventory.source_os,
-        target_arch: inventory.source_arch,
-        counts: inventory.counts,
-        projects: inventory.projects,
-        conversations: inventory.conversations,
-    };
-    core_build_restore_plan(&package, &target, &projects_root)
-}
-
-#[tauri::command]
-pub fn apply_restore(plan_id: Uuid, options: RestoreOptions) -> Result<RestoreReport, RehomeError> {
-    apply_restore_by_id(plan_id, options)
-}
-
-#[tauri::command]
-pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
-    core_list_transactions()
-}
-
-#[tauri::command]
-pub fn rollback_transaction(transaction_id: Uuid) -> Result<RollbackReport, RehomeError> {
-    let transaction = transaction(transaction_id)?;
-    if transaction.status != RecoveryStatus::Committed {
-        return Err(RehomeError::new(
-            ErrorCode::RollbackFailed,
-            "only committed transactions can be rolled back from history",
-        ));
-    }
-    core_rollback(transaction_id)
-}
-
-#[tauri::command]
-pub fn open_path(
-    app: AppHandle,
-    path: PathBuf,
-    transaction_id: Option<Uuid>,
-) -> Result<(), RehomeError> {
-    let canonical = authorize_open_path(&path, transaction_id, false)?;
-    app.opener()
-        .reveal_item_in_dir(canonical)
-        .map_err(|error| open_failed(format!("could not reveal path: {error}")))
-}
-
-#[tauri::command]
-pub fn open_restored_thread(
-    path: PathBuf,
-    transaction_id: Uuid,
-) -> Result<RegistrationStatus, RehomeError> {
-    let canonical = authorize_open_path(&path, Some(transaction_id), true)?;
-    Ok(register_project_with_detected_cli(
-        current_source_os(),
-        &canonical,
-    ))
-}
-
-fn transaction(transaction_id: Uuid) -> Result<TransactionSummary, RehomeError> {
-    core_list_transactions()?
-        .into_iter()
-        .find(|transaction| transaction.transaction_id == transaction_id)
-        .ok_or_else(|| open_failed("transaction was not found"))
-}
-
-fn authorize_open_path(
-    path: &Path,
-    transaction_id: Option<Uuid>,
-    restored_only: bool,
-) -> Result<PathBuf, RehomeError> {
-    let canonical = canonical_existing(path)?;
-    let Some(transaction_id) = transaction_id else {
-        if !restored_only
-            && canonical
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("rehome"))
-        {
-            core_inspect_package(&canonical)?;
-            return Ok(canonical);
-        }
-        return Err(open_failed("path is not an application-owned package"));
-    };
-
-    let transaction = transaction(transaction_id)?;
-    authorize_transaction_path(&canonical, &transaction, restored_only)?;
-    Ok(canonical)
-}
-
-fn authorize_transaction_path(
-    canonical: &Path,
-    transaction: &TransactionSummary,
-    restored_only: bool,
-) -> Result<(), RehomeError> {
-    let exact_restored_project = transaction.restored_project_paths.iter().any(|path| {
-        fs::canonicalize(path).is_ok_and(|canonical_project| canonical_project == canonical)
-    });
-    let exact_transaction_backup = !restored_only
-        && fs::canonicalize(&transaction.transaction_backup_path)
-            .is_ok_and(|canonical_backup| canonical_backup == canonical);
-
-    if exact_restored_project || exact_transaction_backup {
-        Ok(())
-    } else {
-        Err(open_failed(
-            "path is not an exact object owned by the selected transaction",
-        ))
-    }
-}
-
-fn canonical_existing(path: &Path) -> Result<PathBuf, RehomeError> {
-    if !path.is_absolute() {
-        return Err(open_failed("path must be absolute"));
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| open_failed(format!("could not inspect path: {error}")))?;
-    if !metadata.is_file() && !metadata.is_dir() {
-        return Err(open_failed("path is not a regular file or directory"));
-    }
-    fs::canonicalize(path)
-        .map_err(|error| open_failed(format!("could not canonicalize path: {error}")))
-}
-
-fn current_source_os() -> SourceOs {
-    if cfg!(target_os = "macos") {
-        SourceOs::Macos
-    } else {
-        SourceOs::Windows
-    }
-}
-
-fn open_failed(message: impl Into<String>) -> RehomeError {
-    RehomeError::new(ErrorCode::RestoreFailed, message)
-}
+pub use crate::workflow::*;
 
 #[cfg(test)]
 mod tests {
-    use super::authorize_transaction_path;
-    use crate::core::models::{RecoveryStatus, TransactionSummary};
-    use std::fs;
+    use crate::core::models::{
+        CodexInventory, ContentCounts, ConversationEntry, ProjectEntry, RecoveryStatus, SourceOs,
+        TransactionSummary,
+    };
+    use crate::workflow::{
+        authorize_transaction_path, open_transaction_by_id, resolve_create_package_request,
+        rollback_transaction_by_id, validate_local_dialog_path, validate_rollback_action,
+        ApplyRestoreSelection, BuildRestorePlanRequest, CreatePackageSelection, RollbackAction,
+        WorkflowState,
+    };
+    use serde_json::json;
+    use std::{fs, path::PathBuf};
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -246,6 +77,211 @@ mod tests {
             true,
         )
         .is_err());
+    }
+
+    #[test]
+    fn renderer_requests_reject_forged_roots_paths_and_unc_outputs() {
+        let project_id = Uuid::new_v4();
+        let selection = json!({
+            "project_ids": [project_id],
+            "conversation_ids": [],
+            "include_skills": true,
+            "include_plugins": false,
+            "include_generated_images": false,
+            "codex_home": "C:\\forged\\.codex",
+            "project_paths": ["C:\\private"],
+            "output_path": "\\\\server\\share\\stolen.rehome"
+        });
+        assert!(serde_json::from_value::<CreatePackageSelection>(selection).is_err());
+
+        let build = json!({
+            "action": "build",
+            "package_selection_id": Uuid::new_v4(),
+            "destination_selection_id": Uuid::new_v4(),
+            "target_codex_home": "C:\\forged\\.codex",
+            "projects_root": "C:\\forged\\projects"
+        });
+        assert!(serde_json::from_value::<BuildRestorePlanRequest>(build).is_err());
+
+        let apply = json!({
+            "plan_id": Uuid::new_v4(),
+            "codex_closed_confirmed": true,
+            "register_projects": true,
+            "backup_root": "\\\\server\\share\\backup"
+        });
+        assert!(serde_json::from_value::<ApplyRestoreSelection>(apply).is_err());
+        assert!(
+            validate_local_dialog_path(&PathBuf::from("\\\\server\\share\\handoff.rehome"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn package_selection_uses_fresh_inventory_paths_and_rejects_project_chat_mismatch() {
+        let (inventory, selected_project, matching_chat, mismatched_chat, unassociated_chat) =
+            inventory_fixture();
+        let output = PathBuf::from("C:\\selected-by-native-dialog\\handoff.rehome");
+        let selection = CreatePackageSelection {
+            project_ids: vec![selected_project],
+            conversation_ids: vec![matching_chat, unassociated_chat],
+            include_skills: false,
+            include_plugins: false,
+            include_generated_images: false,
+        };
+
+        let resolved =
+            resolve_create_package_request(&inventory, selection.clone(), output.clone()).unwrap();
+        assert_eq!(resolved.codex_home, inventory.codex_home);
+        assert_eq!(
+            resolved.project_paths,
+            vec![PathBuf::from("C:\\Work\\alpha")]
+        );
+        assert_eq!(resolved.output_path, output);
+        assert_eq!(
+            resolved.conversation_ids,
+            vec![matching_chat, unassociated_chat]
+        );
+
+        let error = resolve_create_package_request(
+            &inventory,
+            CreatePackageSelection {
+                conversation_ids: vec![mismatched_chat],
+                ..selection
+            },
+            PathBuf::from("C:\\selected-by-native-dialog\\other.rehome"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, crate::core::error::ErrorCode::ProjectConflict);
+
+        let unknown_project_error = resolve_create_package_request(
+            &inventory,
+            CreatePackageSelection {
+                project_ids: vec![Uuid::new_v4()],
+                conversation_ids: vec![unassociated_chat],
+                include_skills: false,
+                include_plugins: false,
+                include_generated_images: false,
+            },
+            PathBuf::from("C:\\selected-by-native-dialog\\unknown.rehome"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unknown_project_error.code,
+            crate::core::error::ErrorCode::ProjectConflict
+        );
+    }
+
+    #[test]
+    fn unknown_or_cross_bound_capabilities_are_rejected() {
+        let state = WorkflowState::default();
+        assert!(state.resolve_package(Uuid::new_v4()).is_err());
+
+        let first_package = state.grant_package(PathBuf::from("C:\\packages\\first.rehome"));
+        let second_package = state.grant_package(PathBuf::from("C:\\packages\\second.rehome"));
+        let destinations = state.grant_restore_locations(
+            first_package,
+            PathBuf::from("C:\\projects"),
+            PathBuf::from("C:\\backups"),
+        );
+        assert!(state
+            .resolve_restore_locations(second_package, destinations)
+            .is_err());
+    }
+
+    #[test]
+    fn rollback_actions_distinguish_normal_and_recovery_paths() {
+        assert!(
+            validate_rollback_action(RecoveryStatus::Committed, RollbackAction::Rollback).is_ok()
+        );
+        for status in [
+            RecoveryStatus::Prepared,
+            RecoveryStatus::Applying,
+            RecoveryStatus::Verifying,
+            RecoveryStatus::RollingBack,
+            RecoveryStatus::RollbackFailed,
+        ] {
+            assert!(validate_rollback_action(status, RollbackAction::Resume).is_ok());
+            assert!(validate_rollback_action(status, RollbackAction::Rollback).is_err());
+        }
+        assert!(
+            validate_rollback_action(RecoveryStatus::Committed, RollbackAction::Resume).is_err()
+        );
+        assert!(
+            validate_rollback_action(RecoveryStatus::RolledBack, RollbackAction::Resume).is_err()
+        );
+    }
+
+    #[test]
+    fn missing_transactions_use_command_appropriate_error_codes() {
+        let transaction_id = Uuid::new_v4();
+        assert_eq!(
+            rollback_transaction_by_id(transaction_id).unwrap_err().code,
+            crate::core::error::ErrorCode::RollbackFailed
+        );
+        assert_eq!(
+            open_transaction_by_id(transaction_id).unwrap_err().code,
+            crate::core::error::ErrorCode::RestoreFailed
+        );
+    }
+
+    fn inventory_fixture() -> (CodexInventory, Uuid, Uuid, Uuid, Uuid) {
+        let alpha = Uuid::new_v4();
+        let beta = Uuid::new_v4();
+        let matching = Uuid::new_v4();
+        let mismatched = Uuid::new_v4();
+        let unassociated = Uuid::new_v4();
+        let project = |project_id, name: &str, path: &str| ProjectEntry {
+            project_id,
+            name: name.into(),
+            source_path: path.into(),
+            archive_path: format!("projects/{project_id}/files"),
+            file_count: 1,
+            content_bytes: 1,
+            git_remote: None,
+            git_branch: None,
+            git_head: None,
+        };
+        let conversation = |task_id, project_id| ConversationEntry {
+            task_id,
+            project_id,
+            title: task_id.to_string(),
+            updated_at: "2026-07-23T09:00:00Z".into(),
+            content_hash: "hash".into(),
+            archive_path: format!("codex/sessions/{task_id}.jsonl"),
+        };
+        (
+            CodexInventory {
+                codex_home: PathBuf::from("C:\\Users\\Me\\.codex"),
+                source_os: SourceOs::Windows,
+                source_arch: "x86_64".into(),
+                source_device_id: Uuid::new_v4(),
+                counts: ContentCounts::default(),
+                projects: vec![
+                    project(alpha, "alpha", "C:\\Work\\alpha"),
+                    project(beta, "beta", "C:\\Work\\beta"),
+                ],
+                project_paths: vec![
+                    PathBuf::from("C:\\Work\\alpha"),
+                    PathBuf::from("C:\\Work\\beta"),
+                ],
+                conversations: vec![
+                    conversation(matching, Some(alpha)),
+                    conversation(mismatched, Some(beta)),
+                    conversation(unassociated, None),
+                ],
+                conversation_paths: vec![],
+                session_index_path: None,
+                state_db_path: None,
+                skill_paths: vec![],
+                plugin_paths: vec![],
+                generated_image_paths: vec![],
+                warnings: vec![],
+            },
+            alpha,
+            matching,
+            mismatched,
+            unassociated,
+        )
     }
 
     struct OpenFixture {

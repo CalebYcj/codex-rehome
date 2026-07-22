@@ -301,3 +301,9 @@ pub struct TransactionSummary {
     pub restored_project_paths: Vec<PathBuf>,
     pub changed_files: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransactionHistory {
+    pub transactions: Vec<TransactionSummary>,
+    pub warnings: Vec<String>,
+}

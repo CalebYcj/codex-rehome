@@ -13,10 +13,8 @@ const api = vi.hoisted(() => ({
   listTransactions: vi.fn(),
   openPath: vi.fn(),
   openRestoredThread: vi.fn(),
-  pickDirectory: vi.fn(),
-  pickRehomePackage: vi.fn(),
-  pickRehomeSavePath: vi.fn(),
   rollbackTransaction: vi.fn(),
+  selectRestoreDestinations: vi.fn(),
 }));
 
 vi.mock("./lib/api", () => api);
@@ -69,6 +67,22 @@ const inventory = {
       content_hash: "abc",
       archive_path: "codex/sessions/desktop.jsonl",
     },
+    {
+      task_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      project_id: "33333333-3333-3333-3333-333333333333",
+      title: "Notes workflow",
+      updated_at: "2026-07-23T07:00:00Z",
+      content_hash: "def",
+      archive_path: "codex/sessions/notes.jsonl",
+    },
+    {
+      task_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      project_id: null,
+      title: "General workflow",
+      updated_at: "2026-07-23T06:00:00Z",
+      content_hash: "ghi",
+      archive_path: "codex/sessions/general.jsonl",
+    },
   ],
   conversation_paths: ["C:\\Users\\Me\\.codex\\sessions\\desktop.jsonl"],
   session_index_path: "C:\\Users\\Me\\.codex\\session_index.jsonl",
@@ -80,6 +94,7 @@ const inventory = {
 };
 
 const preview = {
+  selection_id: "12121212-1212-4121-8121-121212121212",
   package_path: "C:\\Transfers\\from-mac.rehome",
   archive_hash: "4f92c9d8e1a0",
   manifest: {
@@ -150,14 +165,23 @@ const committedTransaction = {
 beforeEach(() => {
   vi.clearAllMocks();
   api.discoverCodex.mockResolvedValue(inventory);
-  api.listTransactions.mockResolvedValue([]);
-  api.pickRehomePackage.mockResolvedValue(preview.package_path);
-  api.pickRehomeSavePath.mockResolvedValue("C:\\Transfers\\handoff.rehome");
-  api.pickDirectory.mockImplementation(async (title: string) =>
-    title.includes("备份") ? "C:\\ReHome Backups" : "C:\\Restored Projects",
-  );
+  api.listTransactions.mockResolvedValue({ transactions: [], warnings: [] });
   api.inspectPackage.mockResolvedValue(preview);
+  api.selectRestoreDestinations.mockResolvedValue({
+    selection_id: "13131313-1313-4131-8131-131313131313",
+    target_codex_home: inventory.codex_home,
+    projects_root: "C:\\Restored Projects",
+    backup_root: "C:\\ReHome Backups",
+  });
   api.buildRestorePlan.mockResolvedValue(basePlan);
+  api.openPath.mockResolvedValue(undefined);
+  api.openRestoredThread.mockResolvedValue("registered");
+  api.rollbackTransaction.mockResolvedValue({
+    transaction_id: committedTransaction.transaction_id,
+    completed_at: "2026-07-23T09:10:00Z",
+    restored_files: 8,
+    success: true,
+  });
   api.applyRestore.mockResolvedValue({
     transaction_id: committedTransaction.transaction_id,
     package_id: preview.manifest.package_id,
@@ -184,8 +208,7 @@ async function openReceive(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "前往接收" }));
   await user.click(screen.getByRole("button", { name: "选择 ReHome 包" }));
   await screen.findByText("macOS");
-  await user.click(screen.getByRole("button", { name: "选择项目目录" }));
-  await user.click(screen.getByRole("button", { name: "选择备份目录" }));
+  await user.click(screen.getByRole("button", { name: "选择恢复位置" }));
   await user.click(screen.getByRole("button", { name: "生成恢复计划" }));
   await screen.findByText("projects/rehome-app/README.md");
 }
@@ -207,7 +230,10 @@ describe("ReHome Desktop workflows", () => {
     ["rollback_failed", "回滚失败"],
     ["prepared", "已准备"],
   ] as const)("shows %s as %s in the recent handoff", async (status, label) => {
-    api.listTransactions.mockResolvedValue([{ ...committedTransaction, status }]);
+    api.listTransactions.mockResolvedValue({
+      transactions: [{ ...committedTransaction, status }],
+      warnings: [],
+    });
 
     render(<App />);
 
@@ -230,16 +256,21 @@ describe("ReHome Desktop workflows", () => {
     expect(createButton).toBeEnabled();
   });
 
-  it("offers project and conversation paths from the current discovery contract", async () => {
+  it("shows only selected-project conversations plus explicitly selectable unassociated conversations", async () => {
     const user = userEvent.setup();
-    api.discoverCodex.mockResolvedValue({
-      ...inventory,
-      projects: [],
-      conversations: [],
-      conversation_paths: [
-        "C:\\Users\\Me\\.codex\\sessions\\44444444-4444-4444-4444-444444444444.jsonl",
-      ],
-    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+
+    expect(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "选择对话 General workflow" })).toBeVisible();
+    expect(screen.queryByRole("checkbox", { name: "选择对话 Notes workflow" })).toBeNull();
+  });
+
+  it("offers projects and conversations from the current discovery contract", async () => {
+    const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
@@ -247,7 +278,11 @@ describe("ReHome Desktop workflows", () => {
 
     expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: "选择对话 对话 44444444" }),
+      screen.queryByRole("checkbox", { name: "选择对话 Desktop workflow" }),
+    ).toBeNull();
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    expect(
+      screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }),
     ).toBeInTheDocument();
   });
 
@@ -318,16 +353,68 @@ describe("ReHome Desktop workflows", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows invocation failure returned while opening a restored project", async () => {
+    const user = userEvent.setup();
+    api.applyRestore.mockResolvedValue(restoreReportWithRegistration("manual_open_required"));
+    api.openRestoredThread.mockResolvedValue({
+      invocation_failed: { message: "Codex 命令调用失败" },
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+
+    await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
+
+    expect(await screen.findByText("Codex 命令调用失败")).toBeInTheDocument();
+  });
+
+  it("shows the exact manual status returned while opening a restored project", async () => {
+    const user = userEvent.setup();
+    api.applyRestore.mockResolvedValue(restoreReportWithRegistration("manual_open_required"));
+    api.openRestoredThread.mockResolvedValue("manual_open_required");
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+
+    await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
+
+    expect(
+      await screen.findAllByText("项目文件已恢复，需要在 Codex 中手动打开"),
+    ).toHaveLength(2);
+  });
+
+  it("shows caught errors while opening a restored project", async () => {
+    const user = userEvent.setup();
+    api.applyRestore.mockResolvedValue(restoreReportWithRegistration("manual_open_required"));
+    api.openRestoredThread.mockRejectedValue({ message: "无法调用 Codex" });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+
+    await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法调用 Codex");
+  });
+
   it("only enables rollback for committed transactions", async () => {
     const user = userEvent.setup();
-    api.listTransactions.mockResolvedValue([
-      committedTransaction,
-      {
-        ...committedTransaction,
-        transaction_id: "99999999-9999-9999-9999-999999999999",
-        status: "rolled_back",
-      },
-    ]);
+    api.listTransactions.mockResolvedValue({
+      transactions: [
+        committedTransaction,
+        {
+          ...committedTransaction,
+          transaction_id: "99999999-9999-9999-9999-999999999999",
+          status: "rolled_back",
+        },
+      ],
+      warnings: [],
+    });
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
@@ -343,6 +430,41 @@ describe("ReHome Desktop workflows", () => {
     expect(within(rolledBackRow).getByRole("button", { name: "回滚此事务" })).toBeDisabled();
   });
 
+  it("offers a distinct recovery action for incomplete and failed rollbacks", async () => {
+    const user = userEvent.setup();
+    const prepared = {
+      ...committedTransaction,
+      transaction_id: "99999999-9999-4999-8999-999999999999",
+      status: "prepared",
+    };
+    api.listTransactions.mockResolvedValue({ transactions: [prepared], warnings: [] });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往历史" }));
+
+    const resume = await screen.findByRole("button", { name: "继续回滚事务" });
+    expect(resume).toBeEnabled();
+    await user.click(resume);
+
+    expect(api.rollbackTransaction).toHaveBeenCalledWith(prepared.transaction_id, "resume");
+  });
+
+  it("shows history reveal errors", async () => {
+    const user = userEvent.setup();
+    api.listTransactions.mockResolvedValue({
+      transactions: [committedTransaction],
+      warnings: [],
+    });
+    api.openPath.mockRejectedValue({ message: "无法显示备份" });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往历史" }));
+
+    await user.click(await screen.findByRole("button", { name: "显示备份" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法显示备份");
+  });
+
   it("moves focus to the page heading after navigation", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -355,3 +477,32 @@ describe("ReHome Desktop workflows", () => {
     expect(heading).toHaveFocus();
   });
 });
+
+function restoreReportWithRegistration(status: "manual_open_required") {
+  return {
+    transaction_id: committedTransaction.transaction_id,
+    package_id: preview.manifest.package_id,
+    completed_at: "2026-07-23T09:05:00Z",
+    restored_files: 8,
+    restored_bytes: 4096,
+    registrations: [
+      {
+        project_id: "22222222-2222-2222-2222-222222222222",
+        project_path: "C:\\Restored Projects\\rehome-app",
+        status,
+      },
+    ],
+    verification: {
+      package_checksum_valid: true,
+      files_valid: true,
+      sessions_valid: true,
+      session_index_valid: true,
+      sqlite_threads_valid: true,
+      path_mapping_valid: true,
+      forbidden_files_absent: true,
+      project_files_valid: true,
+      app_registration_valid: false,
+      app_visible_ready: false,
+    },
+  };
+}

@@ -69,11 +69,8 @@ export interface CodexInventory {
 }
 
 export interface CreatePackageRequest {
-  codex_home: string;
-  project_paths: string[];
+  project_ids: string[];
   conversation_ids: string[];
-  output_path: string;
-  source_device_id: string;
   include_skills: boolean;
   include_plugins: boolean;
   include_generated_images: boolean;
@@ -84,6 +81,8 @@ export interface CreatePackageReport {
   package_id: string;
   bytes_written: number;
   counts: ContentCounts;
+  archive_hash: string;
+  reveal_id: string;
 }
 
 export interface PackageManifest {
@@ -107,6 +106,7 @@ export interface PackageManifest {
 }
 
 export interface PackagePreview {
+  selection_id: string;
   package_path: string;
   archive_hash: string;
   manifest: PackageManifest;
@@ -143,8 +143,14 @@ export interface RestorePlan {
 
 export interface RestoreOptions {
   codex_closed_confirmed: boolean;
-  backup_root: string;
   register_projects: boolean;
+}
+
+export interface RestoreLocationSelection {
+  selection_id: string;
+  target_codex_home: string;
+  projects_root: string;
+  backup_root: string;
 }
 
 export interface VerificationReport {
@@ -195,6 +201,13 @@ export interface TransactionSummary {
   restored_project_paths: string[];
   changed_files: number;
 }
+
+export interface TransactionHistory {
+  transactions: TransactionSummary[];
+  warnings: string[];
+}
+
+export type RollbackAction = "rollback" | "resume";
 
 export function errorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
