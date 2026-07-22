@@ -430,6 +430,7 @@ fn rollback_preserves_replacement_created_after_target_was_quarantined(
     let target = PathBuf::from(operation["target"].as_str().unwrap());
     let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
     let quarantine = target.parent().unwrap().join(&quarantine_name);
+    let applied = fs::read(&target)?;
     fs::rename(&target, &quarantine)?;
     let replacement = b"replacement created while rollback was verifying quarantine\n";
     fs::write(&target, replacement)?;
@@ -445,7 +446,7 @@ fn rollback_preserves_replacement_created_after_target_was_quarantined(
         "{error:?}"
     );
     assert_eq!(fs::read(&target)?, replacement);
-    assert!(!quarantine.exists());
+    assert_eq!(fs::read(&quarantine)?, applied);
     Ok(())
 }
 
@@ -557,13 +558,16 @@ fn rollback_resumes_after_quarantine_verification_was_recorded() -> Result<(), B
         .unwrap();
     let target = PathBuf::from(operation["target"].as_str().unwrap());
     let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
-    fs::rename(&target, target.parent().unwrap().join(&quarantine_name))?;
+    let quarantine = target.parent().unwrap().join(&quarantine_name);
+    let applied = fs::read(&target)?;
+    fs::rename(&target, &quarantine)?;
     operation["rollback_quarantine"] = Value::String(quarantine_name);
     operation["rollback_progress"] = Value::String("quarantine_verified".into());
     fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
 
     assert!(rollback(report.transaction_id)?.success);
     assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    assert_eq!(fs::read(&quarantine)?, applied);
     Ok(())
 }
 

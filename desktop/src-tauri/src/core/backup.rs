@@ -717,22 +717,24 @@ fn rollback_operation(
     if journal.operations[index].rollback_progress == RollbackProgress::QuarantineVerified {
         let operation = journal.operations[index].clone();
         let quarantine = operation_quarantine(journal, &operation, index)?;
-        if quarantine_exists(&operation, &quarantine)? {
-            if !quarantine_matches_applied(&operation, &quarantine)? {
-                record_rollback_progress(
-                    journal_path,
-                    journal,
-                    index,
-                    RollbackProgress::TargetQuarantined,
-                )?;
-                restore_unrecognized_quarantine(journal_path, journal, index, &quarantine)?;
-                return Err(rollback_failed(format!(
-                    "rollback conflict: verified quarantine was replaced: {}",
-                    operation.target.display()
-                )));
-            }
-            remove_quarantine(&operation, &quarantine)?;
+        if quarantine_exists(&operation, &quarantine)?
+            && !quarantine_matches_applied(&operation, &quarantine)?
+        {
+            record_rollback_progress(
+                journal_path,
+                journal,
+                index,
+                RollbackProgress::TargetQuarantined,
+            )?;
+            restore_unrecognized_quarantine(journal_path, journal, index, &quarantine)?;
+            return Err(rollback_failed(format!(
+                "rollback conflict: verified quarantine was replaced: {}",
+                operation.target.display()
+            )));
         }
+        // Keep the verified applied state as recovery evidence. Deleting it by
+        // pathname would reopen a TOCTOU window where an unrelated concurrent
+        // replacement could be removed after the identity check.
         record_rollback_progress(
             journal_path,
             journal,
@@ -1068,19 +1070,6 @@ fn restore_unrecognized_quarantine(
             "could not restore unrecognized rollback quarantine: {error}"
         ))),
     }
-}
-
-fn remove_quarantine(operation: &BackupOperation, quarantine: &str) -> Result<(), RehomeError> {
-    let parent = operation
-        .target
-        .parent()
-        .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
-    let pinned = PinnedParent::open(parent).map_err(|error| {
-        rollback_failed(format!("could not pin rollback target parent: {error}"))
-    })?;
-    pinned
-        .remove_file(std::ffi::OsStr::new(quarantine))
-        .map_err(|error| rollback_failed(format!("could not consume rollback quarantine: {error}")))
 }
 
 fn restore_backup_file(
