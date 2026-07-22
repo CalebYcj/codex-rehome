@@ -1,7 +1,7 @@
 use crate::core::{
     bridge::{validate_restore_target, validate_restore_target_ancestry},
     error::{ErrorCode, RehomeError},
-    models::{PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport},
+    models::{PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport, TransactionSummary},
     stable_fs::PinnedParent,
 };
 use chrono::{SecondsFormat, Utc};
@@ -301,6 +301,54 @@ pub fn rollback(transaction_id: Uuid) -> Result<RollbackReport, RehomeError> {
     rollback_loaded(&journal_path, &mut journal)
 }
 
+pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
+    let Some(app_data) = existing_app_data_root()? else {
+        return Ok(Vec::new());
+    };
+    let transactions = app_data.join(TRANSACTIONS_DIRECTORY);
+    let entries = match fs::read_dir(&transactions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(rollback_failed(format!(
+                "could not enumerate transaction journals: {error}"
+            )))
+        }
+    };
+    let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|error| {
+        rollback_failed(format!("could not read transaction journal entry: {error}"))
+    })?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let mut summaries = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let transaction_id = journal_id_from_path(&path)?;
+        let journal = load_validated_journal(&path, Some(transaction_id))?;
+        summaries.push(TransactionSummary {
+            transaction_id: journal.transaction_id,
+            package_id: journal.package_id,
+            created_at: journal.created_at,
+            status: journal.status,
+            transaction_backup_path: journal.backup_root.join(journal.transaction_id.to_string()),
+            backup_root: journal.backup_root,
+            target_codex_home: journal.target_codex_home,
+            projects_root: journal.projects_root,
+            changed_files: journal.operations.len() as u64,
+        });
+    }
+    summaries.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.transaction_id.cmp(&left.transaction_id))
+    });
+    Ok(summaries)
+}
+
 pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeError> {
     let transactions = app_data_root()?.join(TRANSACTIONS_DIRECTORY);
     let entries = match fs::read_dir(&transactions) {
@@ -322,18 +370,7 @@ pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeE
         if path.extension().is_none_or(|x| x != "json") {
             continue;
         }
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            rollback_failed(format!("could not inspect transaction journal: {error}"))
-        })?;
-        if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
-            return Err(rollback_failed("transaction journal is not a regular file"));
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| rollback_failed("transaction journal file name is not a UUID"))?;
-        let transaction_id = Uuid::parse_str(stem)
-            .map_err(|_| rollback_failed("transaction journal file name is not a UUID"))?;
+        let transaction_id = journal_id_from_path(&path)?;
         let journal = load_validated_journal(&path, Some(transaction_id))?;
         remove_owned_stale_locks(&journal)?;
         if matches!(
@@ -352,6 +389,21 @@ pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeE
     }
     pending.sort_by_key(|entry| (entry.created_at.clone(), entry.transaction_id));
     Ok(pending)
+}
+
+fn journal_id_from_path(path: &Path) -> Result<Uuid, RehomeError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        rollback_failed(format!("could not inspect transaction journal: {error}"))
+    })?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(rollback_failed("transaction journal is not a regular file"));
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| rollback_failed("transaction journal file name is not a UUID"))?;
+    Uuid::parse_str(stem)
+        .map_err(|_| rollback_failed("transaction journal file name is not a UUID"))
 }
 
 fn mutable_targets(
@@ -1367,6 +1419,10 @@ fn validate_relative_path(path: &Path) -> Result<(), RehomeError> {
 }
 
 fn app_data_root() -> Result<PathBuf, RehomeError> {
+    create_and_canonicalize_directory(&app_data_root_path()?, "application data directory")
+}
+
+fn app_data_root_path() -> Result<PathBuf, RehomeError> {
     let base = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| {
@@ -1382,11 +1438,23 @@ fn app_data_root() -> Result<PathBuf, RehomeError> {
             })
         })
         .ok_or_else(|| restore_failed("could not resolve the ReHome application data directory"))?;
-    create_and_canonicalize_directory(&base.join(APP_IDENTIFIER), "application data directory")
+    Ok(base.join(APP_IDENTIFIER))
+}
+
+fn existing_app_data_root() -> Result<Option<PathBuf>, RehomeError> {
+    let path = app_data_root_path()?;
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(rollback_failed(format!(
+            "could not resolve the ReHome application data directory: {error}"
+        ))),
+    }
 }
 
 fn journal_path(transaction_id: Uuid) -> Result<PathBuf, RehomeError> {
-    Ok(app_data_root()?
+    let app_data = existing_app_data_root()?.unwrap_or(app_data_root_path()?);
+    Ok(app_data
         .join(TRANSACTIONS_DIRECTORY)
         .join(format!("{transaction_id}.json")))
 }

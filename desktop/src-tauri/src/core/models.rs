@@ -287,3 +287,16 @@ pub struct PendingRecovery {
     pub status: RecoveryStatus,
     pub backup_root: PathBuf,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransactionSummary {
+    pub transaction_id: Uuid,
+    pub package_id: Uuid,
+    pub created_at: String,
+    pub status: RecoveryStatus,
+    pub backup_root: PathBuf,
+    pub transaction_backup_path: PathBuf,
+    pub target_codex_home: PathBuf,
+    pub projects_root: PathBuf,
+    pub changed_files: u64,
+}

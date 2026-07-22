@@ -2,11 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
+  CheckCircle2,
   Clock3,
   Home,
   Laptop,
+  LoaderCircle,
+  TriangleAlert,
 } from "lucide-react";
 
+import HomePage from "./features/home/HomePage";
+import HistoryPage from "./features/history/HistoryPage";
+import ReceivePage from "./features/receive/ReceivePage";
+import SendPage from "./features/send/SendPage";
+import { discoverCodex } from "./lib/api";
+import { errorMessage, type CodexInventory } from "./lib/types";
 import "./App.css";
 
 export type View = "home" | "send" | "receive" | "history";
@@ -32,8 +41,28 @@ const viewTitles: Record<View, string> = {
 
 export default function App() {
   const [view, setView] = useState<View>("home");
+  const [inventory, setInventory] = useState<CodexInventory | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previousViewRef = useRef(view);
+
+  useEffect(() => {
+    let active = true;
+    void discoverCodex()
+      .then((detected) => {
+        if (active) setInventory(detected);
+      })
+      .catch((caught) => {
+        if (active) setDiscoveryError(errorMessage(caught));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (previousViewRef.current !== view) {
@@ -42,14 +71,16 @@ export default function App() {
     }
   }, [view]);
 
+  function navigate(next: View) {
+    setView(next);
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <button className="brand" type="button" onClick={() => setView("home")} aria-label="ReHome 首页">
-          <span className="brand-mark" aria-hidden="true">
-            R
-          </span>
-          <span>ReHome</span>
+        <button className="brand" type="button" onClick={() => navigate("home")} aria-label="ReHome 首页">
+          <span className="brand-mark" aria-hidden="true">R</span>
+          <span className="brand-copy"><strong>ReHome</strong><small>Desktop</small></span>
         </button>
 
         <nav className="navigation" aria-label="主导航">
@@ -59,68 +90,39 @@ export default function App() {
               data-active={view === id}
               type="button"
               aria-label={accessibleLabel}
+              title={label}
               aria-current={view === id ? "page" : undefined}
-              onClick={() => setView(id)}
+              onClick={() => navigate(id)}
               key={id}
             >
-              <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
+              <Icon aria-hidden="true" />
               <span>{label}</span>
             </button>
           ))}
         </nav>
 
         <div className="sidebar-meta">
-          <Laptop size={16} aria-hidden="true" />
-          <span>Desktop MVP</span>
+          <Laptop aria-hidden="true" />
+          <span>离线本机迁移</span>
         </div>
       </aside>
 
-      <main className="workspace">
+      <main className="workspace" data-view={view}>
         <header className="topbar">
           <span className="topbar-title">{viewTitles[view]}</span>
-          <span className="status-chip">
-            <span className="status-dot" aria-hidden="true" />
-            本机
-          </span>
+          {loading ? (
+            <span className="machine-status"><LoaderCircle className="spin" aria-hidden="true" />正在检测</span>
+          ) : discoveryError ? (
+            <span className="machine-status machine-error"><TriangleAlert aria-hidden="true" />未检测到 Codex</span>
+          ) : (
+            <span className="machine-status"><CheckCircle2 aria-hidden="true" />本机已就绪</span>
+          )}
         </header>
 
-        {view === "home" ? (
-          <div className="home-view">
-            <section className="intro" aria-labelledby="home-title">
-              <p className="eyebrow">CODEX WORKSPACE</p>
-              <h1 id="home-title" ref={headingRef} tabIndex={-1}>
-                迁移工作台
-              </h1>
-            </section>
-
-            <section className="actions" aria-label="迁移操作">
-              <button className="action-button action-send" type="button" onClick={() => setView("send")}>
-                <ArrowUpFromLine size={23} strokeWidth={1.8} aria-hidden="true" />
-                <span>发送</span>
-              </button>
-              <button className="action-button action-receive" type="button" onClick={() => setView("receive")}>
-                <ArrowDownToLine size={23} strokeWidth={1.8} aria-hidden="true" />
-                <span>接收</span>
-              </button>
-            </section>
-
-            <section className="activity" aria-labelledby="activity-title">
-              <div className="section-heading">
-                <h2 id="activity-title">最近交接</h2>
-                <Clock3 size={17} aria-hidden="true" />
-              </div>
-              <div className="empty-row">暂无交接记录</div>
-            </section>
-          </div>
-        ) : (
-          <section className="view-panel">
-            <p className="eyebrow">REHOME</p>
-            <h1 ref={headingRef} tabIndex={-1}>
-              {viewTitles[view]}
-            </h1>
-            <div className="view-rule" aria-hidden="true" />
-          </section>
-        )}
+        {view === "home" && <HomePage headingRef={headingRef} inventory={inventory} loading={loading} error={discoveryError} onNavigate={navigate} />}
+        {view === "send" && <SendPage headingRef={headingRef} inventory={inventory} />}
+        {view === "receive" && <ReceivePage headingRef={headingRef} inventory={inventory} />}
+        {view === "history" && <HistoryPage headingRef={headingRef} />}
       </main>
     </div>
   );

@@ -11,7 +11,7 @@ use rehome_desktop_lib::core::{
     package::{create_package, inspect_package},
     planner::build_restore_plan,
     restore::{
-        apply_restore, apply_restore_by_id, apply_restore_with_registrar,
+        apply_restore, apply_restore_by_id, apply_restore_with_registrar, list_transactions,
         recover_incomplete_transactions, rollback,
     },
 };
@@ -68,6 +68,51 @@ fn successful_restore_commits_with_layered_verification() -> Result<(), Box<dyn 
         operation["target"] == harness.plan.sessions[0].target.to_string_lossy().as_ref()
             && operation["backup_kind"] == "absent"
     }));
+    Ok(())
+}
+
+#[test]
+fn transaction_history_lists_committed_and_rolled_back_journals_without_mutation(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore_by_id(harness.plan.plan_id, harness.options())?;
+
+    let committed = list_transactions()?;
+
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].transaction_id, report.transaction_id);
+    assert_eq!(committed[0].status, RecoveryStatus::Committed);
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::Committed);
+
+    rollback(report.transaction_id)?;
+    let rolled_back = list_transactions()?;
+
+    assert_eq!(rolled_back.len(), 1);
+    assert_eq!(rolled_back[0].status, RecoveryStatus::RolledBack);
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    Ok(())
+}
+
+#[test]
+fn empty_transaction_history_does_not_create_app_data_directories() -> Result<(), Box<dyn Error>> {
+    let _env_lock = APP_DATA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let local_app_data = tempfile::tempdir()?;
+    let previous = env::var_os("LOCALAPPDATA");
+    env::set_var("LOCALAPPDATA", local_app_data.path());
+    let application_root = local_app_data.path().join("com.rehome.desktop");
+
+    let history = list_transactions();
+    let application_root_created = application_root.exists();
+
+    if let Some(value) = previous {
+        env::set_var("LOCALAPPDATA", value);
+    } else {
+        env::remove_var("LOCALAPPDATA");
+    }
+    assert!(history?.is_empty());
+    assert!(!application_root_created);
     Ok(())
 }
 

@@ -11,7 +11,7 @@ use crate::core::{
     models::{
         ChangeKind, PendingRecovery, ProjectRegistration, RecoveryStatus, ReferenceRewriteKind,
         RegistrationStatus, RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs,
-        VerificationReport,
+        TransactionSummary, VerificationReport,
     },
     package::{inspect_package_for_planning, VerifiedPackage},
 };
@@ -94,6 +94,10 @@ fn apply_server_plan(
 
 pub fn rollback(transaction_id: Uuid) -> Result<RollbackReport, RehomeError> {
     crate::core::backup::rollback(transaction_id)
+}
+
+pub fn list_transactions() -> Result<Vec<TransactionSummary>, RehomeError> {
+    crate::core::backup::list_transactions()
 }
 
 pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeError> {
