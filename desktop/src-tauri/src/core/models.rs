@@ -159,6 +159,15 @@ pub enum ReferenceRewriteKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationStatus {
+    Registered,
+    CommandUnavailable,
+    InvocationFailed { message: String },
+    ManualOpenRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReferenceRewrite {
     pub source_task_id: Uuid,
     pub package_source: String,

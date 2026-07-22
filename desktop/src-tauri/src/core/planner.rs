@@ -833,14 +833,26 @@ fn rewrite_known_metadata_fields(
     rewrites: &[&ReferenceRewrite],
     include_identity: bool,
 ) {
+    if let Some(values) = value.as_array_mut() {
+        for value in values {
+            rewrite_known_metadata_fields(value, rewrites, include_identity);
+        }
+        return;
+    }
     let Some(object) = value.as_object_mut() else {
         return;
     };
     for (field, value) in object {
+        if !matches!(
+            field.as_str(),
+            "message" | "messages" | "content" | "text" | "input" | "output" | "instructions"
+        ) {
+            rewrite_known_metadata_fields(value, rewrites, include_identity);
+        }
         let Some(text) = value.as_str() else {
             continue;
         };
-        let allowed = rewrites.iter().find(|rewrite| {
+        if let Some(rewrite) = rewrites.iter().find(|rewrite| {
             text == rewrite.from
                 && match rewrite.kind {
                     ReferenceRewriteKind::ConversationId => {
@@ -855,8 +867,7 @@ fn rewrite_known_metadata_fields(
                         matches!(field.as_str(), "rollout" | "rollout_path")
                     }
                 }
-        });
-        if let Some(rewrite) = allowed {
+        }) {
             *value = serde_json::Value::String(rewrite.to.clone());
         }
     }
