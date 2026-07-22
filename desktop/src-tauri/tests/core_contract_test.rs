@@ -3,8 +3,9 @@ use rehome_desktop_lib::core::{
     models::{
         ChangeKind, CodexInventory, ContentCounts, ConversationEntry, CreatePackageReport,
         CreatePackageRequest, ExclusionSummary, PackageManifest, PackageMode, PackagePreview,
-        PendingRecovery, PlannedOperation, ProjectEntry, RecoveryStatus, RestoreOptions,
-        RestorePlan, RestoreReport, RollbackReport, SourceOs, TargetInventory, VerificationReport,
+        PendingRecovery, PlannedOperation, PlannedSession, ProjectEntry, RecoveryStatus,
+        ReferenceRewrite, ReferenceRewriteKind, RestoreOptions, RestorePlan, RestoreReport,
+        RollbackReport, SessionAction, SourceOs, TargetInventory, VerificationReport,
     },
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -119,6 +120,10 @@ fn public_models_support_the_core_contract_traits() {
     assert_contract::<CreatePackageReport>();
     assert_contract::<PackagePreview>();
     assert_contract::<ChangeKind>();
+    assert_contract::<SessionAction>();
+    assert_contract::<ReferenceRewriteKind>();
+    assert_contract::<ReferenceRewrite>();
+    assert_contract::<PlannedSession>();
     assert_contract::<PlannedOperation>();
     assert_contract::<RestorePlan>();
     assert_contract::<RestoreOptions>();
@@ -139,6 +144,19 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
         (ChangeKind::Unchanged, "unchanged"),
         (ChangeKind::Conflict, "conflict"),
     ];
+    let session_actions = [
+        (SessionAction::Skip, "skip"),
+        (SessionAction::Import, "import"),
+        (SessionAction::ImportAsBranch, "import_as_branch"),
+    ];
+    let rewrite_kinds = [
+        (ReferenceRewriteKind::ConversationId, "conversation_id"),
+        (
+            ReferenceRewriteKind::ConversationTitle,
+            "conversation_title",
+        ),
+        (ReferenceRewriteKind::ProjectPath, "project_path"),
+    ];
     let recovery_statuses = [
         (RecoveryStatus::Prepared, "prepared"),
         (RecoveryStatus::Applying, "applying"),
@@ -152,6 +170,12 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
     for (value, expected) in change_kinds {
         assert_eq!(serde_json::to_value(value).unwrap(), expected);
     }
+    for (value, expected) in session_actions {
+        assert_eq!(serde_json::to_value(value).unwrap(), expected);
+    }
+    for (value, expected) in rewrite_kinds {
+        assert_eq!(serde_json::to_value(value).unwrap(), expected);
+    }
     for (value, expected) in recovery_statuses {
         assert_eq!(serde_json::to_value(value).unwrap(), expected);
     }
@@ -160,7 +184,7 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
 #[test]
 fn restore_and_recovery_contracts_use_typed_state() {
     let operation = PlannedOperation {
-        package_source: Some("projects/project-id/files/README.md".into()),
+        package_source: "projects/project-id/files/README.md".into(),
         target: PathBuf::from(r"C:\Users\NewUser\Documents\visual\README.md"),
         expected_previous_hash: None,
         action: ChangeKind::Add,
@@ -172,6 +196,8 @@ fn restore_and_recovery_contracts_use_typed_state() {
         target_codex_home: PathBuf::from(r"C:\Users\NewUser\.codex"),
         projects_root: PathBuf::from(r"C:\Users\NewUser\Documents"),
         operations: vec![operation.clone()],
+        sessions: vec![],
+        reference_rewrites: vec![],
         conflict_count: 0,
         required_bytes: 18,
     };

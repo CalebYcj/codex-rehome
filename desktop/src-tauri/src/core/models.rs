@@ -140,9 +140,44 @@ pub enum ChangeKind {
     Conflict,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    Skip,
+    Import,
+    ImportAsBranch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceRewriteKind {
+    ConversationId,
+    ConversationTitle,
+    ProjectPath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceRewrite {
+    pub package_source: String,
+    pub kind: ReferenceRewriteKind,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlannedSession {
+    pub package_source: String,
+    pub target: PathBuf,
+    pub source_task_id: Uuid,
+    pub target_task_id: Uuid,
+    pub title: String,
+    pub content_hash: String,
+    pub action: SessionAction,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlannedOperation {
-    pub package_source: Option<String>,
+    pub package_source: String,
     pub target: PathBuf,
     pub expected_previous_hash: Option<String>,
     pub action: ChangeKind,
@@ -156,6 +191,8 @@ pub struct RestorePlan {
     pub target_codex_home: PathBuf,
     pub projects_root: PathBuf,
     pub operations: Vec<PlannedOperation>,
+    pub sessions: Vec<PlannedSession>,
+    pub reference_rewrites: Vec<ReferenceRewrite>,
     pub conflict_count: u64,
     pub required_bytes: u64,
 }
