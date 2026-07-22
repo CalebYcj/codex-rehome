@@ -538,7 +538,7 @@ fn looks_like_windows_path(raw: &str) -> bool {
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
-struct StateDatabaseSnapshot {
+pub(crate) struct StateDatabaseSnapshot {
     _directory: tempfile::TempDir,
     database_path: PathBuf,
 }
@@ -552,7 +552,7 @@ struct SourceFileFingerprint {
 }
 
 impl StateDatabaseSnapshot {
-    fn create(source_database: &Path) -> io::Result<Self> {
+    pub(crate) fn create(source_database: &Path) -> io::Result<Self> {
         const MAX_ATTEMPTS: usize = 3;
 
         let directory = tempfile::Builder::new()
@@ -586,6 +586,10 @@ impl StateDatabaseSnapshot {
         }
 
         Err(last_error.unwrap_or_else(|| io::Error::other("state database snapshot did not run")))
+    }
+
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.database_path
     }
 }
 
