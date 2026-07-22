@@ -5,6 +5,10 @@ use rusqlite::Connection;
 use serde_json::Value;
 use std::{error::Error, fs};
 
+const THREAD_TITLE: &str = "Synthetic migration thread";
+const SOURCE_ROLLOUT_PATH: &str =
+    r"C:\Users\OldUser\.codex\sessions\11111111-1111-4111-8111-111111111111.jsonl";
+
 #[test]
 fn synthetic_fixture_contains_every_codex_and_project_element() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
@@ -14,17 +18,17 @@ fn synthetic_fixture_contains_every_codex_and_project_element() -> Result<(), Bo
 
     let session: Value = serde_json::from_str(&fs::read_to_string(&fixture.session_path)?)?;
     assert_eq!(session["thread_id"], THREAD_ID);
+    assert_eq!(session["project_id"], PROJECT_ID);
     assert_eq!(session["timestamp"], FIXED_TIMESTAMP);
     assert_eq!(session["cwd"], WINDOWS_CWD);
 
     let index: Value = serde_json::from_str(&fs::read_to_string(&fixture.session_index_path)?)?;
     assert_eq!(index["id"], THREAD_ID);
+    assert_eq!(index["project_id"], session["project_id"]);
+    assert_eq!(index["title"], THREAD_TITLE);
     assert_eq!(index["updated_at"], FIXED_TIMESTAMP);
     assert_eq!(index["cwd"], WINDOWS_CWD);
-    assert_eq!(
-        index["rollout_path"],
-        fixture.session_path.to_string_lossy().as_ref()
-    );
+    assert_eq!(index["rollout_path"], SOURCE_ROLLOUT_PATH);
 
     assert!(fs::read_to_string(&fixture.skill_path)?.contains("Synthetic Skill"));
     let plugin: Value = serde_json::from_str(&fs::read_to_string(&fixture.plugin_manifest_path)?)?;
@@ -56,11 +60,29 @@ fn synthetic_fixture_contains_every_codex_and_project_element() -> Result<(), Bo
 }
 
 #[test]
+fn synthetic_fixture_source_metadata_is_byte_stable() -> Result<(), Box<dyn Error>> {
+    let first = synthetic_codex_fixture()?;
+    let second = synthetic_codex_fixture()?;
+
+    assert_eq!(
+        fs::read(first.session_path)?,
+        fs::read(second.session_path)?
+    );
+    assert_eq!(
+        fs::read(first.session_index_path)?,
+        fs::read(second.session_index_path)?
+    );
+
+    Ok(())
+}
+
+#[test]
 fn synthetic_fixture_sqlite_thread_matches_session() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
+    let index: Value = serde_json::from_str(&fs::read_to_string(&fixture.session_index_path)?)?;
     let connection = Connection::open(&fixture.state_db_path)?;
     let row = connection.query_row(
-        "SELECT id, project_id, updated_at, cwd, rollout_path FROM threads WHERE id = ?1",
+        "SELECT id, project_id, title, updated_at, cwd, rollout_path FROM threads WHERE id = ?1",
         [THREAD_ID],
         |row| {
             Ok((
@@ -69,15 +91,27 @@ fn synthetic_fixture_sqlite_thread_matches_session() -> Result<(), Box<dyn Error
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         },
+    )?;
+    let total_rows: u64 =
+        connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
+    let fixed_id_rows: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM threads WHERE id = ?1",
+        [THREAD_ID],
+        |row| row.get(0),
     )?;
 
     assert_eq!(row.0, THREAD_ID);
     assert_eq!(row.1, PROJECT_ID);
-    assert_eq!(row.2, FIXED_TIMESTAMP);
-    assert_eq!(row.3, WINDOWS_CWD);
-    assert_eq!(row.4, fixture.session_path.to_string_lossy());
+    assert_eq!(row.2, THREAD_TITLE);
+    assert_eq!(row.2, index["title"].as_str().unwrap());
+    assert_eq!(row.3, FIXED_TIMESTAMP);
+    assert_eq!(row.4, WINDOWS_CWD);
+    assert_eq!(row.5, SOURCE_ROLLOUT_PATH);
+    assert_eq!(total_rows, 1);
+    assert_eq!(fixed_id_rows, 1);
 
     Ok(())
 }

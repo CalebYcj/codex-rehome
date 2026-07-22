@@ -7,6 +7,9 @@ pub const THREAD_ID: &str = "11111111-1111-4111-8111-111111111111";
 pub const PROJECT_ID: &str = "22222222-2222-4222-8222-222222222222";
 pub const FIXED_TIMESTAMP: &str = "2026-07-22T00:00:00Z";
 pub const WINDOWS_CWD: &str = r"C:\Users\OldUser\Documents\visual";
+const THREAD_TITLE: &str = "Synthetic migration thread";
+const SOURCE_ROLLOUT_PATH: &str =
+    r"C:\Users\OldUser\.codex\sessions\11111111-1111-4111-8111-111111111111.jsonl";
 
 pub struct SyntheticCodexFixture {
     pub temp_dir: TempDir,
@@ -74,10 +77,10 @@ pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>
             serde_json::to_string(&json!({
                 "id": THREAD_ID,
                 "project_id": PROJECT_ID,
-                "title": "Synthetic migration thread",
+                "title": THREAD_TITLE,
                 "updated_at": FIXED_TIMESTAMP,
                 "cwd": WINDOWS_CWD,
-                "rollout_path": session_path,
+                "rollout_path": SOURCE_ROLLOUT_PATH,
             }))?
         ),
     )?;
@@ -102,10 +105,10 @@ pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>
             params![
                 THREAD_ID,
                 PROJECT_ID,
-                "Synthetic migration thread",
+                THREAD_TITLE,
                 FIXED_TIMESTAMP,
                 WINDOWS_CWD,
-                session_path.to_string_lossy().as_ref(),
+                SOURCE_ROLLOUT_PATH,
             ],
         )?;
     }
