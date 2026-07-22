@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -313,6 +313,88 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByRole("button", { name: "开始恢复" })).toBeDisabled();
   });
 
+  it("disables every native picker while a location selection is pending", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<typeof api.selectRestoreDestinations>>>();
+    api.selectRestoreDestinations.mockReturnValue(pending.promise);
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往接收" }));
+    await user.click(screen.getByRole("button", { name: "选择 ReHome 包" }));
+    await screen.findByText("macOS");
+
+    await user.click(screen.getByRole("button", { name: "选择恢复位置" }));
+
+    expect(screen.getByRole("button", { name: "选择 ReHome 包" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "选择恢复位置" })).toBeDisabled();
+    pending.resolve(null);
+  });
+
+  it("ignores a stale location selection that resolves after a newer request", async () => {
+    const user = userEvent.setup();
+    const first = deferred<Awaited<ReturnType<typeof api.selectRestoreDestinations>>>();
+    const second = deferred<Awaited<ReturnType<typeof api.selectRestoreDestinations>>>();
+    api.selectRestoreDestinations
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往接收" }));
+    await user.click(screen.getByRole("button", { name: "选择 ReHome 包" }));
+    await screen.findByText("macOS");
+    const picker = screen.getByRole("button", { name: "选择恢复位置" });
+
+    act(() => {
+      picker.click();
+      picker.click();
+    });
+    expect(api.selectRestoreDestinations).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      second.resolve({
+        selection_id: "14141414-1414-4141-8141-141414141414",
+        target_codex_home: inventory.codex_home,
+        projects_root: "C:\\Newest Projects",
+        backup_root: "C:\\Newest Backups",
+      });
+      await second.promise;
+    });
+    await act(async () => {
+      first.resolve({
+        selection_id: "15151515-1515-4151-8151-151515151515",
+        target_codex_home: inventory.codex_home,
+        projects_root: "C:\\Stale Projects",
+        backup_root: "C:\\Stale Backups",
+      });
+      await first.promise;
+    });
+
+    expect(screen.getByText("C:\\Newest Projects")).toBeInTheDocument();
+    expect(screen.queryByText("C:\\Stale Projects")).toBeNull();
+  });
+
+  it("clears restore results and confirmation when the selected location changes", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+    expect(await screen.findByText("恢复事务已提交")).toBeInTheDocument();
+
+    api.selectRestoreDestinations.mockResolvedValueOnce({
+      selection_id: "16161616-1616-4161-8161-161616161616",
+      target_codex_home: inventory.codex_home,
+      projects_root: "C:\\Changed Projects",
+      backup_root: "C:\\Changed Backups",
+    });
+    await user.click(screen.getByRole("button", { name: "选择恢复位置" }));
+
+    expect(screen.queryByText("恢复事务已提交")).toBeNull();
+    expect(screen.queryByText("projects/rehome-app/README.md")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "生成恢复计划" }));
+    expect(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" })).not.toBeChecked();
+  });
+
   it("uses the exact manual-open status when registration is incomplete", async () => {
     const user = userEvent.setup();
     api.applyRestore.mockResolvedValue({
@@ -505,4 +587,12 @@ function restoreReportWithRegistration(status: "manual_open_required") {
       app_visible_ready: false,
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

@@ -1,5 +1,5 @@
 use crate::core::{
-    discovery::{discover_codex, StateDatabaseSnapshot},
+    discovery::{associated_project_id, discover_codex, StateDatabaseSnapshot},
     error::{ErrorCode, RehomeError},
     exclusions::is_forbidden,
     models::{
@@ -93,10 +93,13 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
         &request.conversation_ids,
     )?;
     let conversations = stage_conversations(
-        &inventory.conversation_paths,
-        &request.codex_home,
-        &request.conversation_ids,
-        &index_metadata,
+        ConversationSelection {
+            paths: &inventory.conversation_paths,
+            codex_home: &request.codex_home,
+            selected_ids: &request.conversation_ids,
+            index: &index_metadata,
+            projects: &projects,
+        },
         staging.path(),
         &mut payloads,
         &mut counts,
@@ -505,6 +508,14 @@ struct SessionIndexMetadata {
     by_id: BTreeMap<Uuid, Value>,
 }
 
+struct ConversationSelection<'a> {
+    paths: &'a [PathBuf],
+    codex_home: &'a Path,
+    selected_ids: &'a [Uuid],
+    index: &'a SessionIndexMetadata,
+    projects: &'a [ProjectEntry],
+}
+
 fn stage_projects(
     project_paths: &[PathBuf],
     staging_root: &Path,
@@ -607,24 +618,21 @@ fn stage_projects(
 }
 
 fn stage_conversations(
-    paths: &[PathBuf],
-    codex_home: &Path,
-    selected_ids: &[Uuid],
-    index: &SessionIndexMetadata,
+    selection: ConversationSelection<'_>,
     staging_root: &Path,
     payloads: &mut PayloadCollection,
     counts: &mut ContentCounts,
 ) -> Result<Vec<ConversationEntry>, RehomeError> {
-    let selected: HashSet<Uuid> = selected_ids.iter().copied().collect();
-    if selected.len() != selected_ids.len() {
+    let selected: HashSet<Uuid> = selection.selected_ids.iter().copied().collect();
+    if selected.len() != selection.selected_ids.len() {
         return Err(package_invalid("selected conversation ID is duplicated"));
     }
     let mut found = HashSet::new();
     let mut conversations = Vec::new();
 
-    for source in paths {
+    for source in selection.paths {
         let relative = source
-            .strip_prefix(codex_home)
+            .strip_prefix(selection.codex_home)
             .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
         let archive_path = format!("codex/{}", normalize_entry(relative)?);
         let archive_path = normalize_entry(Path::new(&archive_path))?;
@@ -645,11 +653,14 @@ fn stage_conversations(
         }
         let content_hash = staged_payload.hash.clone();
         payloads.insert(archive_path.clone(), staged_payload)?;
-        let metadata = index.by_id.get(&task_id).unwrap_or(&session_value);
+        let metadata = selection
+            .index
+            .by_id
+            .get(&task_id)
+            .unwrap_or(&session_value);
         conversations.push(ConversationEntry {
             task_id,
-            project_id: json_uuid(metadata, &["project_id"])
-                .or_else(|| json_uuid(&session_value, &["project_id"])),
+            project_id: associated_project_id(metadata, &session_value, selection.projects),
             title: json_string(metadata, &["title"])
                 .unwrap_or_else(|| "Imported conversation".to_owned()),
             updated_at: json_string(metadata, &["updated_at", "timestamp"])

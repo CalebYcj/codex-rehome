@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -123,9 +123,10 @@ pub struct WorkflowState {
 
 #[derive(Default)]
 struct WorkflowGrants {
-    packages: HashMap<Uuid, Timed<PathBuf>>,
+    packages: HashMap<Uuid, Timed<PackageGrant>>,
     restore_locations: HashMap<Uuid, Timed<RestoreLocationGrant>>,
-    plans: HashMap<Uuid, Timed<PathBuf>>,
+    plans: HashMap<Uuid, Timed<RestorePlanGrant>>,
+    rollbacks_in_flight: HashSet<Uuid>,
 }
 
 struct Timed<T> {
@@ -139,26 +140,113 @@ struct RestoreLocationGrant {
     backup_root: PathBuf,
 }
 
+#[derive(Clone)]
+struct PackageGrant {
+    path: PathBuf,
+    archive_hash: String,
+    file_identity: String,
+}
+
+struct RestorePlanGrant {
+    backup_root: PathBuf,
+    state: GrantState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantState {
+    Available,
+    InFlight,
+}
+
+pub(crate) struct PlanClaim {
+    workflow: WorkflowState,
+    plan_id: Uuid,
+    pub(crate) backup_root: PathBuf,
+    finished: bool,
+}
+
+impl PlanClaim {
+    pub(crate) fn restore_available(mut self) {
+        self.workflow.finish_plan(self.plan_id, true);
+        self.finished = true;
+    }
+}
+
+impl Drop for PlanClaim {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.workflow.finish_plan(self.plan_id, false);
+        }
+    }
+}
+
+pub(crate) struct RollbackClaim {
+    workflow: WorkflowState,
+    transaction_id: Uuid,
+}
+
+impl Drop for RollbackClaim {
+    fn drop(&mut self) {
+        self.workflow
+            .grants()
+            .rollbacks_in_flight
+            .remove(&self.transaction_id);
+    }
+}
+
 impl WorkflowState {
-    pub(crate) fn grant_package(&self, path: PathBuf) -> Uuid {
+    pub(crate) fn grant_inspected_package(
+        &self,
+        path: PathBuf,
+        archive_hash: String,
+    ) -> Result<Uuid, RehomeError> {
+        let file_identity = package_file_identity(&path)?;
         let id = Uuid::new_v4();
-        self.grants().packages.insert(id, timed(path));
-        id
+        self.grants().packages.insert(
+            id,
+            timed(PackageGrant {
+                path,
+                archive_hash,
+                file_identity,
+            }),
+        );
+        Ok(id)
     }
 
     pub(crate) fn resolve_package(&self, id: Uuid) -> Result<PathBuf, RehomeError> {
         let mut grants = self.grants();
         grants.prune();
-        grants
-            .packages
-            .get(&id)
-            .map(|grant| grant.value.clone())
-            .ok_or_else(|| {
-                selection_failed(
-                    ErrorCode::PackageInvalid,
-                    "package selection expired or was not found",
-                )
-            })
+        let grant = grants.packages.get(&id).ok_or_else(|| {
+            selection_failed(
+                ErrorCode::PackageInvalid,
+                "package selection expired or was not found",
+            )
+        })?;
+        validate_package_file_identity(&grant.value)?;
+        Ok(grant.value.path.clone())
+    }
+
+    pub(crate) fn validate_package_grant(
+        &self,
+        id: Uuid,
+        archive_hash: &str,
+    ) -> Result<PathBuf, RehomeError> {
+        let mut grants = self.grants();
+        grants.prune();
+        let grant = grants.packages.get(&id).ok_or_else(|| {
+            selection_failed(
+                ErrorCode::PackageInvalid,
+                "package selection expired or was not found",
+            )
+        })?;
+        validate_package_file_identity(&grant.value)?;
+        if !grant.value.archive_hash.eq_ignore_ascii_case(archive_hash) {
+            return Err(selection_failed(
+                ErrorCode::PackageInvalid,
+                "selected package archive hash changed after inspection",
+            ));
+        }
+        Ok(grant.value.path.clone())
     }
 
     pub(crate) fn grant_restore_locations(
@@ -204,27 +292,86 @@ impl WorkflowState {
         ))
     }
 
-    fn grant_plan(&self, plan_id: Uuid, backup_root: PathBuf) {
-        self.grants().plans.insert(plan_id, timed(backup_root));
-    }
-
-    fn resolve_plan_backup(&self, plan_id: Uuid) -> Result<PathBuf, RehomeError> {
+    pub(crate) fn grant_plan(
+        &self,
+        plan_id: Uuid,
+        backup_root: PathBuf,
+    ) -> Result<(), RehomeError> {
         let mut grants = self.grants();
         grants.prune();
-        grants
+        if grants
             .plans
             .get(&plan_id)
-            .map(|grant| grant.value.clone())
-            .ok_or_else(|| {
-                selection_failed(
-                    ErrorCode::RestoreFailed,
-                    "restore plan capability expired or was not found",
-                )
-            })
+            .is_some_and(|grant| grant.value.state == GrantState::InFlight)
+        {
+            return Err(selection_failed(
+                ErrorCode::RestoreFailed,
+                "restore plan is already being applied",
+            ));
+        }
+        grants.plans.insert(
+            plan_id,
+            timed(RestorePlanGrant {
+                backup_root,
+                state: GrantState::Available,
+            }),
+        );
+        Ok(())
     }
 
-    fn consume_plan(&self, plan_id: Uuid) {
-        self.grants().plans.remove(&plan_id);
+    pub(crate) fn claim_plan(&self, plan_id: Uuid) -> Result<PlanClaim, RehomeError> {
+        let mut grants = self.grants();
+        grants.prune();
+        let grant = grants.plans.get_mut(&plan_id).ok_or_else(|| {
+            selection_failed(
+                ErrorCode::RestoreFailed,
+                "restore plan capability expired or was not found",
+            )
+        })?;
+        if grant.value.state != GrantState::Available {
+            return Err(selection_failed(
+                ErrorCode::RestoreFailed,
+                "restore plan is already being applied",
+            ));
+        }
+        grant.value.state = GrantState::InFlight;
+        Ok(PlanClaim {
+            workflow: self.clone(),
+            plan_id,
+            backup_root: grant.value.backup_root.clone(),
+            finished: false,
+        })
+    }
+
+    fn finish_plan(&self, plan_id: Uuid, restore_available: bool) {
+        let mut grants = self.grants();
+        if restore_available {
+            if let Some(grant) = grants.plans.get_mut(&plan_id) {
+                if grant.value.state == GrantState::InFlight {
+                    grant.value.state = GrantState::Available;
+                    grant.expires_at = Instant::now() + GRANT_TTL;
+                }
+            }
+        } else {
+            grants.plans.remove(&plan_id);
+        }
+    }
+
+    pub(crate) fn claim_rollback(
+        &self,
+        transaction_id: Uuid,
+    ) -> Result<RollbackClaim, RehomeError> {
+        let mut grants = self.grants();
+        if !grants.rollbacks_in_flight.insert(transaction_id) {
+            return Err(selection_failed(
+                ErrorCode::RollbackFailed,
+                "transaction rollback is already in progress",
+            ));
+        }
+        Ok(RollbackClaim {
+            workflow: self.clone(),
+            transaction_id,
+        })
     }
 
     fn grants(&self) -> std::sync::MutexGuard<'_, WorkflowGrants> {
@@ -238,7 +385,8 @@ impl WorkflowGrants {
         self.packages.retain(|_, grant| grant.expires_at > now);
         self.restore_locations
             .retain(|_, grant| grant.expires_at > now);
-        self.plans.retain(|_, grant| grant.expires_at > now);
+        self.plans
+            .retain(|_, grant| grant.value.state == GrantState::InFlight || grant.expires_at > now);
     }
 }
 
@@ -278,7 +426,7 @@ pub async fn create_package(
         let report = core_create_package(request)?;
         let preview = core_inspect_package(&report.package_path)?;
         let canonical = canonical_existing_file(&report.package_path)?;
-        let reveal_id = state.grant_package(canonical);
+        let reveal_id = state.grant_inspected_package(canonical, preview.archive_hash.clone())?;
         Ok(Some(CreatedPackage {
             report,
             archive_hash: preview.archive_hash,
@@ -312,7 +460,7 @@ pub async fn inspect_package(
             ));
         }
         let preview = core_inspect_package(&path)?;
-        let selection_id = state.grant_package(path);
+        let selection_id = state.grant_inspected_package(path, preview.archive_hash.clone())?;
         Ok(Some(InspectedPackage {
             selection_id,
             preview,
@@ -372,6 +520,7 @@ pub async fn build_restore_plan(
             let (projects_root, backup_root) =
                 state.resolve_restore_locations(package_selection_id, destination_selection_id)?;
             let package = core_inspect_package(&package_path)?;
+            state.validate_package_grant(package_selection_id, &package.archive_hash)?;
             let inventory = core_discover_codex(None)?;
             let target = TargetInventory {
                 codex_home: inventory.codex_home,
@@ -382,7 +531,7 @@ pub async fn build_restore_plan(
                 conversations: inventory.conversations,
             };
             let plan = core_build_restore_plan(&package, &target, &projects_root)?;
-            state.grant_plan(plan.plan_id, backup_root);
+            state.grant_plan(plan.plan_id, backup_root)?;
             Ok(Some(BuildRestorePlanResponse::Plan { plan }))
         }
     })
@@ -396,17 +545,22 @@ pub async fn apply_restore(
 ) -> Result<RestoreReport, RehomeError> {
     let state = state.inner().clone();
     run_blocking(ErrorCode::RestoreFailed, move || {
-        let backup_root = state.resolve_plan_backup(selection.plan_id)?;
-        let report = apply_restore_by_id(
+        let claim = state.claim_plan(selection.plan_id)?;
+        let result = apply_restore_by_id(
             selection.plan_id,
             RestoreOptions {
                 codex_closed_confirmed: selection.codex_closed_confirmed,
-                backup_root,
+                backup_root: claim.backup_root.clone(),
                 register_projects: selection.register_projects,
             },
-        )?;
-        state.consume_plan(selection.plan_id);
-        Ok(report)
+        );
+        match result {
+            Err(error) if error.code == ErrorCode::CodexRunning => {
+                claim.restore_available();
+                Err(error)
+            }
+            result => result,
+        }
     })
     .await
 }
@@ -418,9 +572,12 @@ pub async fn list_transactions() -> Result<TransactionHistory, RehomeError> {
 
 #[tauri::command]
 pub async fn rollback_transaction(
+    state: State<'_, WorkflowState>,
     selection: RollbackSelection,
 ) -> Result<RollbackReport, RehomeError> {
+    let state = state.inner().clone();
     run_blocking(ErrorCode::RollbackFailed, move || {
+        let _claim = state.claim_rollback(selection.transaction_id)?;
         let transaction = rollback_transaction_by_id(selection.transaction_id)?;
         validate_rollback_action(transaction.status, selection.action)?;
         core_rollback(selection.transaction_id)
@@ -660,8 +817,18 @@ fn selected_path(selected: FilePath) -> Result<PathBuf, RehomeError> {
 }
 
 pub(crate) fn validate_local_dialog_path(path: &Path) -> Result<(), RehomeError> {
-    let text = path.to_string_lossy().replace('\\', "/");
-    if !path.is_absolute() || text.starts_with("//") {
+    let supported = if !path.is_absolute() {
+        false
+    } else {
+        match path.components().next() {
+            Some(Component::Prefix(prefix)) => {
+                matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+            }
+            Some(Component::RootDir) => true,
+            _ => false,
+        }
+    };
+    if !supported {
         return Err(selection_failed(
             ErrorCode::RestoreFailed,
             "native selection must be an absolute local path",
@@ -718,6 +885,77 @@ fn canonical_existing(path: &Path) -> Result<PathBuf, RehomeError> {
     Ok(canonical)
 }
 
+fn validate_package_file_identity(grant: &PackageGrant) -> Result<(), RehomeError> {
+    let current = package_file_identity(&grant.path)?;
+    if current != grant.file_identity {
+        return Err(selection_failed(
+            ErrorCode::PackageInvalid,
+            "selected package file identity changed after inspection",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn package_file_identity(path: &Path) -> Result<String, RehomeError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = fs::File::open(path).map_err(|error| {
+        selection_failed(
+            ErrorCode::PackageInvalid,
+            format!("could not open selected package identity: {error}"),
+        )
+    })?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 {
+        return Err(selection_failed(
+            ErrorCode::PackageInvalid,
+            format!(
+                "could not inspect selected package identity: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    Ok(format!(
+        "{}:{:08x}{:08x}",
+        information.dwVolumeSerialNumber, information.nFileIndexHigh, information.nFileIndexLow
+    ))
+}
+
+#[cfg(unix)]
+fn package_file_identity(path: &Path) -> Result<String, RehomeError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file = fs::File::open(path).map_err(|error| {
+        selection_failed(
+            ErrorCode::PackageInvalid,
+            format!("could not open selected package identity: {error}"),
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        selection_failed(
+            ErrorCode::PackageInvalid,
+            format!("could not inspect selected package identity: {error}"),
+        )
+    })?;
+    Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn package_file_identity(path: &Path) -> Result<String, RehomeError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        selection_failed(
+            ErrorCode::PackageInvalid,
+            format!("could not inspect selected package identity: {error}"),
+        )
+    })?;
+    Ok(format!("{}:{:?}", metadata.len(), metadata.modified().ok()))
+}
+
 fn has_rehome_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -748,4 +986,29 @@ fn selection_failed(code: ErrorCode, message: impl Into<String>) -> RehomeError 
 
 fn open_failed(message: impl Into<String>) -> RehomeError {
     RehomeError::new(ErrorCode::RestoreFailed, message)
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+
+    #[test]
+    fn pruning_expired_capabilities_keeps_in_flight_restore_plans() {
+        let plan_id = Uuid::new_v4();
+        let mut grants = WorkflowGrants::default();
+        grants.plans.insert(
+            plan_id,
+            Timed {
+                value: RestorePlanGrant {
+                    backup_root: PathBuf::from("C:\\backups"),
+                    state: GrantState::InFlight,
+                },
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        grants.prune();
+
+        assert!(grants.plans.contains_key(&plan_id));
+    }
 }

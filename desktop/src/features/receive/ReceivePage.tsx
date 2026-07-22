@@ -1,4 +1,4 @@
-import { useState, type RefObject } from "react";
+import { useRef, useState, type RefObject } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -55,55 +55,76 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
   const [plan, setPlan] = useState<RestorePlan | null>(null);
   const [codexClosed, setCodexClosed] = useState(false);
   const [report, setReport] = useState<RestoreReport | null>(null);
-  const [phase, setPhase] = useState<"idle" | "inspecting" | "planning" | "restoring">("idle");
+  const [phase, setPhase] = useState<"idle" | "inspecting" | "selecting" | "planning" | "restoring">("idle");
   const [error, setError] = useState<string | null>(null);
   const [registrationStatuses, setRegistrationStatuses] = useState<Record<string, string>>({});
+  const requestGeneration = useRef(0);
 
   async function choosePackage() {
+    if (phase !== "idle") return;
+    const generation = ++requestGeneration.current;
     setError(null);
-    setPlan(null);
-    setReport(null);
-    setLocations(null);
-    setRegistrationStatuses({});
     setPhase("inspecting");
     try {
       const inspected = await inspectPackage();
-      if (inspected) setPreview(inspected);
+      if (generation !== requestGeneration.current) return;
+      if (inspected) {
+        setPreview(inspected);
+        clearRestoreSelection();
+        setLocations(null);
+      }
     } catch (caught) {
+      if (generation !== requestGeneration.current) return;
       setPreview(null);
       setError(errorMessage(caught));
     } finally {
-      setPhase("idle");
+      if (generation === requestGeneration.current) setPhase("idle");
     }
   }
 
   async function chooseLocations() {
-    if (!preview) return;
+    if (!preview || phase !== "idle") return;
+    const generation = ++requestGeneration.current;
     setError(null);
+    setPhase("selecting");
     try {
       const selected = await selectRestoreDestinations(preview.selection_id);
+      if (generation !== requestGeneration.current) return;
       if (selected) {
         setLocations(selected);
-        setPlan(null);
+        clearRestoreSelection();
       }
     } catch (caught) {
+      if (generation !== requestGeneration.current) return;
       setError(errorMessage(caught));
+    } finally {
+      if (generation === requestGeneration.current) setPhase("idle");
     }
   }
 
   async function handlePlan() {
-    if (!preview || !locations) return;
+    if (!preview || !locations || phase !== "idle") return;
+    const generation = ++requestGeneration.current;
     setError(null);
     setReport(null);
     setPhase("planning");
     try {
-      setPlan(await buildRestorePlan(preview.selection_id, locations.selection_id));
+      const nextPlan = await buildRestorePlan(preview.selection_id, locations.selection_id);
+      if (generation === requestGeneration.current) setPlan(nextPlan);
     } catch (caught) {
+      if (generation !== requestGeneration.current) return;
       setPlan(null);
       setError(errorMessage(caught));
     } finally {
-      setPhase("idle");
+      if (generation === requestGeneration.current) setPhase("idle");
     }
+  }
+
+  function clearRestoreSelection() {
+    setPlan(null);
+    setReport(null);
+    setCodexClosed(false);
+    setRegistrationStatuses({});
   }
 
   async function handleRestore() {
@@ -174,7 +195,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
       <section className="workflow-section" aria-labelledby="receive-target-title">
         <div className="section-title-row"><div><span className="step-number">2</span><h2 id="receive-target-title">选择目标位置</h2></div></div>
         <PathPicker icon={HardDrive} label="Codex Home" value={locations?.target_codex_home ?? inventory?.codex_home ?? "未检测"} />
-        <PathPicker icon={FolderOpen} label="项目目录" value={locations?.projects_root ?? "尚未选择"} buttonLabel="选择恢复位置" onClick={chooseLocations} disabled={!preview} />
+        <PathPicker icon={FolderOpen} label="项目目录" value={locations?.projects_root ?? "尚未选择"} buttonLabel="选择恢复位置" onClick={chooseLocations} disabled={!preview || phase !== "idle"} />
         <PathPicker icon={ShieldCheck} label="事务备份" value={locations?.backup_root ?? "尚未选择"} />
         <div className="command-row"><p>恢复计划会重新校验包，并只保存受信任的 plan_id。</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}生成恢复计划</button></div>
       </section>

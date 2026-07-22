@@ -2,9 +2,13 @@ pub use crate::workflow::*;
 
 #[cfg(test)]
 mod tests {
+    use crate::core::discovery::{discover_codex_with_context, DiscoveryContext};
     use crate::core::models::{
         CodexInventory, ContentCounts, ConversationEntry, ProjectEntry, RecoveryStatus, SourceOs,
         TransactionSummary,
+    };
+    use crate::core::package::{
+        create_package as core_create_package, inspect_package as core_inspect_package,
     };
     use crate::workflow::{
         authorize_transaction_path, open_transaction_by_id, resolve_create_package_request,
@@ -13,7 +17,12 @@ mod tests {
         WorkflowState,
     };
     use serde_json::json;
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Barrier},
+        thread,
+    };
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -172,12 +181,124 @@ mod tests {
     }
 
     #[test]
+    fn production_discovery_ids_resolve_to_server_owned_package_paths() {
+        let root = tempdir().expect("temporary root");
+        let codex_home = root.path().join(".codex");
+        let project = root.path().join("projects").join("desktop");
+        let task_id = Uuid::new_v4();
+        let session = codex_home
+            .join("sessions")
+            .join(format!("rollout-{task_id}.jsonl"));
+        fs::create_dir_all(&project).expect("project directory");
+        fs::create_dir_all(session.parent().unwrap()).expect("session directory");
+        fs::write(project.join("README.md"), "# Desktop\n").expect("project file");
+        fs::write(
+            codex_home.join(".codex-global-state.json"),
+            serde_json::to_vec(&json!({
+                "electron-saved-workspace-roots": [project]
+            }))
+            .unwrap(),
+        )
+        .expect("global state");
+        fs::write(
+            &session,
+            format!(
+                "{}\n",
+                json!({
+                    "thread_id": task_id,
+                    "cwd": project,
+                    "timestamp": "2026-07-23T10:00:00Z"
+                })
+            ),
+        )
+        .expect("session");
+        fs::write(
+            codex_home.join("session_index.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "id": task_id,
+                    "cwd": project,
+                    "title": "Production workflow",
+                    "updated_at": "2026-07-23T10:00:00Z"
+                })
+            ),
+        )
+        .expect("session index");
+
+        let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())
+            .expect("discovery");
+        let discovered_project = inventory.projects.first().expect("project entry");
+        let discovered_conversation = inventory.conversations.first().expect("conversation entry");
+        assert_eq!(
+            discovered_conversation.project_id,
+            Some(discovered_project.project_id)
+        );
+
+        let request = resolve_create_package_request(
+            &inventory,
+            CreatePackageSelection {
+                project_ids: vec![discovered_project.project_id],
+                conversation_ids: vec![discovered_conversation.task_id],
+                include_skills: false,
+                include_plugins: false,
+                include_generated_images: false,
+            },
+            root.path().join("handoff.rehome"),
+        )
+        .expect("server-owned request");
+        assert_eq!(
+            request.project_paths,
+            vec![fs::canonicalize(project).unwrap()]
+        );
+        assert_eq!(request.conversation_ids, vec![task_id]);
+
+        let report = core_create_package(request).expect("package creation");
+        let package = core_inspect_package(&report.package_path).expect("package inspection");
+        assert_eq!(package.manifest.projects.len(), 1);
+        assert_eq!(package.manifest.conversations.len(), 1);
+        assert_eq!(
+            package.manifest.conversations[0].project_id,
+            Some(package.manifest.projects[0].project_id)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_verbatim_disk_paths_are_allowed_but_unc_prefixes_are_rejected() {
+        let root = tempdir().expect("temporary root");
+        let canonical = fs::canonicalize(root.path()).expect("canonical local path");
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+        assert!(validate_local_dialog_path(&canonical).is_ok());
+
+        for rejected in [
+            PathBuf::from(r"\\server\share\handoff.rehome"),
+            PathBuf::from(r"\\?\UNC\server\share\handoff.rehome"),
+        ] {
+            assert!(
+                validate_local_dialog_path(&rejected).is_err(),
+                "expected UNC rejection for {}",
+                rejected.display()
+            );
+        }
+    }
+
+    #[test]
     fn unknown_or_cross_bound_capabilities_are_rejected() {
         let state = WorkflowState::default();
         assert!(state.resolve_package(Uuid::new_v4()).is_err());
 
-        let first_package = state.grant_package(PathBuf::from("C:\\packages\\first.rehome"));
-        let second_package = state.grant_package(PathBuf::from("C:\\packages\\second.rehome"));
+        let root = tempdir().expect("temporary root");
+        let first_path = root.path().join("first.rehome");
+        let second_path = root.path().join("second.rehome");
+        fs::write(&first_path, b"first").expect("first package");
+        fs::write(&second_path, b"second").expect("second package");
+        let first_package = state
+            .grant_inspected_package(fs::canonicalize(first_path).unwrap(), "first".into())
+            .unwrap();
+        let second_package = state
+            .grant_inspected_package(fs::canonicalize(second_path).unwrap(), "second".into())
+            .unwrap();
         let destinations = state.grant_restore_locations(
             first_package,
             PathBuf::from("C:\\projects"),
@@ -186,6 +307,102 @@ mod tests {
         assert!(state
             .resolve_restore_locations(second_package, destinations)
             .is_err());
+    }
+
+    #[test]
+    fn inspected_package_grant_rejects_hash_changes_and_same_path_replacement() {
+        let root = tempdir().expect("temporary root");
+        let package = root.path().join("selected.rehome");
+        fs::write(&package, b"first package").expect("first package");
+        let package = fs::canonicalize(package).expect("canonical package");
+        let state = WorkflowState::default();
+        let grant = state
+            .grant_inspected_package(package.clone(), "first-hash".into())
+            .expect("package grant");
+
+        let hash_error = state
+            .validate_package_grant(grant, "different-hash")
+            .unwrap_err();
+        assert_eq!(
+            hash_error.code,
+            crate::core::error::ErrorCode::PackageInvalid
+        );
+
+        let displaced = root.path().join("displaced.rehome");
+        fs::rename(&package, displaced).expect("move original package");
+        fs::write(&package, b"first package").expect("replacement package");
+        let identity_error = state
+            .validate_package_grant(grant, "first-hash")
+            .unwrap_err();
+        assert_eq!(
+            identity_error.code,
+            crate::core::error::ErrorCode::PackageInvalid
+        );
+        assert!(identity_error.message.contains("identity"));
+    }
+
+    #[test]
+    fn concurrent_restore_plan_claims_allow_exactly_one_caller() {
+        let state = WorkflowState::default();
+        let plan_id = Uuid::new_v4();
+        state
+            .grant_plan(plan_id, PathBuf::from("C:\\backups"))
+            .unwrap();
+
+        let claimed = coordinated_claims({
+            let state = state.clone();
+            move || state.claim_plan(plan_id)
+        });
+        assert_eq!(claimed, 1);
+    }
+
+    #[test]
+    fn an_in_flight_restore_plan_cannot_be_regranted() {
+        let state = WorkflowState::default();
+        let plan_id = Uuid::new_v4();
+        state
+            .grant_plan(plan_id, PathBuf::from("C:\\backups"))
+            .unwrap();
+        let claim = state.claim_plan(plan_id).expect("in-flight claim");
+
+        assert!(state
+            .grant_plan(plan_id, PathBuf::from("C:\\different-backups"))
+            .is_err());
+        assert!(state.claim_plan(plan_id).is_err());
+        drop(claim);
+    }
+
+    #[test]
+    fn restore_plan_claim_can_only_be_reopened_by_explicit_safe_retry() {
+        let state = WorkflowState::default();
+        let retryable_id = Uuid::new_v4();
+        state
+            .grant_plan(retryable_id, PathBuf::from("C:\\backups"))
+            .unwrap();
+        state
+            .claim_plan(retryable_id)
+            .expect("first claim")
+            .restore_available();
+        assert!(state.claim_plan(retryable_id).is_ok());
+
+        let consumed_id = Uuid::new_v4();
+        state
+            .grant_plan(consumed_id, PathBuf::from("C:\\backups"))
+            .unwrap();
+        drop(state.claim_plan(consumed_id).expect("consumed claim"));
+        assert!(state.claim_plan(consumed_id).is_err());
+    }
+
+    #[test]
+    fn concurrent_rollback_claims_allow_exactly_one_caller() {
+        let state = WorkflowState::default();
+        let transaction_id = Uuid::new_v4();
+
+        let claimed = coordinated_claims({
+            let state = state.clone();
+            move || state.claim_rollback(transaction_id)
+        });
+        assert_eq!(claimed, 1);
     }
 
     #[test]
@@ -282,6 +499,34 @@ mod tests {
             mismatched,
             unassociated,
         )
+    }
+
+    fn coordinated_claims<T: Send + 'static, E: Send + 'static>(
+        claim: impl Fn() -> Result<T, E> + Send + Sync + 'static,
+    ) -> usize {
+        let start = Arc::new(Barrier::new(3));
+        let hold = Arc::new(Barrier::new(3));
+        let claim = Arc::new(claim);
+        let threads = (0..2)
+            .map(|_| {
+                let start = start.clone();
+                let hold = hold.clone();
+                let claim = claim.clone();
+                thread::spawn(move || {
+                    start.wait();
+                    let claimed = claim();
+                    hold.wait();
+                    claimed.is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        hold.wait();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("claim thread"))
+            .filter(|claimed| *claimed)
+            .count()
     }
 
     struct OpenFixture {

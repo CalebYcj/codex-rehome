@@ -1,11 +1,13 @@
 use crate::core::{
     error::{ErrorCode, RehomeError},
-    models::{CodexInventory, ContentCounts, SourceOs},
+    models::{CodexInventory, ContentCounts, ConversationEntry, ProjectEntry, SourceOs},
+    paths::normalize_entry,
 };
 use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs, io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -133,6 +135,15 @@ pub fn discover_codex_with_context(
         })
         .unwrap_or(0);
 
+    let projects = discovered_projects(&project_paths);
+    let conversations = discovered_conversations(
+        &codex_home,
+        &conversation_paths,
+        session_index_path.as_deref(),
+        &projects,
+        &mut warnings,
+    );
+
     dedupe_warnings(&mut warnings);
 
     Ok(CodexInventory {
@@ -141,17 +152,17 @@ pub fn discover_codex_with_context(
         source_arch: env::consts::ARCH.to_owned(),
         source_device_id: Uuid::nil(),
         counts: ContentCounts {
-            projects: project_paths.len() as u64,
+            projects: projects.len() as u64,
             project_files: 0,
-            conversations: conversation_paths.len() as u64,
+            conversations: conversations.len() as u64,
             skills: skill_paths.len() as u64,
             plugins: plugin_paths.len() as u64,
             generated_images: generated_image_paths.len() as u64,
             sqlite_threads,
         },
-        projects: Vec::new(),
+        projects,
         project_paths,
-        conversations: Vec::new(),
+        conversations,
         conversation_paths,
         session_index_path,
         state_db_path,
@@ -160,6 +171,175 @@ pub fn discover_codex_with_context(
         generated_image_paths,
         warnings,
     })
+}
+
+fn discovered_projects(paths: &[PathBuf]) -> Vec<ProjectEntry> {
+    paths
+        .iter()
+        .map(|path| {
+            let source = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let source_path = source.to_string_lossy().into_owned();
+            let project_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, source_path.as_bytes());
+            let name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("project")
+                .to_owned();
+            ProjectEntry {
+                project_id,
+                name,
+                source_path,
+                archive_path: format!("projects/{project_id}/files"),
+                file_count: 0,
+                content_bytes: 0,
+                git_remote: None,
+                git_branch: None,
+                git_head: None,
+            }
+        })
+        .collect()
+}
+
+fn discovered_conversations(
+    codex_home: &Path,
+    paths: &[PathBuf],
+    session_index_path: Option<&Path>,
+    projects: &[ProjectEntry],
+    warnings: &mut Vec<String>,
+) -> Vec<ConversationEntry> {
+    let index = read_session_index_entries(session_index_path, warnings);
+    let mut conversations = Vec::new();
+    for path in paths {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                push_warning_unique(
+                    warnings,
+                    format!(
+                        "Could not read discovered conversation {}: {error}",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        let Some((task_id, session)) = session_identity(&bytes) else {
+            push_warning_unique(
+                warnings,
+                format!(
+                    "Could not identify discovered conversation {}",
+                    path.display()
+                ),
+            );
+            continue;
+        };
+        let metadata = index.get(&task_id).unwrap_or(&session);
+        let relative = match path.strip_prefix(codex_home).map(normalize_entry) {
+            Ok(Ok(relative)) => relative,
+            _ => {
+                push_warning_unique(
+                    warnings,
+                    format!(
+                        "Discovered conversation escapes Codex home: {}",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        conversations.push(ConversationEntry {
+            task_id,
+            project_id: associated_project_id(metadata, &session, projects),
+            title: json_string(metadata, &["title"])
+                .or_else(|| json_string(&session, &["title"]))
+                .unwrap_or_else(|| "Codex conversation".to_owned()),
+            updated_at: json_string(metadata, &["updated_at", "timestamp"])
+                .or_else(|| json_string(&session, &["updated_at", "timestamp"]))
+                .unwrap_or_default(),
+            content_hash: format!("{:x}", Sha256::digest(&bytes)),
+            archive_path: format!("codex/{relative}"),
+        });
+    }
+    conversations.sort_by_key(|conversation| conversation.task_id);
+    conversations
+}
+
+fn read_session_index_entries(
+    path: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> BTreeMap<Uuid, Value> {
+    let Some(path) = path else {
+        return BTreeMap::new();
+    };
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            push_warning_unique(
+                warnings,
+                format!("Could not read optional Codex session index entries: {error}"),
+            );
+            return BTreeMap::new();
+        }
+    };
+    let mut entries = BTreeMap::new();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(id) = json_uuid(&value, &["id", "thread_id", "conversation_id"]) {
+            entries.insert(id, value);
+        }
+    }
+    entries
+}
+
+fn session_identity(bytes: &[u8]) -> Option<(Uuid, Value)> {
+    bytes.split(|byte| *byte == b'\n').find_map(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let line = std::str::from_utf8(line).ok()?;
+        let value = serde_json::from_str::<Value>(line).ok()?;
+        let id = json_uuid(&value, &["thread_id", "id", "conversation_id"])?;
+        Some((id, value))
+    })
+}
+
+pub(crate) fn associated_project_id(
+    metadata: &Value,
+    session: &Value,
+    projects: &[ProjectEntry],
+) -> Option<Uuid> {
+    let cwd = json_string(metadata, &["cwd", "workspace_root"])
+        .or_else(|| json_string(session, &["cwd", "workspace_root"]));
+    if let Some(cwd) = cwd {
+        let path = PathBuf::from(&cwd);
+        let canonical = fs::canonicalize(&path).unwrap_or(path);
+        let key = ProjectPathKey::new(&canonical.to_string_lossy(), &canonical);
+        if let Some(project) = projects.iter().find(|project| {
+            let source = PathBuf::from(&project.source_path);
+            ProjectPathKey::new(&project.source_path, &source) == key
+        }) {
+            return Some(project.project_id);
+        }
+    }
+
+    json_uuid(metadata, &["project_id"])
+        .or_else(|| json_uuid(session, &["project_id"]))
+        .filter(|id| projects.iter().any(|project| project.project_id == *id))
+}
+
+fn json_uuid(value: &Value, keys: &[&str]) -> Option<Uuid> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+    })
+}
+
+fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_owned))
 }
 
 fn nonempty_path(path: Option<PathBuf>) -> Option<PathBuf> {

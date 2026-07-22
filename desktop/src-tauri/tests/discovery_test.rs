@@ -1,6 +1,6 @@
 mod common;
 
-use common::{synthetic_codex_fixture, WINDOWS_CWD};
+use common::{synthetic_codex_fixture, FIXED_TIMESTAMP, THREAD_ID, WINDOWS_CWD};
 use rehome_desktop_lib::core::{
     discovery::{
         discover_codex_with_context, resolve_codex_home, resolve_codex_home_for_os,
@@ -21,6 +21,7 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
+use uuid::Uuid;
 
 #[test]
 fn mandatory_exclusions_are_component_aware() {
@@ -220,6 +221,30 @@ fn discovery_reports_fixture_without_modifying_it() -> Result<(), Box<dyn Error>
         vec![fixture.generated_image_path]
     );
     assert_eq!(inventory.project_paths, vec![Path::new(WINDOWS_CWD)]);
+    let project_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, WINDOWS_CWD.as_bytes());
+    assert_eq!(inventory.projects.len(), 1);
+    assert_eq!(inventory.projects[0].project_id, project_id);
+    assert_eq!(inventory.projects[0].name, "visual");
+    assert_eq!(inventory.projects[0].source_path, WINDOWS_CWD);
+    assert_eq!(
+        inventory.projects[0].archive_path,
+        format!("projects/{project_id}/files")
+    );
+    assert_eq!(inventory.conversations.len(), 1);
+    assert_eq!(
+        inventory.conversations[0].task_id,
+        Uuid::parse_str(THREAD_ID)?
+    );
+    assert_eq!(inventory.conversations[0].project_id, Some(project_id));
+    assert_eq!(
+        inventory.conversations[0].title,
+        "Synthetic migration thread"
+    );
+    assert_eq!(inventory.conversations[0].updated_at, FIXED_TIMESTAMP);
+    assert!(!inventory.conversations[0].content_hash.is_empty());
+    assert!(inventory.conversations[0]
+        .archive_path
+        .starts_with("codex/sessions/"));
     assert!(!is_forbidden(&fixture.project_path));
     assert!(!is_forbidden(&fixture.readme_path));
     assert!(is_forbidden(&fixture.env_path));
