@@ -197,6 +197,12 @@ pub struct PlannedOperation {
     pub rollback_required: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeVerificationRequirements {
+    pub session_index: Option<PathBuf>,
+    pub sqlite_database: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestorePlan {
     pub plan_id: Uuid,
@@ -208,6 +214,8 @@ pub struct RestorePlan {
     pub operations: Vec<PlannedOperation>,
     pub sessions: Vec<PlannedSession>,
     pub reference_rewrites: Vec<ReferenceRewrite>,
+    #[serde(default)]
+    pub bridge_verification: BridgeVerificationRequirements,
     pub conflict_count: u64,
     pub required_bytes: u64,
 }

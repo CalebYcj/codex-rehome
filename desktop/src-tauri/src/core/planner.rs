@@ -1,8 +1,9 @@
 use crate::core::{
     error::{ErrorCode, RehomeError},
     models::{
-        ChangeKind, PackagePreview, PlannedOperation, PlannedSession, ReferenceRewrite,
-        ReferenceRewriteKind, RestorePlan, SessionAction, SourceOs, TargetInventory,
+        BridgeVerificationRequirements, ChangeKind, PackagePreview, PlannedOperation,
+        PlannedSession, ReferenceRewrite, ReferenceRewriteKind, RestorePlan, SessionAction,
+        SourceOs, TargetInventory,
     },
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
@@ -234,6 +235,7 @@ pub fn build_restore_plan(
             consumed.insert(source.to_owned());
         }
     }
+    let mut bridge_verification = BridgeVerificationRequirements::default();
     if !sessions.is_empty() {
         let planned_rewrites = rewrites.values().cloned().collect::<Vec<_>>();
         let desired_thread_rollout_paths = sessions
@@ -251,6 +253,7 @@ pub fn build_restore_plan(
         if payloads.contains_key(SESSION_INDEX_SOURCE) {
             let target_path =
                 join_target(&target.codex_home, "session_index.jsonl", target.target_os)?;
+            bridge_verification.session_index = Some(target_path.clone());
             let bytes = verified
                 .planning_payloads
                 .get(SESSION_INDEX_SOURCE)
@@ -273,6 +276,7 @@ pub fn build_restore_plan(
                     "target Codex state database was not found",
                 )
             })?;
+            bridge_verification.sqlite_database = Some(target_path.clone());
             let bytes = verified
                 .planning_payloads
                 .get(THREAD_METADATA_SOURCE)
@@ -337,6 +341,7 @@ pub fn build_restore_plan(
         operations,
         sessions,
         reference_rewrites,
+        bridge_verification,
         conflict_count,
         required_bytes,
     };

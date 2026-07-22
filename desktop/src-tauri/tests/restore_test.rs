@@ -5,8 +5,8 @@ use common::{synthetic_codex_fixture, SyntheticCodexFixture, THREAD_ID};
 use rehome_desktop_lib::core::{
     error::ErrorCode,
     models::{
-        ChangeKind, ContentCounts, CreatePackageRequest, RecoveryStatus, RegistrationStatus,
-        RestoreOptions, RestorePlan, SourceOs, TargetInventory,
+        ChangeKind, ContentCounts, ConversationEntry, CreatePackageRequest, RecoveryStatus,
+        RegistrationStatus, RestoreOptions, RestorePlan, SourceOs, TargetInventory,
     },
     package::{create_package, inspect_package},
     planner::build_restore_plan,
@@ -94,6 +94,23 @@ fn failure_after_project_copy_rolls_every_target_back_exactly() -> Result<(), Bo
         .join("README.md")
         .exists());
     assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    let journal = fs::read_dir(harness.transactions_dir())?
+        .next()
+        .unwrap()?
+        .path();
+    let journal: Value = serde_json::from_slice(&fs::read(journal)?)?;
+    let copied_project = journal["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| {
+            operation["package_source"]
+                .as_str()
+                .unwrap()
+                .ends_with("/README.md")
+        })
+        .unwrap();
+    assert_ne!(copied_project["applied_state"], Value::Null);
     Ok(())
 }
 
@@ -248,6 +265,41 @@ fn changed_noop_target_prevents_commit() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn corrupted_ready_session_index_prevents_commit_when_bridge_write_was_omitted(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let plan = ready_restore_plan(&harness)?;
+    let index_path = plan.target_codex_home.join("session_index.jsonl");
+    fs::write(&index_path, b"{\"id\":\"unrelated\"}\n")?;
+
+    let error = apply_restore(plan, harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("verification"));
+    assert_eq!(fs::read(&index_path)?, b"{\"id\":\"unrelated\"}\n");
+    Ok(())
+}
+
+#[test]
+fn corrupted_ready_sqlite_row_prevents_commit_when_bridge_write_was_omitted(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let plan = ready_restore_plan(&harness)?;
+    let database = plan.target_codex_home.join("state_5.sqlite");
+    Connection::open(&database)?.execute("DELETE FROM threads", [])?;
+
+    let error = apply_restore(plan, harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("verification"));
+    let remaining: i64 =
+        Connection::open(database)?
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
+    assert_eq!(remaining, 0);
+    Ok(())
+}
+
+#[test]
 fn recovery_reports_corrupt_uuid_named_journal() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     fs::create_dir_all(harness.transactions_dir())?;
@@ -264,6 +316,73 @@ fn recovery_reports_corrupt_uuid_named_journal() -> Result<(), Box<dyn Error>> {
     assert_eq!(first.code, ErrorCode::RollbackFailed);
     assert_eq!(first.message, second.message);
     assert!(first.message.contains("journal") && first.message.contains("invalid"));
+    Ok(())
+}
+
+#[test]
+fn recovery_reports_uuid_named_directory_as_an_invalid_journal() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let path = harness
+        .transactions_dir()
+        .join(format!("{}.json", Uuid::new_v4()));
+    fs::create_dir_all(&path)?;
+
+    let first = recover_incomplete_transactions().unwrap_err();
+    let second = recover_incomplete_transactions().unwrap_err();
+
+    assert_eq!(first.code, ErrorCode::RollbackFailed);
+    assert_eq!(first.message, second.message);
+    assert!(first.message.contains("journal") && first.message.contains("regular file"));
+    Ok(())
+}
+
+#[test]
+fn recovery_reports_uuid_named_symlink_as_an_invalid_journal() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    fs::create_dir_all(harness.transactions_dir())?;
+    let real = harness.transactions_dir().join("real-journal.json");
+    let linked = harness
+        .transactions_dir()
+        .join(format!("{}.json", Uuid::new_v4()));
+    fs::write(&real, b"{}")?;
+    if let Err(error) = create_file_symlink(&real, &linked) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            eprintln!("skipping journal symlink test: Windows symlink privilege unavailable");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+
+    let first = recover_incomplete_transactions().unwrap_err();
+    let second = recover_incomplete_transactions().unwrap_err();
+
+    assert_eq!(first.code, ErrorCode::RollbackFailed);
+    assert_eq!(first.message, second.message);
+    assert!(first.message.contains("journal") && first.message.contains("regular file"));
+    Ok(())
+}
+
+#[test]
+fn incomplete_rollback_refuses_to_overwrite_a_newer_edit() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("applying".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+    let target = harness.plan.sessions[0].target.clone();
+    let newer = b"newer edit after interrupted restore\n";
+    fs::write(&target, newer)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(error.message.contains("changed") || error.message.contains("conflict"));
+    assert_eq!(fs::read(&target)?, newer);
+    assert_eq!(
+        harness.single_journal_status()?,
+        RecoveryStatus::RollbackFailed
+    );
     Ok(())
 }
 
@@ -756,4 +875,61 @@ fn current_source_os() -> SourceOs {
     } else {
         SourceOs::Windows
     }
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(not(windows))]
+fn windows_symlink_privilege_is_unavailable(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn windows_symlink_privilege_is_unavailable(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 1314))
+}
+
+fn ready_restore_plan(harness: &RestoreHarness) -> Result<RestorePlan, Box<dyn Error>> {
+    apply_restore(harness.plan.clone(), harness.options())?;
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let planned = &harness.plan.sessions[0];
+    let relative = planned
+        .target
+        .strip_prefix(&harness.plan.target_codex_home)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let source = &preview.manifest.conversations[0];
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![ConversationEntry {
+            task_id: planned.target_task_id,
+            project_id: source.project_id,
+            title: planned.title.clone(),
+            updated_at: source.updated_at.clone(),
+            content_hash: planned.expected_final_content_hash.clone(),
+            archive_path: format!("codex/{relative}"),
+        }],
+    };
+    let plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+    assert!(plan.sessions.iter().all(|session| matches!(
+        session.action,
+        rehome_desktop_lib::core::models::SessionAction::Skip
+    )));
+    assert!(!plan.operations.iter().any(|operation| matches!(
+        operation.package_source.as_str(),
+        "codex/session_index.jsonl" | "codex/metadata/threads.json"
+    )));
+    Ok(plan)
 }

@@ -6,6 +6,7 @@ use crate::core::{
     },
     package::inspect_package_for_planning,
     planner::rewrite_jsonl_payload,
+    stable_fs::PinnedParent,
 };
 use chrono::DateTime;
 use rusqlite::{
@@ -19,13 +20,12 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::Path,
     path::PathBuf,
     process::Command,
     time::Duration,
 };
-use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 const INDEX_IMPORT_FIELDS: &[&str] = &[
@@ -171,20 +171,22 @@ pub fn rewrite_session_jsonl(
 }
 
 pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, RehomeError> {
-    apply_bridge_plan_with_lock_token(plan, None)
+    apply_bridge_plan_with_lock_token(plan, None, |_| Ok(()))
 }
 
 pub(crate) fn apply_bridge_plan_for_transaction(
     plan: &RestorePlan,
     transaction_id: Uuid,
+    on_applied: impl FnMut(&Path) -> Result<(), RehomeError>,
 ) -> Result<BridgeApplyReport, RehomeError> {
     let token = transaction_id.to_string();
-    apply_bridge_plan_with_lock_token(plan, Some(&token))
+    apply_bridge_plan_with_lock_token(plan, Some(&token), on_applied)
 }
 
 fn apply_bridge_plan_with_lock_token(
     plan: &RestorePlan,
     lock_token: Option<&str>,
+    mut on_applied: impl FnMut(&Path) -> Result<(), RehomeError>,
 ) -> Result<BridgeApplyReport, RehomeError> {
     let verified = inspect_package_for_planning(&plan.package_path)?;
     if verified.preview.archive_hash != plan.archive_hash {
@@ -224,6 +226,7 @@ fn apply_bridge_plan_with_lock_token(
         let guard =
             TargetReplacementGuard::acquire(&plan.target_codex_home, operation, lock_token)?;
         guard.commit_bytes(operation, &rewritten)?;
+        on_applied(&operation.target)?;
         sessions_written += 1;
     }
 
@@ -250,6 +253,7 @@ fn apply_bridge_plan_with_lock_token(
             &plan.reference_rewrites,
         )?;
         guard.commit_bytes(operation, &merged)?;
+        on_applied(&operation.target)?;
         index_entries_merged = plan.sessions.len();
     }
 
@@ -258,14 +262,16 @@ fn apply_bridge_plan_with_lock_token(
         ensure_writable_change(operation)?;
         let package_bytes =
             verified.authenticated_planning_payload("codex/metadata/threads.json")?;
-        sqlite_threads_imported = import_sqlite_threads_for_operation(
+        let import_result = import_sqlite_threads_for_operation(
             &plan.target_codex_home,
             operation,
             package_bytes,
             &plan.sessions,
             &plan.reference_rewrites,
             lock_token,
-        )?;
+        );
+        on_applied(&operation.target)?;
+        sqlite_threads_imported = import_result?;
     }
 
     Ok(BridgeApplyReport {
@@ -1027,6 +1033,7 @@ fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 struct TargetReplacementGuard<'a> {
     root: &'a Path,
     target: &'a Path,
+    parent: PinnedParent,
     lock_path: PathBuf,
     lock_token: String,
     lock_file: Option<fs::File>,
@@ -1061,24 +1068,31 @@ impl<'a> TargetReplacementGuard<'a> {
             .ok_or_else(|| restore_failed("bridge target has no file name"))?
             .to_string_lossy();
         let lock_path = parent.join(format!(".{file_name}.codex-rehome.lock"));
+        let lock_name = lock_path
+            .file_name()
+            .ok_or_else(|| restore_failed("target lock has no file name"))?;
         let lock_token = transaction_token
             .map(str::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let lock_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
+        let pinned_parent = PinnedParent::open(parent).map_err(|error| {
+            restore_failed(format!("could not pin bridge target directory: {error}"))
+        })?;
+        let lock_file = pinned_parent
+            .create_new_file(lock_name)
             .or_else(|error| {
                 if error.kind() == io::ErrorKind::AlreadyExists {
-                    let metadata = fs::symlink_metadata(&lock_path)?;
+                    let mut existing = pinned_parent.open_file(lock_name)?;
+                    let metadata = existing.metadata()?;
+                    let mut existing_token = String::new();
+                    existing.read_to_string(&mut existing_token)?;
                     if metadata_is_link_or_reparse(&metadata)
                         || !metadata.is_file()
                         || file_link_count(&lock_path)? != 1
-                        || fs::read_to_string(&lock_path)? != lock_token
+                        || existing_token != lock_token
                     {
                         return Err(error);
                     }
-                    fs::OpenOptions::new().write(true).open(&lock_path)
+                    pinned_parent.open_file_for_write(lock_name)
                 } else {
                     Err(error)
                 }
@@ -1108,6 +1122,7 @@ impl<'a> TargetReplacementGuard<'a> {
         let guard = Self {
             root,
             target: &operation.target,
+            parent: pinned_parent,
             lock_path,
             lock_token,
             lock_file: Some(lock_file),
@@ -1118,41 +1133,20 @@ impl<'a> TargetReplacementGuard<'a> {
     }
 
     fn commit_bytes(&self, operation: &PlannedOperation, bytes: &[u8]) -> Result<(), RehomeError> {
-        let parent = self
-            .target
-            .parent()
-            .ok_or_else(|| restore_failed("bridge target has no parent directory"))?;
-        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-            restore_failed(format!("could not create bridge temporary file: {error}"))
-        })?;
-        temporary
-            .write_all(bytes)
-            .and_then(|()| temporary.as_file().sync_all())
-            .map_err(|error| {
-                restore_failed(format!("could not write bridge temporary file: {error}"))
-            })?;
-        self.commit_temporary(operation, &temporary)
-    }
-
-    fn commit_temporary(
-        &self,
-        operation: &PlannedOperation,
-        temporary: &NamedTempFile,
-    ) -> Result<(), RehomeError> {
         validate_operation_state(operation)?;
         ensure_safe_codex_target(self.root, self.target)?;
         reject_hard_linked_target(self.target)?;
-        replace_file(temporary.path(), self.target).map_err(|error| {
+        let name = self
+            .target
+            .file_name()
+            .ok_or_else(|| restore_failed("bridge target has no file name"))?;
+        self.parent.replace_bytes(name, bytes).map_err(|error| {
             restore_failed(format!(
                 "could not atomically replace bridge target {}: {error}",
                 self.target.display()
             ))
         })?;
-        let parent = self
-            .target
-            .parent()
-            .ok_or_else(|| restore_failed("bridge target has no parent directory"))?;
-        sync_directory(parent).map_err(|error| {
+        self.parent.sync().map_err(|error| {
             restore_failed(format!("could not sync bridge target directory: {error}"))
         })
     }
@@ -1160,53 +1154,23 @@ impl<'a> TargetReplacementGuard<'a> {
 
 impl Drop for TargetReplacementGuard<'_> {
     fn drop(&mut self) {
-        let owns_lock = fs::read_to_string(&self.lock_path)
-            .map(|token| token == self.lock_token)
+        let Some(lock_name) = self.lock_path.file_name() else {
+            return;
+        };
+        let owns_lock = self
+            .parent
+            .open_file(lock_name)
+            .and_then(|mut file| {
+                let mut token = String::new();
+                file.read_to_string(&mut token)?;
+                Ok(token == self.lock_token)
+            })
             .unwrap_or(false);
         drop(self.lock_file.take());
         if owns_lock {
-            let _ = fs::remove_file(&self.lock_path);
-            if let Some(parent) = self.lock_path.parent() {
-                let _ = sync_directory(parent);
-            }
+            let _ = self.parent.remove_file(lock_name);
         }
     }
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)
 }
 
 #[cfg(unix)]

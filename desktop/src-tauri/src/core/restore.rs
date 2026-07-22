@@ -1,7 +1,7 @@
 use crate::core::{
     backup::{
-        prepare_transaction, record_applied_hashes, rollback_prepared, update_status,
-        PreparedTransaction,
+        ensure_applied_states, prepare_transaction, record_applied_mutation, rollback_prepared,
+        update_status, PreparedTransaction,
     },
     bridge::{
         apply_bridge_plan_for_transaction, apply_file_operation_for_transaction,
@@ -110,8 +110,11 @@ fn apply_transaction(
     update_status(transaction, RecoveryStatus::Applying)?;
     let transaction_id = transaction.journal.transaction_id;
     let (mut restored_files, mut restored_bytes) =
-        apply_regular_files(plan, verified, transaction_id)?;
-    let bridge = apply_bridge_plan_for_transaction(plan, transaction_id).map_err(|error| {
+        apply_regular_files(plan, verified, transaction)?;
+    let bridge = apply_bridge_plan_for_transaction(plan, transaction_id, |target| {
+        record_applied_mutation(transaction, target)
+    })
+    .map_err(|error| {
         if plan
             .operations
             .iter()
@@ -137,7 +140,7 @@ fn apply_transaction(
             "restore verification did not pass: {verification:?}"
         )));
     }
-    record_applied_hashes(transaction)?;
+    ensure_applied_states(transaction)?;
     update_status(transaction, RecoveryStatus::Committed)?;
     let registrations = register_projects(plan, options, verified, registrar);
     verification.app_registration_valid = options.register_projects
@@ -221,7 +224,7 @@ fn validate_package_identity(
 fn apply_regular_files(
     plan: &RestorePlan,
     verified: &VerifiedPackage,
-    transaction_id: Uuid,
+    transaction: &mut PreparedTransaction,
 ) -> Result<(u64, u64), RehomeError> {
     let mut restored_files = 0_u64;
     let mut restored_bytes = 0_u64;
@@ -233,7 +236,13 @@ fn apply_regular_files(
         }
         let bytes = verified.authenticated_payload(&operation.package_source)?;
         let root = operation_root(plan, &operation.target)?;
-        apply_file_operation_for_transaction(root, operation, &bytes, transaction_id)?;
+        apply_file_operation_for_transaction(
+            root,
+            operation,
+            &bytes,
+            transaction.journal.transaction_id,
+        )?;
+        record_applied_mutation(transaction, &operation.target)?;
         restored_files += 1;
         restored_bytes = restored_bytes
             .checked_add(bytes.len() as u64)
@@ -363,19 +372,13 @@ struct BridgeVerification {
 fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, RehomeError> {
     let index_rows = read_index_rows(plan)?;
     let sqlite_rows = read_sqlite_rows(plan)?;
-    let has_index_operation = plan
-        .operations
-        .iter()
-        .any(|operation| operation.package_source == SESSION_INDEX_SOURCE);
-    let has_sqlite_operation = plan
-        .operations
-        .iter()
-        .any(|operation| operation.package_source == THREAD_METADATA_SOURCE);
-    let mut index_valid = !has_index_operation;
-    let mut sqlite_valid = !has_sqlite_operation;
+    let requires_index = plan.bridge_verification.session_index.is_some();
+    let requires_sqlite = plan.bridge_verification.sqlite_database.is_some();
+    let mut index_valid = !requires_index;
+    let mut sqlite_valid = !requires_sqlite;
     let mut mapping_valid = true;
 
-    if has_index_operation {
+    if requires_index {
         index_valid = plan.sessions.iter().all(|session| {
             index_rows
                 .get(&session.target_task_id.to_string())
@@ -384,7 +387,7 @@ fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, Reho
                 })
         });
     }
-    if has_sqlite_operation {
+    if requires_sqlite {
         sqlite_valid = plan.sessions.iter().all(|session| {
             sqlite_rows
                 .get(&session.target_task_id.to_string())
@@ -423,8 +426,8 @@ fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, Reho
             session_values
                 .iter()
                 .any(|value| json_contains_string(value, expected))
-                && (!has_index_operation || index_cwd == Some(*expected))
-                && (!has_sqlite_operation || sqlite_cwd == Some(*expected))
+                && (!requires_index || index_cwd == Some(*expected))
+                && (!requires_sqlite || sqlite_cwd == Some(*expected))
         });
         mapping_valid &= mapped;
     }
@@ -463,14 +466,10 @@ fn json_contains_string(value: &Value, expected: &str) -> bool {
 }
 
 fn read_index_rows(plan: &RestorePlan) -> Result<BTreeMap<String, Value>, RehomeError> {
-    let Some(operation) = plan
-        .operations
-        .iter()
-        .find(|operation| operation.package_source == SESSION_INDEX_SOURCE)
-    else {
+    let Some(target) = plan.bridge_verification.session_index.as_deref() else {
         return Ok(BTreeMap::new());
     };
-    let bytes = fs::read(&operation.target).map_err(|error| {
+    let bytes = fs::read(target).map_err(|error| {
         restore_failed(format!("could not read restored session index: {error}"))
     })?;
     let text = std::str::from_utf8(&bytes)
@@ -490,15 +489,11 @@ fn read_index_rows(plan: &RestorePlan) -> Result<BTreeMap<String, Value>, Rehome
 type SqliteRows = BTreeMap<String, (Option<String>, Option<String>)>;
 
 fn read_sqlite_rows(plan: &RestorePlan) -> Result<SqliteRows, RehomeError> {
-    let Some(operation) = plan
-        .operations
-        .iter()
-        .find(|operation| operation.package_source == THREAD_METADATA_SOURCE)
-    else {
+    let Some(target) = plan.bridge_verification.sqlite_database.as_deref() else {
         return Ok(BTreeMap::new());
     };
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let connection = Connection::open_with_flags(&operation.target, flags).map_err(|error| {
+    let connection = Connection::open_with_flags(target, flags).map_err(|error| {
         restore_failed(format!("could not open restored SQLite database: {error}"))
     })?;
     let mut statement = connection

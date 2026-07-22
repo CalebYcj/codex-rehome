@@ -201,6 +201,7 @@ fn restore_and_recovery_contracts_use_typed_state() {
         operations: vec![operation.clone()],
         sessions: vec![],
         reference_rewrites: vec![],
+        bridge_verification: Default::default(),
         conflict_count: 0,
         required_bytes: 18,
     };
