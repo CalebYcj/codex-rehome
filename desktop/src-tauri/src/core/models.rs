@@ -125,6 +125,7 @@ pub struct CreatePackageReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackagePreview {
     pub package_path: PathBuf,
+    pub archive_hash: String,
     pub manifest: PackageManifest,
     pub checksum_valid: bool,
     pub entries: Vec<String>,
@@ -171,7 +172,8 @@ pub struct PlannedSession {
     pub source_task_id: Uuid,
     pub target_task_id: Uuid,
     pub title: String,
-    pub content_hash: String,
+    pub source_content_hash: String,
+    pub expected_final_content_hash: String,
     pub action: SessionAction,
 }
 

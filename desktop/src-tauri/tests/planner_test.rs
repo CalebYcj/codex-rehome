@@ -5,6 +5,7 @@ use rehome_desktop_lib::core::{
         PackageMode, PackagePreview, ProjectEntry, ReferenceRewriteKind, SessionAction, SourceOs,
         TargetInventory,
     },
+    package::inspect_package,
     planner::build_restore_plan,
 };
 use sha2::{Digest, Sha256};
@@ -102,7 +103,8 @@ fn classifies_sessions_by_id_and_content_hash() -> Result<(), Box<dyn Error>> {
         expected: SessionAction,
     }
 
-    let incoming_hash = checksum(b"incoming session\n");
+    let incoming = incoming_session_bytes();
+    let incoming_hash = checksum(&incoming);
     for case in [
         Case {
             name: "existing_session_same_id_same_hash",
@@ -122,6 +124,18 @@ fn classifies_sessions_by_id_and_content_hash() -> Result<(), Box<dyn Error>> {
     ] {
         let mut fixture = planner_fixture(None)?;
         fixture.target.conversations = case.target_conversation.into_iter().collect();
+        if case.expected == SessionAction::Skip {
+            write_target_session(
+                &fixture,
+                &rewritten_session_bytes(
+                    Uuid::parse_str(TASK_ID)?,
+                    "Synthetic migration thread",
+                    &fixture.projects_root.join("visual"),
+                ),
+            )?;
+        } else if case.expected == SessionAction::ImportAsBranch {
+            write_target_session(&fixture, b"changed target session\n")?;
+        }
 
         let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
 
@@ -137,6 +151,7 @@ fn branch_import_is_deterministic_and_exposes_every_package_reference_rewrite(
 ) -> Result<(), Box<dyn Error>> {
     let mut fixture = planner_fixture(None)?;
     fixture.target.conversations = vec![conversation(checksum(b"different session\n"))];
+    write_target_session(&fixture, b"different session\n")?;
     let first = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
     let second = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
 
@@ -182,6 +197,7 @@ fn branch_import_is_deterministic_and_exposes_every_package_reference_rewrite(
 fn existing_deterministic_branch_target_is_never_overwritten() -> Result<(), Box<dyn Error>> {
     let mut fixture = planner_fixture(None)?;
     fixture.target.conversations = vec![conversation(checksum(b"different session\n"))];
+    write_target_session(&fixture, b"different session\n")?;
     let package_id = Uuid::parse_str(PACKAGE_ID)?;
     let source_task_id = Uuid::parse_str(TASK_ID)?;
     let derived_id = Uuid::new_v5(&package_id, source_task_id.as_bytes());
@@ -207,6 +223,167 @@ fn existing_deterministic_branch_target_is_never_overwritten() -> Result<(), Box
     );
     assert!(!operation.rollback_required);
     assert_eq!(fs::read(branch_target)?, b"unrelated branch bytes\n");
+    Ok(())
+}
+
+#[test]
+fn rejects_a_valid_package_replacement_with_the_same_preview_shape() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    fixture.preview = inspect_package(&fixture.preview.package_path)?;
+    let session = incoming_session_bytes();
+    let manifest = fixture.preview.manifest.clone();
+    write_package(
+        &fixture.preview.package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, thread_metadata_bytes().as_slice()),
+            (INDEX_SOURCE, index_bytes().as_slice()),
+            (SESSION_SOURCE, session.as_slice()),
+            ("codex/skills/example/SKILL.md", b"# Replaced\n"),
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+
+    let error =
+        build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::PackageInvalid);
+    assert!(error.message.contains("changed"));
+    Ok(())
+}
+
+#[test]
+fn stale_inventory_cannot_skip_a_missing_or_changed_session() -> Result<(), Box<dyn Error>> {
+    let incoming = incoming_session_bytes();
+
+    let mut missing = planner_fixture(None)?;
+    missing.target.conversations = vec![conversation(checksum(&incoming))];
+    let missing_plan =
+        build_restore_plan(&missing.preview, &missing.target, &missing.projects_root)?;
+    let missing_operation = operation_for(&missing_plan.operations, SESSION_SOURCE);
+    assert_eq!(missing_plan.sessions[0].action, SessionAction::Import);
+    assert_eq!(missing_operation.action, ChangeKind::Add);
+    assert_eq!(missing_operation.expected_previous_hash, None);
+
+    let mut changed = planner_fixture(None)?;
+    changed.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(&changed, b"changed after discovery\n")?;
+    let changed_plan =
+        build_restore_plan(&changed.preview, &changed.target, &changed.projects_root)?;
+    assert_eq!(
+        changed_plan.sessions[0].action,
+        SessionAction::ImportAsBranch
+    );
+    assert_eq!(
+        operation_for(&changed_plan.operations, SESSION_SOURCE).expected_previous_hash,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn repeated_restore_skips_its_existing_rewritten_branch() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    fixture.target.conversations = vec![conversation(checksum(b"original target\n"))];
+    write_target_session(&fixture, b"original target\n")?;
+    let first = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    let branch = first.sessions[0].clone();
+    assert_eq!(branch.action, SessionAction::ImportAsBranch);
+    assert_ne!(
+        branch.source_content_hash,
+        branch.expected_final_content_hash
+    );
+
+    let rewritten = rewritten_session_bytes(
+        branch.target_task_id,
+        &branch.title,
+        &fixture.projects_root.join("visual"),
+    );
+    assert_eq!(checksum(&rewritten), branch.expected_final_content_hash);
+    fs::create_dir_all(branch.target.parent().unwrap())?;
+    fs::write(&branch.target, &rewritten)?;
+    let branch_relative = branch
+        .target
+        .strip_prefix(&fixture.target.codex_home)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    fixture.target.conversations.push(ConversationEntry {
+        task_id: branch.target_task_id,
+        project_id: Some(Uuid::parse_str(PROJECT_ID)?),
+        title: branch.title.clone(),
+        updated_at: "2026-07-22T00:00:00Z".into(),
+        content_hash: checksum(&rewritten),
+        archive_path: format!("codex/{branch_relative}"),
+    });
+
+    let second = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    assert_eq!(second.sessions[0].action, SessionAction::Skip);
+    assert_eq!(second.sessions[0].target_task_id, branch.target_task_id);
+    assert_eq!(
+        operation_for(&second.operations, SESSION_SOURCE).expected_previous_hash,
+        Some(checksum(&rewritten))
+    );
+    Ok(())
+}
+
+#[test]
+fn all_skipped_sessions_do_not_emit_bridge_metadata_operations() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let incoming = incoming_session_bytes();
+    fixture.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(
+        &fixture,
+        &rewritten_session_bytes(
+            Uuid::parse_str(TASK_ID)?,
+            "Synthetic migration thread",
+            &fixture.projects_root.join("visual"),
+        ),
+    )?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::Skip);
+    assert!(!plan.operations.iter().any(|operation| {
+        matches!(
+            operation.package_source.as_str(),
+            INDEX_SOURCE | THREADS_SOURCE
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn derived_ids_avoid_target_and_planned_conversation_ids() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let package_id = Uuid::parse_str(PACKAGE_ID)?;
+    let source_id = Uuid::parse_str(TASK_ID)?;
+    let first_derived = Uuid::new_v5(&package_id, source_id.as_bytes());
+    fixture.target.conversations = vec![
+        conversation(checksum(b"original target\n")),
+        ConversationEntry {
+            task_id: first_derived,
+            project_id: None,
+            title: "Occupied ID".into(),
+            updated_at: "2026-07-22T00:00:00Z".into(),
+            content_hash: checksum(b"occupied\n"),
+            archive_path: format!("codex/sessions/2026/07/22/{first_derived}.jsonl"),
+        },
+    ];
+    write_target_session(&fixture, b"original target\n")?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::ImportAsBranch);
+    assert_ne!(plan.sessions[0].target_task_id, first_derived);
+    assert!(!fixture
+        .target
+        .conversations
+        .iter()
+        .any(|session| session.task_id == plan.sessions[0].target_task_id));
     Ok(())
 }
 
@@ -366,6 +543,161 @@ fn package_projects_cannot_silently_share_a_target_directory() -> Result<(), Box
     Ok(())
 }
 
+#[test]
+fn rejects_existing_link_ancestors_for_both_restore_roots() -> Result<(), Box<dyn Error>> {
+    for root in ["codex_home", "projects_root"] {
+        let fixture = planner_fixture(None)?;
+        let link = if root == "codex_home" {
+            fixture.target.codex_home.clone()
+        } else {
+            fixture.projects_root.clone()
+        };
+        let real = fixture
+            ._temp
+            .path()
+            .join(format!("real-{}", root.replace('_', "-")));
+        if link.exists() {
+            fs::rename(&link, &real)?;
+        } else {
+            fs::create_dir_all(&real)?;
+        }
+        create_directory_link(&real, &link)?;
+
+        let error = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::RestoreFailed, "{root}");
+        assert!(
+            error.message.contains("link") || error.message.contains("reparse"),
+            "{root}: {}",
+            error.message
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_overlapping_codex_and_project_roots() -> Result<(), Box<dyn Error>> {
+    let fixture = planner_fixture(None)?;
+
+    let error = build_restore_plan(
+        &fixture.preview,
+        &fixture.target,
+        &fixture.target.codex_home,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("overlap"));
+    Ok(())
+}
+
+#[test]
+fn project_target_names_use_unicode_normalized_collision_rules() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut preview = project_preview(temp.path(), true)?;
+    preview.manifest.projects[0].name = "Caf\u{00e9}".into();
+    preview.manifest.projects[1].name = "Cafe\u{0301}".into();
+    let manifest = preview.manifest.clone();
+    write_package(
+        &preview.package_path,
+        &manifest,
+        &[
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+            (
+                "projects/33333333-3333-4333-8333-333333333333/files/README.md",
+                b"second project\n",
+            ),
+            (
+                "projects/33333333-3333-4333-8333-333333333333/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    preview = inspect_package(&preview.package_path)?;
+    let target_root = temp.path().join("target");
+    let codex_home = target_root.join(".codex");
+    fs::create_dir_all(&codex_home)?;
+    let target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+
+    let error = build_restore_plan(&preview, &target, &target_root.join("projects")).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::ProjectConflict);
+    Ok(())
+}
+
+#[test]
+fn derived_ids_are_reserved_against_future_planned_imports() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let package_id = Uuid::parse_str(PACKAGE_ID)?;
+    let future_task_id = Uuid::new_v5(&package_id, Uuid::parse_str(TASK_ID)?.as_bytes());
+    let second_source = "codex/sessions/2026/07/22/second.jsonl";
+    let second_bytes = format!("{{\"id\":\"{future_task_id}\"}}\n").into_bytes();
+    fixture
+        .preview
+        .manifest
+        .conversations
+        .push(ConversationEntry {
+            task_id: future_task_id,
+            project_id: None,
+            title: "Future import".into(),
+            updated_at: "2026-07-22T00:00:00Z".into(),
+            content_hash: checksum(&second_bytes),
+            archive_path: second_source.into(),
+        });
+    fixture.preview.manifest.counts.conversations = 2;
+    let manifest = fixture.preview.manifest.clone();
+    let incoming = incoming_session_bytes();
+    write_package(
+        &fixture.preview.package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, thread_metadata_bytes().as_slice()),
+            (INDEX_SOURCE, index_bytes().as_slice()),
+            (SESSION_SOURCE, incoming.as_slice()),
+            (second_source, second_bytes.as_slice()),
+            ("codex/skills/example/SKILL.md", b"# Example\n"),
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    fixture.preview = inspect_package(&fixture.preview.package_path)?;
+    fixture.target.conversations = vec![conversation(checksum(b"original target\n"))];
+    write_target_session(&fixture, b"original target\n")?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    let ids = plan
+        .sessions
+        .iter()
+        .map(|session| session.target_task_id)
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(ids.len(), 2);
+    assert_eq!(
+        plan.sessions
+            .iter()
+            .find(|session| session.source_task_id == Uuid::parse_str(TASK_ID).unwrap())
+            .unwrap()
+            .action,
+        SessionAction::ImportAsBranch
+    );
+    Ok(())
+}
+
 fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let package_path = temp.path().join("handoff.rehome");
@@ -376,6 +708,7 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
     fs::write(codex_home.join("state_5.sqlite"), b"target database")?;
 
     let project_id = Uuid::parse_str(PROJECT_ID)?;
+    let session_bytes = incoming_session_bytes();
     let manifest = PackageManifest {
         format: "codex-rehome".into(),
         schema_version: 1,
@@ -397,7 +730,7 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
         projects: vec![ProjectEntry {
             project_id,
             name: "visual".into(),
-            source_path: r"C:\Users\OldUser\Documents\visual".into(),
+            source_path: "C:/Users/OldUser/Documents/visual".into(),
             archive_path: format!("projects/{project_id}/files"),
             file_count: 1,
             content_bytes: b"incoming project\n".len() as u64,
@@ -405,19 +738,15 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
             git_branch: None,
             git_head: None,
         }],
-        conversations: vec![conversation(checksum(b"incoming session\n"))],
+        conversations: vec![conversation(checksum(&session_bytes))],
         exclusions: ExclusionSummary::default(),
     };
+    let thread_metadata = thread_metadata_bytes();
+    let index = index_bytes();
     let payloads = [
-        (
-            THREADS_SOURCE,
-            br#"[{"id":"11111111-1111-4111-8111-111111111111"}]"#.as_slice(),
-        ),
-        (
-            INDEX_SOURCE,
-            br#"{"id":"11111111-1111-4111-8111-111111111111"}\n"#.as_slice(),
-        ),
-        (SESSION_SOURCE, b"incoming session\n".as_slice()),
+        (THREADS_SOURCE, thread_metadata.as_slice()),
+        (INDEX_SOURCE, index.as_slice()),
+        (SESSION_SOURCE, session_bytes.as_slice()),
         ("codex/skills/example/SKILL.md", b"# Example\n".as_slice()),
         (PROJECT_SOURCE, b"incoming project\n".as_slice()),
         (
@@ -426,12 +755,7 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
         ),
     ];
     write_package(&package_path, &manifest, &payloads)?;
-    let mut entries = payloads
-        .iter()
-        .map(|(name, _)| (*name).to_owned())
-        .collect::<Vec<_>>();
-    entries.extend(["checksums.sha256".into(), "manifest.json".into()]);
-    entries.sort();
+    let preview = inspect_package(&package_path)?;
 
     let target_os = target_os.unwrap_or_else(current_source_os);
     let target = TargetInventory {
@@ -445,13 +769,7 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
     let project_target = projects_root.join("visual").join("README.md");
     Ok(PlannerFixture {
         _temp: temp,
-        preview: PackagePreview {
-            package_path,
-            manifest,
-            checksum_valid: true,
-            entries,
-            forbidden_files_total: 0,
-        },
+        preview,
         target,
         projects_root,
         project_target,
@@ -529,19 +847,7 @@ fn project_preview(root: &Path, duplicate_target: bool) -> Result<PackagePreview
         ]);
     }
     write_package(&package_path, &manifest, &payloads)?;
-    let mut entries = payloads
-        .iter()
-        .map(|(name, _)| (*name).to_owned())
-        .collect::<Vec<_>>();
-    entries.extend(["checksums.sha256".into(), "manifest.json".into()]);
-    entries.sort();
-    Ok(PackagePreview {
-        package_path,
-        manifest,
-        checksum_valid: true,
-        entries,
-        forbidden_files_total: 0,
-    })
+    Ok(inspect_package(&package_path)?)
 }
 
 fn conversation(content_hash: String) -> ConversationEntry {
@@ -567,6 +873,60 @@ fn operation_for<'a>(
 
 fn checksum(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn incoming_session_bytes() -> Vec<u8> {
+    format!(
+        "{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\"}}\n"
+    )
+    .into_bytes()
+}
+
+fn thread_metadata_bytes() -> Vec<u8> {
+    format!("[{{\"id\":\"{TASK_ID}\"}}]").into_bytes()
+}
+
+fn index_bytes() -> Vec<u8> {
+    format!("{{\"id\":\"{TASK_ID}\"}}\n").into_bytes()
+}
+
+fn rewritten_session_bytes(task_id: Uuid, title: &str, project_path: &Path) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(&serde_json::json!({
+        "id": task_id.to_string(),
+        "title": title,
+        "cwd": project_path.to_string_lossy(),
+    }))
+    .unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+
+fn target_session_path(fixture: &PlannerFixture) -> PathBuf {
+    fixture
+        .target
+        .codex_home
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("22")
+        .join("thread.jsonl")
+}
+
+fn write_target_session(fixture: &PlannerFixture, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    let path = target_session_path(fixture);
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
 }
 
 fn write_package(

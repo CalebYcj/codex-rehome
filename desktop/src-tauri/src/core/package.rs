@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -31,6 +31,7 @@ const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_INSPECTION_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
 const THREAD_EXPORT_COLUMNS_V1: &[&str] = &[
@@ -198,9 +199,29 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
     })
 }
 
+#[derive(Debug)]
+pub(crate) struct VerifiedPayload {
+    pub content_hash: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct VerifiedPackage {
+    pub preview: PackagePreview,
+    pub payloads: BTreeMap<String, VerifiedPayload>,
+    pub session_payloads: BTreeMap<String, Vec<u8>>,
+}
+
 pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
-    let file = fs::File::open(path)
+    Ok(inspect_package_for_planning(path)?.preview)
+}
+
+pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackage, RehomeError> {
+    let mut file = fs::File::open(path)
         .map_err(|error| package_invalid(format!("could not open package: {error}")))?;
+    let archive_hash = hash_archive_file(&mut file)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
     if archive.len() > MAX_ARCHIVE_ENTRIES {
@@ -213,6 +234,7 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
     let mut paths = PortablePathRegistry::default();
     let mut file_paths = HashSet::new();
     let mut payload_hashes = BTreeMap::new();
+    let mut payloads = BTreeMap::new();
     let mut manifest_bytes = None;
     let mut checksum_bytes = None;
     let mut forbidden_files_total = 0_u64;
@@ -269,7 +291,16 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
                 checksum_bytes = Some(read_control_entry(&mut entry, &normalized)?)
             }
             _ => {
-                payload_hashes.insert(normalized, hash_reader(&mut entry)?);
+                let size_bytes = entry.size();
+                let content_hash = hash_reader(&mut entry)?;
+                payload_hashes.insert(normalized.clone(), content_hash.clone());
+                payloads.insert(
+                    normalized,
+                    VerifiedPayload {
+                        content_hash,
+                        size_bytes,
+                    },
+                );
             }
         }
     }
@@ -295,13 +326,41 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
         .ok_or_else(|| package_invalid("checksums.sha256 is missing"))?;
     verify_checksums(checksum_bytes, &payload_hashes)?;
 
+    let mut session_payloads = BTreeMap::new();
+    for conversation in &manifest.conversations {
+        let mut entry = archive
+            .by_name(&conversation.archive_path)
+            .map_err(|error| {
+                package_invalid(format!(
+                    "could not reopen verified session payload: {error}"
+                ))
+            })?;
+        let bytes = read_payload_entry(&mut entry)?;
+        session_payloads.insert(conversation.archive_path.clone(), bytes);
+    }
+
+    let mut file = archive.into_inner();
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
+    let final_archive_hash = hash_archive_file(&mut file)?;
+    if final_archive_hash != archive_hash {
+        return Err(package_invalid(
+            "package changed while it was being inspected",
+        ));
+    }
+
     names.sort();
-    Ok(PackagePreview {
-        package_path: path.to_path_buf(),
-        manifest,
-        checksum_valid: true,
-        entries: names,
-        forbidden_files_total,
+    Ok(VerifiedPackage {
+        preview: PackagePreview {
+            package_path: path.to_path_buf(),
+            archive_hash,
+            manifest,
+            checksum_valid: true,
+            entries: names,
+            forbidden_files_total,
+        },
+        payloads,
+        session_payloads,
     })
 }
 
@@ -1146,6 +1205,44 @@ fn read_control_entry<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, Re
         .map_err(|error| package_invalid(format!("could not read ZIP control file: {error}")))?;
     ensure_control_size(name, bytes.len() as u64)?;
     Ok(bytes)
+}
+
+fn read_payload_entry<R: Read>(reader: &mut R) -> Result<Vec<u8>, RehomeError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_ARCHIVE_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| package_invalid(format!("could not read ZIP payload: {error}")))?;
+    if bytes.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES {
+        return Err(package_invalid(
+            "ZIP entry size exceeds the inspection limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn hash_archive_file(file: &mut fs::File) -> Result<String, RehomeError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    let mut bytes_read = 0_u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| package_invalid(format!("could not hash package: {error}")))?;
+        if count == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(count as u64)
+            .ok_or_else(|| package_invalid("package file exceeds the inspection limit"))?;
+        if bytes_read > MAX_ARCHIVE_FILE_BYTES {
+            return Err(package_invalid(
+                "package file size exceeds the inspection limit",
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex_bytes(&hasher.finalize()))
 }
 
 fn ensure_control_size(name: &str, size: u64) -> Result<(), RehomeError> {
