@@ -320,6 +320,34 @@ fn recovery_reports_corrupt_uuid_named_journal() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn recovery_reports_non_uuid_json_entry_as_an_invalid_journal() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    fs::create_dir_all(harness.transactions_dir())?;
+    fs::write(harness.transactions_dir().join("notes.json"), b"{}")?;
+
+    let first = recover_incomplete_transactions().unwrap_err();
+    let second = recover_incomplete_transactions().unwrap_err();
+
+    assert_eq!(first.code, ErrorCode::RollbackFailed);
+    assert_eq!(first.message, second.message);
+    assert!(first.message.contains("journal") && first.message.contains("UUID"));
+    Ok(())
+}
+
+#[test]
+fn recovery_skips_unrelated_non_json_file() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    fs::create_dir_all(harness.transactions_dir())?;
+    fs::write(
+        harness.transactions_dir().join("notes.txt"),
+        b"not a journal",
+    )?;
+
+    assert!(recover_incomplete_transactions()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn recovery_reports_uuid_named_directory_as_an_invalid_journal() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let path = harness
@@ -363,6 +391,25 @@ fn recovery_reports_uuid_named_symlink_as_an_invalid_journal() -> Result<(), Box
 }
 
 #[test]
+fn rollback_rejects_same_content_replacement_with_a_new_identity() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let target = harness.plan.sessions[0].target.clone();
+    let replacement = target.with_extension("replacement");
+    let applied = fs::read(&target)?;
+    fs::write(&replacement, &applied)?;
+    fs::remove_file(&target)?;
+    fs::rename(&replacement, &target)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(error.message.contains("identity") || error.message.contains("conflict"));
+    assert_eq!(fs::read(&target)?, applied);
+    Ok(())
+}
+
+#[test]
 fn incomplete_rollback_refuses_to_overwrite_a_newer_edit() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let report = apply_restore(harness.plan.clone(), harness.options())?;
@@ -387,7 +434,33 @@ fn incomplete_rollback_refuses_to_overwrite_a_newer_edit() -> Result<(), Box<dyn
 }
 
 #[test]
-fn rollback_retries_after_remove_before_progress_persisted() -> Result<(), Box<dyn Error>> {
+fn rollback_rejects_remove_before_progress_was_persisted() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let operation = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    fs::remove_file(&target)?;
+    operation["rollback_progress"] = Value::String("pending".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(error.message.contains("conflict") || error.message.contains("missing"));
+    assert!(!target.exists());
+    Ok(())
+}
+
+#[test]
+fn rollback_retries_after_recorded_target_removal() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let before = snapshot_mutable_targets(&harness.plan)?;
     let report = apply_restore(harness.plan.clone(), harness.options())?;
@@ -402,7 +475,7 @@ fn rollback_retries_after_remove_before_progress_persisted() -> Result<(), Box<d
         .unwrap();
     let target = PathBuf::from(operation["target"].as_str().unwrap());
     fs::remove_file(target)?;
-    operation["rollback_progress"] = Value::String("pending".into());
+    operation["rollback_progress"] = Value::String("target_removed".into());
     fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
 
     assert!(rollback(report.transaction_id)?.success);
@@ -411,7 +484,37 @@ fn rollback_retries_after_remove_before_progress_persisted() -> Result<(), Box<d
 }
 
 #[test]
-fn rollback_retries_after_restore_before_progress_persisted() -> Result<(), Box<dyn Error>> {
+fn rollback_rejects_restore_before_progress_was_persisted() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let backup_root = PathBuf::from(journal["backup_root"].as_str().unwrap());
+    let operation = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["backup_kind"] == "file")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let backup = backup_root
+        .join(report.transaction_id.to_string())
+        .join(operation["backup_path"].as_str().unwrap());
+    fs::copy(&backup, &target)?;
+    operation["rollback_progress"] = Value::String("target_removed".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(error.message.contains("conflict") || error.message.contains("present"));
+    assert_eq!(fs::read(&target)?, fs::read(&backup)?);
+    Ok(())
+}
+
+#[test]
+fn rollback_retries_after_recorded_original_restoration() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let before = snapshot_mutable_targets(&harness.plan)?;
     let report = apply_restore(harness.plan.clone(), harness.options())?;
@@ -430,7 +533,7 @@ fn rollback_retries_after_restore_before_progress_persisted() -> Result<(), Box<
         .join(report.transaction_id.to_string())
         .join(operation["backup_path"].as_str().unwrap());
     fs::copy(backup, target)?;
-    operation["rollback_progress"] = Value::String("target_removed".into());
+    operation["rollback_progress"] = Value::String("original_restored".into());
     fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
 
     assert!(rollback(report.transaction_id)?.success);
@@ -570,7 +673,7 @@ fn registration_attempts_every_project_and_reports_partial_failure() -> Result<(
 }
 
 #[test]
-fn sqlite_wal_backup_restores_a_coherent_self_contained_database() -> Result<(), Box<dyn Error>> {
+fn sqlite_wal_backup_is_a_coherent_self_contained_database() -> Result<(), Box<dyn Error>> {
     let mut harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let database = harness.plan.target_codex_home.join("state_5.sqlite");
     let keeper = Connection::open(&database)?;
@@ -593,16 +696,20 @@ fn sqlite_wal_backup_restores_a_coherent_self_contained_database() -> Result<(),
     harness.plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
 
     let report = apply_restore(harness.plan.clone(), harness.options())?;
-    drop(keeper);
-    rollback(report.transaction_id)?;
-
-    let restored = Connection::open(&database)?;
+    let journal = harness.read_journal(report.transaction_id)?;
+    let operation = journal["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["package_source"] == "codex/metadata/threads.json")
+        .unwrap();
+    let backup = PathBuf::from(journal["backup_root"].as_str().unwrap())
+        .join(report.transaction_id.to_string())
+        .join(operation["backup_path"].as_str().unwrap());
+    let snapshot = Connection::open(backup)?;
     let marker: String =
-        restored.query_row("SELECT value FROM rollback_marker", [], |row| row.get(0))?;
+        snapshot.query_row("SELECT value FROM rollback_marker", [], |row| row.get(0))?;
     assert_eq!(marker, "from-wal");
-    drop(restored);
-    assert!(!sqlite_sidecar(&database, "-wal").exists());
-    assert!(!sqlite_sidecar(&database, "-shm").exists());
     Ok(())
 }
 

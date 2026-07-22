@@ -3,6 +3,7 @@ mod tests {
     use super::PinnedParent;
     use std::{ffi::OsStr, fs};
 
+    #[cfg(unix)]
     #[test]
     fn pinned_replace_never_writes_through_a_swapped_parent() {
         let root = tempfile::tempdir().unwrap();
@@ -26,6 +27,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn pinned_remove_never_deletes_through_a_swapped_parent() {
         let root = tempfile::tempdir().unwrap();
@@ -47,6 +49,34 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_pin_blocks_parent_rename_and_swap_during_path_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let parked = root.path().join("parked");
+        let outside = root.path().join("outside");
+        let source = root.path().join("source");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(parent.join("replace"), b"original").unwrap();
+        fs::write(parent.join("remove"), b"original").unwrap();
+        fs::write(outside.join("replace"), b"outside").unwrap();
+        fs::write(outside.join("remove"), b"outside").unwrap();
+        fs::write(&source, b"replacement").unwrap();
+        let pinned = PinnedParent::open(&parent).unwrap();
+
+        assert!(fs::rename(&parent, &parked).is_err());
+        assert!(fs::rename(&outside, &parent).is_err());
+        pinned.replace_file(&source, OsStr::new("replace")).unwrap();
+        pinned.remove_file(OsStr::new("remove")).unwrap();
+
+        assert_eq!(fs::read(parent.join("replace")).unwrap(), b"replacement");
+        assert!(!parent.join("remove").exists());
+        assert_eq!(fs::read(outside.join("replace")).unwrap(), b"outside");
+        assert_eq!(fs::read(outside.join("remove")).unwrap(), b"outside");
+    }
+
     #[cfg(unix)]
     fn swap_parent(
         parent: &std::path::Path,
@@ -57,17 +87,6 @@ mod tests {
         fs::rename(parent, parked).unwrap();
         symlink(outside, parent).unwrap();
         outside.join("target")
-    }
-
-    #[cfg(windows)]
-    fn swap_parent(
-        parent: &std::path::Path,
-        parked: &std::path::Path,
-        outside: &std::path::Path,
-    ) -> std::path::PathBuf {
-        fs::rename(parent, parked).unwrap();
-        fs::rename(outside, parent).unwrap();
-        parent.join("target")
     }
 }
 use std::{
@@ -125,6 +144,7 @@ impl PinnedParent {
         validate_name(name)?;
         self.verify_location()?;
         remove_at(self, name)?;
+        self.verify_location()?;
         sync_directory_handle(&self.directory)
     }
 
@@ -137,7 +157,9 @@ impl PinnedParent {
     pub(crate) fn create_new_file(&self, name: &OsStr) -> io::Result<fs::File> {
         validate_name(name)?;
         self.verify_location()?;
-        create_file_at(self, name)
+        let file = create_file_at(self, name)?;
+        self.verify_location()?;
+        Ok(file)
     }
 
     pub(crate) fn open_file_for_write(&self, name: &OsStr) -> io::Result<fs::File> {
@@ -157,7 +179,8 @@ impl PinnedParent {
     ) -> io::Result<()> {
         validate_name(name)?;
         self.verify_location()?;
-        set_permissions_at(self, name, permissions)
+        set_permissions_at(self, name, permissions)?;
+        self.verify_location()
     }
 
     fn replace_with(
@@ -183,6 +206,8 @@ impl PinnedParent {
                 .map_err(|error| io_stage("verify pinned parent", error))?;
             replace_at(self, temporary_name, name)
                 .map_err(|error| io_stage("replace pinned target", error))?;
+            self.verify_location()
+                .map_err(|error| io_stage("verify pinned parent after replace", error))?;
             sync_directory_handle(&self.directory)
                 .map_err(|error| io_stage("sync pinned parent", error))
         });
@@ -233,7 +258,7 @@ fn validate_name(name: &OsStr) -> io::Result<()> {
 
 #[cfg(windows)]
 fn open_directory(path: &Path) -> io::Result<fs::File> {
-    open_windows_directory(path, true)
+    open_windows_directory(path, false)
 }
 
 #[cfg(windows)]
@@ -245,7 +270,7 @@ fn open_directory_for_verification(path: &Path) -> io::Result<fs::File> {
 fn open_windows_directory(path: &Path, share_delete: bool) -> io::Result<fs::File> {
     use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
     use windows_sys::Win32::{
-        Foundation::INVALID_HANDLE_VALUE,
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -264,7 +289,7 @@ fn open_windows_directory(path: &Path, share_delete: bool) -> io::Result<fs::Fil
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
-            0,
+            GENERIC_READ | GENERIC_WRITE,
             sharing,
             std::ptr::null(),
             OPEN_EXISTING,

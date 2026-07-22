@@ -42,11 +42,7 @@ pub(crate) enum RollbackProgress {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub(crate) enum AppliedState {
     Absent,
-    File {
-        hash: String,
-        #[serde(default)]
-        identity: Option<String>,
-    },
+    File { hash: String, identity: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -270,7 +266,7 @@ fn inspect_applied_state(operation: &BackupOperation) -> Result<AppliedState, Re
             };
             Ok(AppliedState::File {
                 hash,
-                identity: Some(file_identity(&operation.target)?),
+                identity: file_identity(&operation.target)?,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AppliedState::Absent),
@@ -322,12 +318,18 @@ pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeE
         if path.extension().is_none_or(|x| x != "json") {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        let Ok(transaction_id) = Uuid::parse_str(stem) else {
-            continue;
-        };
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            rollback_failed(format!("could not inspect transaction journal: {error}"))
+        })?;
+        if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+            return Err(rollback_failed("transaction journal is not a regular file"));
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| rollback_failed("transaction journal file name is not a UUID"))?;
+        let transaction_id = Uuid::parse_str(stem)
+            .map_err(|_| rollback_failed("transaction journal file name is not a UUID"))?;
         let journal = load_validated_journal(&path, Some(transaction_id))?;
         remove_owned_stale_locks(&journal)?;
         if matches!(
@@ -606,7 +608,8 @@ fn rollback_loaded(
     write_journal(journal_path, journal)?;
 
     let result = (|| {
-        for index in 0..journal.operations.len() {
+        let indices = rollback_order(journal);
+        for index in indices {
             rollback_operation(journal_path, journal, index)?;
         }
         verify_original_state(journal)?;
@@ -636,29 +639,28 @@ fn rollback_loaded(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CurrentState {
-    Applied,
-    Absent,
-    Original,
-}
-
 fn rollback_operation(
     journal_path: &Path,
     journal: &mut TransactionJournal,
     index: usize,
 ) -> Result<(), RehomeError> {
     let operation = journal.operations[index].clone();
-    let state = current_state(&operation)?;
-    if state == CurrentState::Original {
-        journal.operations[index].rollback_progress = RollbackProgress::OriginalRestored;
-        return write_journal(journal_path, journal);
+    verify_rollback_phase(&operation)?;
+    match operation.rollback_progress {
+        RollbackProgress::OriginalRestored => return Ok(()),
+        RollbackProgress::Pending if operation.applied_state.is_none() => {
+            journal.operations[index].rollback_progress = RollbackProgress::OriginalRestored;
+            return write_journal(journal_path, journal);
+        }
+        RollbackProgress::Pending => {
+            if matches!(operation.applied_state, Some(AppliedState::File { .. })) {
+                remove_current_target(journal, &operation)?;
+            }
+            journal.operations[index].rollback_progress = RollbackProgress::TargetRemoved;
+            write_journal(journal_path, journal)?;
+        }
+        RollbackProgress::TargetRemoved => {}
     }
-    if state == CurrentState::Applied {
-        remove_current_target(journal, &operation)?;
-    }
-    journal.operations[index].rollback_progress = RollbackProgress::TargetRemoved;
-    write_journal(journal_path, journal)?;
 
     if operation.backup_kind == BackupKind::File {
         restore_backup_file(journal, &operation)?;
@@ -667,7 +669,79 @@ fn rollback_operation(
     write_journal(journal_path, journal)
 }
 
-fn current_state(operation: &BackupOperation) -> Result<CurrentState, RehomeError> {
+fn rollback_order(journal: &TransactionJournal) -> Vec<usize> {
+    let mut indices = (0..journal.operations.len()).collect::<Vec<_>>();
+    indices.sort_by_key(|index| {
+        !journal.operations[*index]
+            .package_source
+            .starts_with("codex/metadata/sqlite-sidecar")
+    });
+    indices
+}
+
+fn verify_rollback_phase(operation: &BackupOperation) -> Result<(), RehomeError> {
+    match operation.rollback_progress {
+        RollbackProgress::Pending => match &operation.applied_state {
+            Some(applied_state) => verify_applied_state(operation, applied_state),
+            None => verify_original_operation_state(operation),
+        },
+        RollbackProgress::TargetRemoved => verify_target_absent(
+            operation,
+            "rollback conflict: target is present after its recorded removal",
+        ),
+        RollbackProgress::OriginalRestored => verify_original_operation_state(operation),
+    }
+}
+
+fn verify_applied_state(
+    operation: &BackupOperation,
+    applied_state: &AppliedState,
+) -> Result<(), RehomeError> {
+    match applied_state {
+        AppliedState::Absent => verify_target_absent(
+            operation,
+            "rollback conflict: applied target was expected to be absent",
+        ),
+        AppliedState::File { hash, identity } => {
+            let (actual_hash, actual_identity) = inspect_current_file(operation)?;
+            if actual_hash.eq_ignore_ascii_case(hash) && actual_identity == *identity {
+                Ok(())
+            } else {
+                Err(rollback_failed(format!(
+                    "rollback conflict: applied target hash or identity changed: {}",
+                    operation.target.display()
+                )))
+            }
+        }
+    }
+}
+
+fn verify_original_operation_state(operation: &BackupOperation) -> Result<(), RehomeError> {
+    if operation.backup_kind == BackupKind::Absent {
+        return verify_target_absent(
+            operation,
+            "rollback conflict: target is present after its recorded restoration",
+        );
+    }
+    let expected = operation
+        .original_hash
+        .as_deref()
+        .ok_or_else(|| rollback_failed("file backup has no original hash"))?;
+    let (actual, _) = inspect_current_file(operation)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(rollback_failed(format!(
+            "rollback conflict: restored original hash changed: {}",
+            operation.target.display()
+        )))
+    }
+}
+
+fn verify_target_absent(
+    operation: &BackupOperation,
+    present_message: &str,
+) -> Result<(), RehomeError> {
     match fs::symlink_metadata(&operation.target) {
         Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
             Err(rollback_failed(format!(
@@ -675,79 +749,11 @@ fn current_state(operation: &BackupOperation) -> Result<CurrentState, RehomeErro
                 operation.target.display()
             )))
         }
-        Ok(_) => {
-            let actual = if operation.package_source == "codex/metadata/threads.json" {
-                hash_sqlite_database(&operation.target)?
-            } else {
-                hash_file(&operation.target)?
-            };
-            if operation
-                .original_hash
-                .as_deref()
-                .is_some_and(|hash| actual.eq_ignore_ascii_case(hash))
-            {
-                return Ok(CurrentState::Original);
-            }
-            let sqlite_sidecar_matches =
-                operation
-                    .applied_database_hash
-                    .as_deref()
-                    .is_some_and(|expected| {
-                        sqlite_database_for_sidecar(operation).is_ok_and(|database| {
-                            hash_sqlite_database(&database)
-                                .is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
-                        })
-                    });
-            let exact_applied = sqlite_sidecar_matches
-                || operation
-                    .applied_state
-                    .as_ref()
-                    .is_some_and(|state| match state {
-                        AppliedState::File { hash, identity } => {
-                            actual.eq_ignore_ascii_case(hash)
-                                || operation
-                                    .package_source
-                                    .starts_with("codex/metadata/sqlite-sidecar")
-                                    && identity.as_deref().is_some_and(|expected| {
-                                        file_identity(&operation.target)
-                                            .is_ok_and(|actual| actual == expected)
-                                    })
-                        }
-                        AppliedState::Absent => false,
-                    })
-                || operation.applied_state.is_none()
-                    && operation
-                        .applied_hash
-                        .as_deref()
-                        .is_some_and(|hash| actual.eq_ignore_ascii_case(hash));
-            if exact_applied {
-                return Ok(CurrentState::Applied);
-            }
-            let identity_detail = if operation
-                .package_source
-                .starts_with("codex/metadata/sqlite-sidecar")
-            {
-                format!(
-                    " (recorded {:?}, current identity {:?})",
-                    operation.applied_state,
-                    file_identity(&operation.target).ok()
-                )
-            } else {
-                String::new()
-            };
-            Err(rollback_failed(format!(
-                "rollback conflict: restored target changed after apply: {}{}",
-                operation.target.display(),
-                identity_detail
-            )))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if operation.backup_kind == BackupKind::Absent {
-                Ok(CurrentState::Original)
-            } else {
-                Ok(CurrentState::Absent)
-            }
-        }
+        Ok(_) => Err(rollback_failed(format!(
+            "{present_message}: {}",
+            operation.target.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(rollback_failed(format!(
             "could not inspect rollback target {}: {error}",
             operation.target.display()
@@ -755,16 +761,35 @@ fn current_state(operation: &BackupOperation) -> Result<CurrentState, RehomeErro
     }
 }
 
-fn sqlite_database_for_sidecar(operation: &BackupOperation) -> Result<PathBuf, RehomeError> {
-    let target = operation.target.to_string_lossy();
-    for suffix in SQLITE_SIDECARS {
-        if let Some(database) = target.strip_suffix(suffix) {
-            return Ok(PathBuf::from(database));
+fn inspect_current_file(operation: &BackupOperation) -> Result<(String, String), RehomeError> {
+    let metadata = fs::symlink_metadata(&operation.target).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            rollback_failed(format!(
+                "rollback conflict: expected target is missing: {}",
+                operation.target.display()
+            ))
+        } else {
+            rollback_failed(format!(
+                "could not inspect rollback target {}: {error}",
+                operation.target.display()
+            ))
         }
+    })?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(rollback_failed(format!(
+            "rollback target is not a regular file: {}",
+            operation.target.display()
+        )));
     }
-    Err(rollback_failed(
-        "SQLite sidecar target has an invalid suffix",
-    ))
+    let hash = if operation.package_source == "codex/metadata/threads.json" {
+        hash_sqlite_database(&operation.target)
+    } else {
+        hash_file(&operation.target)
+    }
+    .map_err(|error| rollback_failed(error.message))?;
+    let identity =
+        file_identity(&operation.target).map_err(|error| rollback_failed(error.message))?;
+    Ok((hash, identity))
 }
 
 fn validate_rollback_inputs(journal: &TransactionJournal) -> Result<(), RehomeError> {
@@ -784,7 +809,7 @@ fn validate_rollback_inputs(journal: &TransactionJournal) -> Result<(), RehomeEr
                 ));
             }
         }
-        let _ = current_state(operation)?;
+        verify_rollback_phase(operation)?;
     }
     Ok(())
 }
