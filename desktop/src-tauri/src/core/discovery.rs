@@ -54,10 +54,13 @@ pub fn discover_codex_with_context(
     context: &DiscoveryContext,
 ) -> Result<CodexInventory, RehomeError> {
     let codex_home = resolve_codex_home(override_home, context)?;
-    if !codex_home.is_dir() {
+    let codex_home_is_real_directory = fs::symlink_metadata(&codex_home)
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if !codex_home_is_real_directory {
         return Err(RehomeError::new(
             ErrorCode::CodexNotFound,
-            "Codex home does not exist or is not a directory",
+            "Codex home does not exist, is not a directory, or is a symbolic link",
         ));
     }
 
@@ -96,12 +99,7 @@ pub fn discover_codex_with_context(
     );
 
     let session_index = codex_home.join("session_index.jsonl");
-    let session_index_path = if session_index.is_file() {
-        Some(session_index)
-    } else {
-        warnings.push("Optional Codex session index was not found".to_owned());
-        None
-    };
+    let session_index_path = discover_session_index(&session_index, &mut warnings);
     let state_db_path = newest_state_database(&codex_home, &mut warnings);
     if state_db_path.is_none() {
         warnings.push("Optional Codex state database was not found".to_owned());
@@ -152,6 +150,55 @@ pub fn discover_codex_with_context(
 
 fn nonempty_path(path: Option<PathBuf>) -> Option<PathBuf> {
     path.filter(|value| !value.as_os_str().is_empty())
+}
+
+fn discover_session_index(path: &Path, warnings: &mut Vec<String>) -> Option<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            warnings
+                .push("Optional Codex session index is a symbolic link and was ignored".to_owned());
+            None
+        }
+        Ok(metadata) if metadata.is_file() => {
+            validate_session_index(path, warnings);
+            Some(path.to_path_buf())
+        }
+        Ok(_) => {
+            warnings.push("Optional Codex session index is not a regular file".to_owned());
+            None
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            warnings.push("Optional Codex session index was not found".to_owned());
+            None
+        }
+        Err(_) => {
+            warnings.push("Could not inspect optional Codex session index".to_owned());
+            None
+        }
+    }
+}
+
+fn validate_session_index(path: &Path, warnings: &mut Vec<String>) {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => {
+            warnings.push("Could not read optional Codex session index".to_owned());
+            return;
+        }
+    };
+
+    let malformed = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .fold(false, |malformed, line| {
+            let invalid = serde_json::from_str::<Value>(line.trim())
+                .map(|value| !value.is_object())
+                .unwrap_or(true);
+            malformed || invalid
+        });
+    if malformed {
+        warnings.push("Optional Codex session index contains malformed JSONL".to_owned());
+    }
 }
 
 fn current_source_os() -> SourceOs {

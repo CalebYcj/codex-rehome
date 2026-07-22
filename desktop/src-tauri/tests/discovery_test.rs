@@ -277,6 +277,101 @@ fn missing_or_non_directory_codex_home_has_stable_error_code() -> Result<(), Box
     Ok(())
 }
 
+#[test]
+fn symlinked_codex_home_is_rejected() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let real_home = temp.path().join("real-codex-home");
+    let linked_home = temp.path().join("linked-codex-home");
+    fs::create_dir(&real_home)?;
+    if let Err(error) = create_dir_symlink(&real_home, &linked_home) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            eprintln!("skipping linked Codex home test: Windows symlink privilege unavailable");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+
+    let error =
+        discover_codex_with_context(Some(linked_home), &DiscoveryContext::default()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::CodexNotFound);
+    Ok(())
+}
+
+#[test]
+fn symlinked_session_index_is_ignored_with_a_warning() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let linked_index = fixture.session_index_path.clone();
+    let real_index = fixture.root.join("external-session-index.jsonl");
+    fs::remove_file(&linked_index)?;
+    fs::write(&real_index, b"{}\n")?;
+    if let Err(error) = create_file_symlink(&real_index, &linked_index) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            eprintln!("skipping linked session index test: Windows symlink privilege unavailable");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+
+    let inventory =
+        discover_codex_with_context(Some(fixture.codex_home), &DiscoveryContext::default())?;
+
+    assert_eq!(inventory.session_index_path, None);
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("session index") && warning.contains("symbolic link")));
+    Ok(())
+}
+
+#[test]
+fn malformed_session_index_warns_and_keeps_its_path() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    fs::write(&fixture.session_index_path, b"{}\n[]\nnot-json\n")?;
+
+    let inventory =
+        discover_codex_with_context(Some(fixture.codex_home), &DiscoveryContext::default())?;
+
+    assert_eq!(
+        inventory.session_index_path,
+        Some(fixture.session_index_path)
+    );
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("session index") && warning.contains("malformed")));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(unix)]
+fn windows_symlink_privilege_is_unavailable(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn windows_symlink_privilege_is_unavailable(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(1314)
+}
+
 #[cfg(unix)]
 #[test]
 fn source_containment_rejects_symlinks_escaping_the_selected_root() -> Result<(), Box<dyn Error>> {
