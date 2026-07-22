@@ -1,5 +1,5 @@
 use crate::core::{
-    bridge::validate_restore_target,
+    bridge::{validate_restore_target, validate_restore_target_ancestry},
     error::{ErrorCode, RehomeError},
     models::{PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport},
     stable_fs::PinnedParent,
@@ -34,6 +34,8 @@ pub(crate) enum BackupKind {
 pub(crate) enum RollbackProgress {
     #[default]
     Pending,
+    TargetQuarantined,
+    QuarantineVerified,
     TargetRemoved,
     OriginalRestored,
 }
@@ -69,6 +71,8 @@ pub(crate) struct BackupOperation {
     pub unix_mode: Option<u32>,
     #[serde(default)]
     pub rollback_progress: RollbackProgress,
+    #[serde(default)]
+    pub rollback_quarantine: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,6 +445,7 @@ fn backup_target(
                 readonly: Some(metadata.permissions().readonly()),
                 unix_mode: unix_mode(&metadata),
                 rollback_progress: RollbackProgress::Pending,
+                rollback_quarantine: None,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -462,6 +467,7 @@ fn backup_target(
                 readonly: None,
                 unix_mode: None,
                 rollback_progress: RollbackProgress::Pending,
+                rollback_quarantine: None,
             })
         }
         Err(error) => Err(restore_failed(format!(
@@ -553,6 +559,7 @@ fn backup_sqlite_database(
         readonly: Some(metadata.permissions().readonly()),
         unix_mode: unix_mode(&metadata),
         rollback_progress: RollbackProgress::Pending,
+        rollback_quarantine: None,
     })
 }
 
@@ -592,6 +599,7 @@ fn backup_sqlite_sidecar(
         readonly: None,
         unix_mode: None,
         rollback_progress: RollbackProgress::Pending,
+        rollback_quarantine: None,
     })
 }
 
@@ -645,28 +653,199 @@ fn rollback_operation(
     index: usize,
 ) -> Result<(), RehomeError> {
     let operation = journal.operations[index].clone();
-    verify_rollback_phase(&operation)?;
-    match operation.rollback_progress {
-        RollbackProgress::OriginalRestored => return Ok(()),
-        RollbackProgress::Pending if operation.applied_state.is_none() => {
-            journal.operations[index].rollback_progress = RollbackProgress::OriginalRestored;
-            return write_journal(journal_path, journal);
-        }
-        RollbackProgress::Pending => {
-            if matches!(operation.applied_state, Some(AppliedState::File { .. })) {
-                remove_current_target(journal, &operation)?;
-            }
-            journal.operations[index].rollback_progress = RollbackProgress::TargetRemoved;
-            write_journal(journal_path, journal)?;
-        }
-        RollbackProgress::TargetRemoved => {}
+    if operation.rollback_progress == RollbackProgress::OriginalRestored {
+        return verify_original_operation_state(&operation);
+    }
+    if operation.rollback_progress == RollbackProgress::Pending && operation.applied_state.is_none()
+    {
+        verify_original_operation_state(&operation)?;
+        return record_rollback_progress(
+            journal_path,
+            journal,
+            index,
+            RollbackProgress::OriginalRestored,
+        );
     }
 
+    if operation.rollback_progress == RollbackProgress::Pending {
+        match operation.applied_state {
+            Some(AppliedState::Absent) => {
+                verify_target_absent(
+                    &operation,
+                    "rollback conflict: applied target was expected to be absent",
+                )?;
+                record_rollback_progress(
+                    journal_path,
+                    journal,
+                    index,
+                    RollbackProgress::TargetRemoved,
+                )?;
+            }
+            Some(AppliedState::File { .. }) => {
+                let quarantine = ensure_rollback_quarantine(journal_path, journal, index)?;
+                quarantine_target(journal, &journal.operations[index], &quarantine)?;
+                record_rollback_progress(
+                    journal_path,
+                    journal,
+                    index,
+                    RollbackProgress::TargetQuarantined,
+                )?;
+            }
+            None => unreachable!(),
+        }
+    }
+
+    if journal.operations[index].rollback_progress == RollbackProgress::TargetQuarantined {
+        let operation = journal.operations[index].clone();
+        let quarantine = operation_quarantine(journal, &operation, index)?;
+        if quarantine_matches_applied(&operation, &quarantine)? {
+            record_rollback_progress(
+                journal_path,
+                journal,
+                index,
+                RollbackProgress::QuarantineVerified,
+            )?;
+        } else {
+            restore_unrecognized_quarantine(journal_path, journal, index, &quarantine)?;
+            return Err(rollback_failed(format!(
+                "rollback conflict: quarantined target hash, identity, or type changed: {}",
+                operation.target.display()
+            )));
+        }
+    }
+
+    if journal.operations[index].rollback_progress == RollbackProgress::QuarantineVerified {
+        let operation = journal.operations[index].clone();
+        let quarantine = operation_quarantine(journal, &operation, index)?;
+        if quarantine_exists(&operation, &quarantine)? {
+            if !quarantine_matches_applied(&operation, &quarantine)? {
+                record_rollback_progress(
+                    journal_path,
+                    journal,
+                    index,
+                    RollbackProgress::TargetQuarantined,
+                )?;
+                restore_unrecognized_quarantine(journal_path, journal, index, &quarantine)?;
+                return Err(rollback_failed(format!(
+                    "rollback conflict: verified quarantine was replaced: {}",
+                    operation.target.display()
+                )));
+            }
+            remove_quarantine(&operation, &quarantine)?;
+        }
+        record_rollback_progress(
+            journal_path,
+            journal,
+            index,
+            RollbackProgress::TargetRemoved,
+        )?;
+    }
+
+    let operation = journal.operations[index].clone();
+    verify_target_absent(
+        &operation,
+        "rollback conflict: target is present after its recorded removal",
+    )?;
     if operation.backup_kind == BackupKind::File {
         restore_backup_file(journal, &operation)?;
     }
-    journal.operations[index].rollback_progress = RollbackProgress::OriginalRestored;
+    record_rollback_progress(
+        journal_path,
+        journal,
+        index,
+        RollbackProgress::OriginalRestored,
+    )
+}
+
+fn record_rollback_progress(
+    journal_path: &Path,
+    journal: &mut TransactionJournal,
+    index: usize,
+    progress: RollbackProgress,
+) -> Result<(), RehomeError> {
+    journal.operations[index].rollback_progress = progress;
     write_journal(journal_path, journal)
+}
+
+fn ensure_rollback_quarantine(
+    journal_path: &Path,
+    journal: &mut TransactionJournal,
+    index: usize,
+) -> Result<String, RehomeError> {
+    let expected = rollback_quarantine_name(journal.transaction_id, index);
+    match journal.operations[index].rollback_quarantine.as_deref() {
+        Some(recorded) if recorded == expected => Ok(expected),
+        Some(_) => Err(rollback_failed(
+            "transaction journal contains invalid rollback quarantine ownership",
+        )),
+        None => {
+            journal.operations[index].rollback_quarantine = Some(expected.clone());
+            write_journal(journal_path, journal)?;
+            Ok(expected)
+        }
+    }
+}
+
+fn rollback_quarantine_name(transaction_id: Uuid, index: usize) -> String {
+    format!(".codex-rehome-{transaction_id}-{index:08}.rollback")
+}
+
+fn operation_quarantine(
+    journal: &TransactionJournal,
+    operation: &BackupOperation,
+    index: usize,
+) -> Result<String, RehomeError> {
+    let expected = rollback_quarantine_name(journal.transaction_id, index);
+    match operation.rollback_quarantine.as_deref() {
+        Some(recorded) if recorded == expected => Ok(expected),
+        _ => Err(rollback_failed(
+            "transaction journal is missing rollback quarantine ownership",
+        )),
+    }
+}
+
+fn quarantine_target(
+    journal: &TransactionJournal,
+    operation: &BackupOperation,
+    quarantine: &str,
+) -> Result<(), RehomeError> {
+    let root = operation_root_from_journal(journal, &operation.target)?;
+    validate_rollback_target_ancestry(root, &operation.target)?;
+    let parent = operation
+        .target
+        .parent()
+        .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
+    let name = operation
+        .target
+        .file_name()
+        .ok_or_else(|| rollback_failed("rollback target has no file name"))?;
+    let quarantine = std::ffi::OsStr::new(quarantine);
+    let pinned = PinnedParent::open(parent).map_err(|error| {
+        rollback_failed(format!("could not pin rollback target parent: {error}"))
+    })?;
+    match pinned.rename_child_if_absent(name, quarantine) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound
+            ) && pinned.child_exists(quarantine).map_err(|inspect_error| {
+                rollback_failed(format!(
+                    "could not inspect rollback quarantine: {inspect_error}"
+                ))
+            })? =>
+        {
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(rollback_failed(format!(
+            "rollback conflict: expected target and quarantine are missing: {}",
+            operation.target.display()
+        ))),
+        Err(error) => Err(rollback_failed(format!(
+            "could not quarantine rollback target {}: {error}",
+            operation.target.display()
+        ))),
+    }
 }
 
 fn rollback_order(journal: &TransactionJournal) -> Vec<usize> {
@@ -677,43 +856,6 @@ fn rollback_order(journal: &TransactionJournal) -> Vec<usize> {
             .starts_with("codex/metadata/sqlite-sidecar")
     });
     indices
-}
-
-fn verify_rollback_phase(operation: &BackupOperation) -> Result<(), RehomeError> {
-    match operation.rollback_progress {
-        RollbackProgress::Pending => match &operation.applied_state {
-            Some(applied_state) => verify_applied_state(operation, applied_state),
-            None => verify_original_operation_state(operation),
-        },
-        RollbackProgress::TargetRemoved => verify_target_absent(
-            operation,
-            "rollback conflict: target is present after its recorded removal",
-        ),
-        RollbackProgress::OriginalRestored => verify_original_operation_state(operation),
-    }
-}
-
-fn verify_applied_state(
-    operation: &BackupOperation,
-    applied_state: &AppliedState,
-) -> Result<(), RehomeError> {
-    match applied_state {
-        AppliedState::Absent => verify_target_absent(
-            operation,
-            "rollback conflict: applied target was expected to be absent",
-        ),
-        AppliedState::File { hash, identity } => {
-            let (actual_hash, actual_identity) = inspect_current_file(operation)?;
-            if actual_hash.eq_ignore_ascii_case(hash) && actual_identity == *identity {
-                Ok(())
-            } else {
-                Err(rollback_failed(format!(
-                    "rollback conflict: applied target hash or identity changed: {}",
-                    operation.target.display()
-                )))
-            }
-        }
-    }
 }
 
 fn verify_original_operation_state(operation: &BackupOperation) -> Result<(), RehomeError> {
@@ -794,9 +936,9 @@ fn inspect_current_file(operation: &BackupOperation) -> Result<(String, String),
 
 fn validate_rollback_inputs(journal: &TransactionJournal) -> Result<(), RehomeError> {
     validate_journal(journal)?;
-    for operation in &journal.operations {
+    for (index, operation) in journal.operations.iter().enumerate() {
         let root = operation_root_from_journal(journal, &operation.target)?;
-        validate_restore_target(root, &operation.target)?;
+        validate_rollback_target_ancestry(root, &operation.target)?;
         if operation.backup_kind == BackupKind::File {
             let backup = backup_file_path(journal, operation)?;
             let expected = operation
@@ -809,50 +951,136 @@ fn validate_rollback_inputs(journal: &TransactionJournal) -> Result<(), RehomeEr
                 ));
             }
         }
-        verify_rollback_phase(operation)?;
+        if let Some(quarantine) = operation.rollback_quarantine.as_deref() {
+            if quarantine != rollback_quarantine_name(journal.transaction_id, index) {
+                return Err(rollback_failed(
+                    "transaction journal contains invalid rollback quarantine ownership",
+                ));
+            }
+        }
+        if matches!(
+            operation.rollback_progress,
+            RollbackProgress::TargetQuarantined | RollbackProgress::QuarantineVerified
+        ) && operation.rollback_quarantine.is_none()
+        {
+            return Err(rollback_failed(
+                "transaction journal is missing rollback quarantine ownership",
+            ));
+        }
     }
     Ok(())
 }
 
-fn remove_current_target(
-    journal: &TransactionJournal,
+fn quarantine_exists(operation: &BackupOperation, quarantine: &str) -> Result<bool, RehomeError> {
+    let parent = operation
+        .target
+        .parent()
+        .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
+    let pinned = PinnedParent::open(parent).map_err(|error| {
+        rollback_failed(format!("could not pin rollback target parent: {error}"))
+    })?;
+    pinned
+        .child_exists(std::ffi::OsStr::new(quarantine))
+        .map_err(|error| rollback_failed(format!("could not inspect rollback quarantine: {error}")))
+}
+
+fn quarantine_matches_applied(
     operation: &BackupOperation,
+    quarantine: &str,
+) -> Result<bool, RehomeError> {
+    let Some(AppliedState::File { hash, identity }) = operation.applied_state.as_ref() else {
+        return Ok(false);
+    };
+    let parent = operation
+        .target
+        .parent()
+        .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
+    let pinned = PinnedParent::open(parent).map_err(|error| {
+        rollback_failed(format!("could not pin rollback target parent: {error}"))
+    })?;
+    let quarantine_name = std::ffi::OsStr::new(quarantine);
+    let mut file = match pinned.open_file(quarantine_name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return pinned
+                .child_exists(quarantine_name)
+                .map(|_| false)
+                .map_err(|inspect_error| {
+                    rollback_failed(format!(
+                        "could not inspect rollback quarantine after open failed ({error}): {inspect_error}"
+                    ))
+                })
+        }
+    };
+    let metadata = file.metadata().map_err(|error| {
+        rollback_failed(format!("could not inspect rollback quarantine: {error}"))
+    })?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Ok(false);
+    }
+    let actual_identity =
+        file_identity_from_file(&file).map_err(|error| rollback_failed(error.message))?;
+    if actual_identity != *identity {
+        return Ok(false);
+    }
+    let actual_hash = if operation.package_source == "codex/metadata/threads.json" {
+        let path = parent.join(quarantine);
+        let hash = hash_sqlite_database(&path).map_err(|error| rollback_failed(error.message))?;
+        let reopened = pinned.open_file(quarantine_name).map_err(|error| {
+            rollback_failed(format!("could not reopen rollback quarantine: {error}"))
+        })?;
+        if file_identity_from_file(&reopened).map_err(|error| rollback_failed(error.message))?
+            != actual_identity
+        {
+            return Ok(false);
+        }
+        hash
+    } else {
+        hash_open_file(&mut file).map_err(|error| rollback_failed(error.message))?
+    };
+    Ok(actual_hash.eq_ignore_ascii_case(hash))
+}
+
+fn restore_unrecognized_quarantine(
+    journal_path: &Path,
+    journal: &mut TransactionJournal,
+    index: usize,
+    quarantine: &str,
 ) -> Result<(), RehomeError> {
-    let root = operation_root_from_journal(journal, &operation.target)?;
-    validate_restore_target(root, &operation.target)?;
-    match fs::symlink_metadata(&operation.target) {
-        Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
-            Err(rollback_failed(format!(
-                "rollback target is not a regular file: {}",
-                operation.target.display()
-            )))
-        }
-        Ok(_) => {
-            let parent = operation
-                .target
-                .parent()
-                .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
-            let name = operation
-                .target
-                .file_name()
-                .ok_or_else(|| rollback_failed("rollback target has no file name"))?;
-            let pinned = PinnedParent::open(parent).map_err(|error| {
-                rollback_failed(format!("could not pin rollback target parent: {error}"))
-            })?;
-            validate_restore_target(root, &operation.target)?;
-            pinned.remove_file(name).map_err(|error| {
-                rollback_failed(format!(
-                    "could not clear rollback target {}: {error}",
-                    operation.target.display()
-                ))
-            })
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+    record_rollback_progress(journal_path, journal, index, RollbackProgress::Pending)?;
+    let operation = &journal.operations[index];
+    let parent = operation
+        .target
+        .parent()
+        .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
+    let target_name = operation
+        .target
+        .file_name()
+        .ok_or_else(|| rollback_failed("rollback target has no file name"))?;
+    let pinned = PinnedParent::open(parent).map_err(|error| {
+        rollback_failed(format!("could not pin rollback target parent: {error}"))
+    })?;
+    match pinned.rename_child_if_absent(std::ffi::OsStr::new(quarantine), target_name) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(rollback_failed(format!(
-            "could not inspect rollback target {}: {error}",
-            operation.target.display()
+            "could not restore unrecognized rollback quarantine: {error}"
         ))),
     }
+}
+
+fn remove_quarantine(operation: &BackupOperation, quarantine: &str) -> Result<(), RehomeError> {
+    let parent = operation
+        .target
+        .parent()
+        .ok_or_else(|| rollback_failed("rollback target has no parent"))?;
+    let pinned = PinnedParent::open(parent).map_err(|error| {
+        rollback_failed(format!("could not pin rollback target parent: {error}"))
+    })?;
+    pinned
+        .remove_file(std::ffi::OsStr::new(quarantine))
+        .map_err(|error| rollback_failed(format!("could not consume rollback quarantine: {error}")))
 }
 
 fn restore_backup_file(
@@ -860,7 +1088,7 @@ fn restore_backup_file(
     operation: &BackupOperation,
 ) -> Result<(), RehomeError> {
     let root = operation_root_from_journal(journal, &operation.target)?;
-    validate_restore_target(root, &operation.target)?;
+    validate_rollback_target_ancestry(root, &operation.target)?;
     let parent = operation
         .target
         .parent()
@@ -868,45 +1096,30 @@ fn restore_backup_file(
     fs::create_dir_all(parent).map_err(|error| {
         rollback_failed(format!("could not create rollback directory: {error}"))
     })?;
-    validate_restore_target(root, &operation.target)?;
+    validate_rollback_target_ancestry(root, &operation.target)?;
     let pinned = PinnedParent::open(parent).map_err(|error| {
         rollback_failed(format!("could not pin rollback target parent: {error}"))
     })?;
-    if operation.package_source == "codex/metadata/threads.json" {
-        for suffix in SQLITE_SIDECARS {
-            let sidecar = sqlite_sidecar(&operation.target, suffix);
-            match fs::symlink_metadata(&sidecar) {
-                Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
-                    return Err(rollback_failed("SQLite sidecar is unsafe during rollback"));
-                }
-                Ok(_) => {
-                    let name = sidecar
-                        .file_name()
-                        .ok_or_else(|| rollback_failed("SQLite sidecar has no file name"))?;
-                    pinned.remove_file(name).map_err(|error| {
-                        rollback_failed(format!("could not clear SQLite sidecar: {error}"))
-                    })?;
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(rollback_failed(format!(
-                        "could not inspect SQLite sidecar: {error}"
-                    )))
-                }
-            }
-        }
-    }
-    validate_restore_target(root, &operation.target)?;
+    validate_rollback_target_ancestry(root, &operation.target)?;
     let backup = backup_file_path(journal, operation)?;
     let name = operation
         .target
         .file_name()
         .ok_or_else(|| rollback_failed("rollback target has no file name"))?;
-    pinned.replace_file(&backup, name).map_err(|error| {
-        rollback_failed(format!("could not restore backup atomically: {error}"))
-    })?;
+    pinned
+        .install_file_if_absent(&backup, name)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                rollback_failed(format!(
+                    "rollback conflict: target appeared before original restoration: {}",
+                    operation.target.display()
+                ))
+            } else {
+                rollback_failed(format!("could not restore backup atomically: {error}"))
+            }
+        })?;
     let restored = pinned
-        .open_file(name)
+        .open_file_for_write(name)
         .map_err(|error| rollback_failed(format!("could not open restored backup: {error}")))?;
     let mut permissions = restored
         .metadata()
@@ -916,51 +1129,24 @@ fn restore_backup_file(
         permissions.set_readonly(readonly);
     }
     set_unix_mode(&mut permissions, operation.unix_mode);
-    pinned
-        .set_permissions(name, permissions)
+    restored
+        .set_permissions(permissions)
         .map_err(|error| rollback_failed(format!("could not restore file permissions: {error}")))?;
+    restored
+        .sync_all()
+        .map_err(|error| rollback_failed(format!("could not flush restored backup: {error}")))?;
     pinned
         .sync()
         .map_err(|error| rollback_failed(format!("could not flush restored backup: {error}")))
 }
 
+fn validate_rollback_target_ancestry(root: &Path, target: &Path) -> Result<(), RehomeError> {
+    validate_restore_target_ancestry(root, target).map_err(|error| rollback_failed(error.message))
+}
+
 fn verify_original_state(journal: &TransactionJournal) -> Result<(), RehomeError> {
     for operation in &journal.operations {
-        match operation.backup_kind {
-            BackupKind::File => {
-                let expected = operation
-                    .original_hash
-                    .as_deref()
-                    .ok_or_else(|| rollback_failed("file backup has no original hash"))?;
-                let actual = if operation.package_source == "codex/metadata/threads.json" {
-                    hash_sqlite_database(&operation.target)?
-                } else {
-                    hash_file(&operation.target)?
-                };
-                if !actual.eq_ignore_ascii_case(expected) {
-                    return Err(rollback_failed(
-                        "rollback did not restore the original hash",
-                    ));
-                }
-            }
-            BackupKind::Absent
-                if !operation
-                    .package_source
-                    .starts_with("codex/metadata/sqlite-sidecar")
-                    && operation.target.exists() =>
-            {
-                return Err(rollback_failed("rollback did not restore an absent target"));
-            }
-            BackupKind::Absent => {}
-        }
-    }
-    for operation in &journal.operations {
-        if operation
-            .package_source
-            .starts_with("codex/metadata/sqlite-sidecar")
-        {
-            remove_current_target(journal, operation)?;
-        }
+        verify_original_operation_state(operation)?;
     }
     Ok(())
 }
@@ -1297,6 +1483,10 @@ fn sync_directory(_path: &Path) -> io::Result<()> {
 fn hash_file(path: &Path) -> Result<String, RehomeError> {
     let mut file = fs::File::open(path)
         .map_err(|error| restore_failed(format!("could not open file for hashing: {error}")))?;
+    hash_open_file(&mut file)
+}
+
+fn hash_open_file(file: &mut fs::File) -> Result<String, RehomeError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -1406,13 +1596,18 @@ fn raw_file_link_count(path: &Path) -> io::Result<u64> {
 
 #[cfg(windows)]
 fn file_identity(path: &Path) -> Result<String, RehomeError> {
+    let file = fs::File::open(path)
+        .map_err(|error| restore_failed(format!("could not open file identity: {error}")))?;
+    file_identity_from_file(&file)
+}
+
+#[cfg(windows)]
+fn file_identity_from_file(file: &fs::File) -> Result<String, RehomeError> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
 
-    let file = fs::File::open(path)
-        .map_err(|error| restore_failed(format!("could not open file identity: {error}")))?;
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
     let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
     if result == 0 {
@@ -1429,8 +1624,16 @@ fn file_identity(path: &Path) -> Result<String, RehomeError> {
 
 #[cfg(unix)]
 fn file_identity(path: &Path) -> Result<String, RehomeError> {
+    let file = fs::File::open(path)
+        .map_err(|error| restore_failed(format!("could not open file identity: {error}")))?;
+    file_identity_from_file(&file)
+}
+
+#[cfg(unix)]
+fn file_identity_from_file(file: &fs::File) -> Result<String, RehomeError> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = fs::metadata(path)
+    let metadata = file
+        .metadata()
         .map_err(|error| restore_failed(format!("could not inspect file identity: {error}")))?;
     Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
 }

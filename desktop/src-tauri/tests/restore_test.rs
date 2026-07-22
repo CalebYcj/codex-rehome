@@ -404,8 +404,193 @@ fn rollback_rejects_same_content_replacement_with_a_new_identity() -> Result<(),
     let error = rollback(report.transaction_id).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::RollbackFailed);
-    assert!(error.message.contains("identity") || error.message.contains("conflict"));
+    assert!(
+        error.message.contains("identity") || error.message.contains("conflict"),
+        "{error:?}"
+    );
     assert_eq!(fs::read(&target)?, applied);
+    Ok(())
+}
+
+#[test]
+fn rollback_preserves_replacement_created_after_target_was_quarantined(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let (index, operation) = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+        .find(|(_, operation)| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+    let quarantine = target.parent().unwrap().join(&quarantine_name);
+    fs::rename(&target, &quarantine)?;
+    let replacement = b"replacement created while rollback was verifying quarantine\n";
+    fs::write(&target, replacement)?;
+    operation["rollback_quarantine"] = Value::String(quarantine_name);
+    operation["rollback_progress"] = Value::String("target_quarantined".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(
+        error.message.contains("conflict") || error.message.contains("present"),
+        "{error:?}"
+    );
+    assert_eq!(fs::read(&target)?, replacement);
+    assert!(!quarantine.exists());
+    Ok(())
+}
+
+#[test]
+fn rollback_restores_an_unrecognized_directory_from_quarantine() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let (index, operation) = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+        .find(|(_, operation)| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+    let quarantine = target.parent().unwrap().join(&quarantine_name);
+    fs::remove_file(&target)?;
+    fs::create_dir(&target)?;
+    fs::write(target.join("unknown"), b"do not delete")?;
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed);
+    assert!(
+        error.message.contains("conflict") || error.message.contains("regular file"),
+        "{error:?}"
+    );
+    assert_eq!(fs::read(target.join("unknown"))?, b"do not delete");
+    assert!(!quarantine.exists());
+    Ok(())
+}
+
+#[test]
+fn rollback_resumes_after_quarantine_before_phase_persisted() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let (index, operation) = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+        .find(|(_, operation)| {
+            operation["backup_kind"] == "file"
+                && operation["package_source"] != "codex/metadata/threads.json"
+        })
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+    fs::rename(&target, target.parent().unwrap().join(&quarantine_name))?;
+    operation["rollback_quarantine"] = Value::String(quarantine_name);
+    operation["rollback_progress"] = Value::String("pending".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn rollback_resumes_after_quarantine_was_recorded() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let (index, operation) = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+        .find(|(_, operation)| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+    fs::rename(&target, target.parent().unwrap().join(&quarantine_name))?;
+    operation["rollback_quarantine"] = Value::String(quarantine_name);
+    operation["rollback_progress"] = Value::String("target_quarantined".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn rollback_resumes_after_quarantine_verification_was_recorded() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let (index, operation) = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+        .find(|(_, operation)| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+    fs::rename(&target, target.parent().unwrap().join(&quarantine_name))?;
+    operation["rollback_quarantine"] = Value::String(quarantine_name);
+    operation["rollback_progress"] = Value::String("quarantine_verified".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn rollback_resumes_after_verified_quarantine_was_consumed() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let (index, operation) = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+        .find(|(_, operation)| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+    fs::remove_file(&target)?;
+    operation["rollback_quarantine"] = Value::String(quarantine_name);
+    operation["rollback_progress"] = Value::String("quarantine_verified".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
     Ok(())
 }
 
@@ -424,7 +609,10 @@ fn incomplete_rollback_refuses_to_overwrite_a_newer_edit() -> Result<(), Box<dyn
     let error = rollback(report.transaction_id).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::RollbackFailed);
-    assert!(error.message.contains("changed") || error.message.contains("conflict"));
+    assert!(
+        error.message.contains("changed") || error.message.contains("conflict"),
+        "{error:?}"
+    );
     assert_eq!(fs::read(&target)?, newer);
     assert_eq!(
         harness.single_journal_status()?,
@@ -454,7 +642,10 @@ fn rollback_rejects_remove_before_progress_was_persisted() -> Result<(), Box<dyn
     let error = rollback(report.transaction_id).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::RollbackFailed);
-    assert!(error.message.contains("conflict") || error.message.contains("missing"));
+    assert!(
+        error.message.contains("conflict") || error.message.contains("missing"),
+        "{error:?}"
+    );
     assert!(!target.exists());
     Ok(())
 }
@@ -974,6 +1165,10 @@ fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
     let mut path = database.as_os_str().to_owned();
     path.push(suffix);
     PathBuf::from(path)
+}
+
+fn rollback_quarantine_name(transaction_id: Uuid, operation_index: usize) -> String {
+    format!(".codex-rehome-{transaction_id}-{operation_index:08}.rollback")
 }
 
 fn current_source_os() -> SourceOs {

@@ -303,8 +303,15 @@ fn apply_file_operation_with_lock_token(
 }
 
 pub(crate) fn validate_restore_target(root: &Path, target: &Path) -> Result<(), RehomeError> {
-    ensure_safe_codex_target(root, target)?;
+    validate_restore_target_ancestry(root, target)?;
     reject_hard_linked_target(target)
+}
+
+pub(crate) fn validate_restore_target_ancestry(
+    root: &Path,
+    target: &Path,
+) -> Result<(), RehomeError> {
+    ensure_safe_codex_target(root, target)
 }
 
 fn reject_hard_linked_target(path: &Path) -> Result<(), RehomeError> {

@@ -49,6 +49,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pinned_rename_never_replaces_a_concurrent_file() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        fs::write(parent.join("target"), b"applied").unwrap();
+        let pinned = PinnedParent::open(&parent).unwrap();
+
+        pinned
+            .rename_child_if_absent(OsStr::new("target"), OsStr::new("quarantine"))
+            .unwrap();
+        fs::write(parent.join("target"), b"concurrent replacement").unwrap();
+        let error = pinned
+            .rename_child_if_absent(OsStr::new("quarantine"), OsStr::new("target"))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(parent.join("target")).unwrap(),
+            b"concurrent replacement"
+        );
+        assert_eq!(fs::read(parent.join("quarantine")).unwrap(), b"applied");
+    }
+
+    #[test]
+    fn pinned_rename_handles_directories_without_replacing_a_concurrent_child() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(parent.join("target")).unwrap();
+        fs::write(parent.join("target").join("unknown"), b"keep me").unwrap();
+        let pinned = PinnedParent::open(&parent).unwrap();
+
+        pinned
+            .rename_child_if_absent(OsStr::new("target"), OsStr::new("quarantine"))
+            .unwrap();
+        fs::write(parent.join("target"), b"concurrent replacement").unwrap();
+        let error = pinned
+            .rename_child_if_absent(OsStr::new("quarantine"), OsStr::new("target"))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(parent.join("target")).unwrap(),
+            b"concurrent replacement"
+        );
+        assert_eq!(
+            fs::read(parent.join("quarantine").join("unknown")).unwrap(),
+            b"keep me"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_pin_blocks_parent_rename_and_swap_during_path_mutations() {
@@ -140,6 +192,45 @@ impl PinnedParent {
         })
     }
 
+    pub(crate) fn install_file_if_absent(&self, source: &Path, name: &OsStr) -> io::Result<()> {
+        validate_name(name)?;
+        let temporary_name = format!(".codex-rehome-{}.tmp", Uuid::new_v4());
+        let temporary_name = OsStr::new(&temporary_name);
+        let mut source = fs::File::open(source)?;
+        let mut temporary = create_file_at(self, temporary_name)
+            .map_err(|error| io_stage("create pinned temporary file", error))?;
+        let write_result = (|| {
+            io::copy(&mut source, &mut temporary)
+                .map(|_| ())
+                .map_err(|error| io_stage("write pinned temporary file", error))?;
+            temporary
+                .sync_all()
+                .map_err(|error| io_stage("flush pinned temporary file", error))
+        })();
+        drop(temporary);
+        let result = write_result.and_then(|()| {
+            self.rename_child_if_absent(temporary_name, name)
+                .map_err(|error| io_stage("install pinned target", error))
+        });
+        if result.is_err() {
+            let _ = remove_at(self, temporary_name);
+        }
+        result
+    }
+
+    pub(crate) fn rename_child_if_absent(
+        &self,
+        source: &OsStr,
+        destination: &OsStr,
+    ) -> io::Result<()> {
+        validate_name(source)?;
+        validate_name(destination)?;
+        self.verify_location()?;
+        rename_noreplace_at(self, source, destination)?;
+        self.verify_location()?;
+        sync_directory_handle(&self.directory)
+    }
+
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         validate_name(name)?;
         self.verify_location()?;
@@ -152,6 +243,12 @@ impl PinnedParent {
         validate_name(name)?;
         self.verify_location()?;
         open_file_at(self, name)
+    }
+
+    pub(crate) fn child_exists(&self, name: &OsStr) -> io::Result<bool> {
+        validate_name(name)?;
+        self.verify_location()?;
+        child_exists_at(self, name)
     }
 
     pub(crate) fn create_new_file(&self, name: &OsStr) -> io::Result<fs::File> {
@@ -170,17 +267,6 @@ impl PinnedParent {
 
     pub(crate) fn sync(&self) -> io::Result<()> {
         sync_directory_handle(&self.directory)
-    }
-
-    pub(crate) fn set_permissions(
-        &self,
-        name: &OsStr,
-        permissions: fs::Permissions,
-    ) -> io::Result<()> {
-        validate_name(name)?;
-        self.verify_location()?;
-        set_permissions_at(self, name, permissions)?;
-        self.verify_location()
     }
 
     fn replace_with(
@@ -343,16 +429,86 @@ fn create_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
 
 #[cfg(windows)]
 fn open_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
+    };
+
     parent.verify_location()?;
-    fs::File::open(parent.path.join(name))
+    let path = parent
+        .path
+        .join(name)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { fs::File::from_raw_handle(handle) })
+    }
+}
+
+#[cfg(windows)]
+fn child_exists_at(parent: &PinnedParent, name: &OsStr) -> io::Result<bool> {
+    parent.verify_location()?;
+    match fs::symlink_metadata(parent.path.join(name)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(windows)]
 fn open_file_for_write_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
+        },
+    };
+
     parent.verify_location()?;
-    fs::OpenOptions::new()
-        .write(true)
-        .open(parent.path.join(name))
+    let path = parent
+        .path
+        .join(name)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { fs::File::from_raw_handle(handle) })
+    }
 }
 
 #[cfg(windows)]
@@ -392,19 +548,47 @@ fn replace_at(parent: &PinnedParent, source: &OsStr, destination: &OsStr) -> io:
 }
 
 #[cfg(windows)]
-fn remove_at(parent: &PinnedParent, name: &OsStr) -> io::Result<()> {
+fn rename_noreplace_at(
+    parent: &PinnedParent,
+    source: &OsStr,
+    destination: &OsStr,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
     parent.verify_location()?;
-    fs::remove_file(parent.path.join(name))
+    let source = parent
+        .path
+        .join(source)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = parent
+        .path
+        .join(destination)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
-fn set_permissions_at(
-    parent: &PinnedParent,
-    name: &OsStr,
-    permissions: fs::Permissions,
-) -> io::Result<()> {
+fn remove_at(parent: &PinnedParent, name: &OsStr) -> io::Result<()> {
     parent.verify_location()?;
-    fs::set_permissions(parent.path.join(name), permissions)
+    fs::remove_file(parent.path.join(name))
 }
 
 #[cfg(windows)]
@@ -452,6 +636,31 @@ fn create_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
 #[cfg(unix)]
 fn open_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
     openat(parent, name, libc::O_RDONLY, 0)
+}
+
+#[cfg(unix)]
+fn child_exists_at(parent: &PinnedParent, name: &OsStr) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let name = unix_name(name)?;
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            parent.directory.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(true)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -503,6 +712,76 @@ fn replace_at(parent: &PinnedParent, source: &OsStr, destination: &OsStr) -> io:
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_noreplace_at(
+    parent: &PinnedParent,
+    source: &OsStr,
+    destination: &OsStr,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let source = unix_name(source)?;
+    let destination = unix_name(destination)?;
+    let result = unsafe {
+        libc::renameat2(
+            parent.directory.as_raw_fd(),
+            source.as_ptr(),
+            parent.directory.as_raw_fd(),
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn rename_noreplace_at(
+    parent: &PinnedParent,
+    source: &OsStr,
+    destination: &OsStr,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let source = unix_name(source)?;
+    let destination = unix_name(destination)?;
+    let result = unsafe {
+        libc::renameatx_np(
+            parent.directory.as_raw_fd(),
+            source.as_ptr(),
+            parent.directory.as_raw_fd(),
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))
+))]
+fn rename_noreplace_at(
+    _parent: &PinnedParent,
+    _source: &OsStr,
+    _destination: &OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename is not supported on this platform",
+    ))
+}
+
 #[cfg(unix)]
 fn remove_at(parent: &PinnedParent, name: &OsStr) -> io::Result<()> {
     use std::os::fd::AsRawFd;
@@ -513,15 +792,6 @@ fn remove_at(parent: &PinnedParent, name: &OsStr) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
-}
-
-#[cfg(unix)]
-fn set_permissions_at(
-    parent: &PinnedParent,
-    name: &OsStr,
-    permissions: fs::Permissions,
-) -> io::Result<()> {
-    open_file_at(parent, name)?.set_permissions(permissions)
 }
 
 #[cfg(unix)]
