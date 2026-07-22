@@ -171,6 +171,21 @@ pub fn rewrite_session_jsonl(
 }
 
 pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, RehomeError> {
+    apply_bridge_plan_with_lock_token(plan, None)
+}
+
+pub(crate) fn apply_bridge_plan_for_transaction(
+    plan: &RestorePlan,
+    transaction_id: Uuid,
+) -> Result<BridgeApplyReport, RehomeError> {
+    let token = transaction_id.to_string();
+    apply_bridge_plan_with_lock_token(plan, Some(&token))
+}
+
+fn apply_bridge_plan_with_lock_token(
+    plan: &RestorePlan,
+    lock_token: Option<&str>,
+) -> Result<BridgeApplyReport, RehomeError> {
     let verified = inspect_package_for_planning(&plan.package_path)?;
     if verified.preview.archive_hash != plan.archive_hash {
         return Err(package_invalid(
@@ -206,7 +221,8 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
                 session.target.display()
             )));
         }
-        let guard = TargetReplacementGuard::acquire(&plan.target_codex_home, operation)?;
+        let guard =
+            TargetReplacementGuard::acquire(&plan.target_codex_home, operation, lock_token)?;
         guard.commit_bytes(operation, &rewritten)?;
         sessions_written += 1;
     }
@@ -214,7 +230,8 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
     let mut index_entries_merged = 0;
     if let Some(operation) = operation_for(plan, "codex/session_index.jsonl") {
         ensure_writable_change(operation)?;
-        let guard = TargetReplacementGuard::acquire(&plan.target_codex_home, operation)?;
+        let guard =
+            TargetReplacementGuard::acquire(&plan.target_codex_home, operation, lock_token)?;
         let package_bytes = verified.authenticated_planning_payload("codex/session_index.jsonl")?;
         let target_bytes = match fs::read(&operation.target) {
             Ok(bytes) => bytes,
@@ -247,6 +264,7 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
             package_bytes,
             &plan.sessions,
             &plan.reference_rewrites,
+            lock_token,
         )?;
     }
 
@@ -257,18 +275,59 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
     })
 }
 
-pub(crate) fn apply_file_operation(
+pub(crate) fn apply_file_operation_for_transaction(
     root: &Path,
     operation: &PlannedOperation,
     bytes: &[u8],
+    transaction_id: Uuid,
+) -> Result<(), RehomeError> {
+    let token = transaction_id.to_string();
+    apply_file_operation_with_lock_token(root, operation, bytes, Some(&token))
+}
+
+fn apply_file_operation_with_lock_token(
+    root: &Path,
+    operation: &PlannedOperation,
+    bytes: &[u8],
+    lock_token: Option<&str>,
 ) -> Result<(), RehomeError> {
     ensure_writable_change(operation)?;
-    let guard = TargetReplacementGuard::acquire(root, operation)?;
+    let guard = TargetReplacementGuard::acquire(root, operation, lock_token)?;
     guard.commit_bytes(operation, bytes)
 }
 
 pub(crate) fn validate_restore_target(root: &Path, target: &Path) -> Result<(), RehomeError> {
-    ensure_safe_codex_target(root, target)
+    ensure_safe_codex_target(root, target)?;
+    reject_hard_linked_target(target)
+}
+
+fn reject_hard_linked_target(path: &Path) -> Result<(), RehomeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
+            Err(restore_failed(format!(
+                "restore target is not a regular file: {}",
+                path.display()
+            )))
+        }
+        Ok(_) => {
+            let links = file_link_count(path).map_err(|error| {
+                restore_failed(format!("could not inspect restore target links: {error}"))
+            })?;
+            if links > 1 {
+                Err(restore_failed(format!(
+                    "restore target has more than one hard link: {}",
+                    path.display()
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(restore_failed(format!(
+            "could not inspect restore target {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 pub fn merge_session_index(
@@ -426,7 +485,7 @@ pub fn import_sqlite_threads(
         action: ChangeKind::Update,
         rollback_required: true,
     };
-    import_sqlite_threads_for_operation(parent, &operation, package_bytes, sessions, rewrites)
+    import_sqlite_threads_for_operation(parent, &operation, package_bytes, sessions, rewrites, None)
 }
 
 fn import_sqlite_threads_for_operation(
@@ -435,12 +494,13 @@ fn import_sqlite_threads_for_operation(
     package_bytes: &[u8],
     sessions: &[PlannedSession],
     rewrites: &[ReferenceRewrite],
+    lock_token: Option<&str>,
 ) -> Result<usize, RehomeError> {
     ensure_safe_codex_target(root, &operation.target)?;
     reject_hard_linked_sqlite(&operation.target)?;
     let identity = sqlite_file_identity(&operation.target)?;
     let rows = package_thread_rows(package_bytes, sessions, rewrites)?;
-    let _guard = TargetReplacementGuard::acquire(root, operation)?;
+    let _guard = TargetReplacementGuard::acquire(root, operation, lock_token)?;
     reject_hard_linked_sqlite(&operation.target)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let mut connection =
@@ -973,8 +1033,13 @@ struct TargetReplacementGuard<'a> {
 }
 
 impl<'a> TargetReplacementGuard<'a> {
-    fn acquire(root: &'a Path, operation: &'a PlannedOperation) -> Result<Self, RehomeError> {
+    fn acquire(
+        root: &'a Path,
+        operation: &'a PlannedOperation,
+        transaction_token: Option<&str>,
+    ) -> Result<Self, RehomeError> {
         ensure_safe_codex_target(root, &operation.target)?;
+        reject_hard_linked_target(&operation.target)?;
         let parent = operation
             .target
             .parent()
@@ -985,18 +1050,39 @@ impl<'a> TargetReplacementGuard<'a> {
                 parent.display()
             ))
         })?;
+        sync_directory(parent).map_err(|error| {
+            restore_failed(format!("could not sync bridge target directory: {error}"))
+        })?;
         ensure_safe_codex_target(root, &operation.target)?;
+        reject_hard_linked_target(&operation.target)?;
         let file_name = operation
             .target
             .file_name()
             .ok_or_else(|| restore_failed("bridge target has no file name"))?
             .to_string_lossy();
         let lock_path = parent.join(format!(".{file_name}.codex-rehome.lock"));
-        let lock_token = Uuid::new_v4().to_string();
-        let mut lock_file = fs::OpenOptions::new()
+        let lock_token = transaction_token
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let lock_file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock_path)
+            .or_else(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    let metadata = fs::symlink_metadata(&lock_path)?;
+                    if metadata_is_link_or_reparse(&metadata)
+                        || !metadata.is_file()
+                        || file_link_count(&lock_path)? != 1
+                        || fs::read_to_string(&lock_path)? != lock_token
+                    {
+                        return Err(error);
+                    }
+                    fs::OpenOptions::new().write(true).open(&lock_path)
+                } else {
+                    Err(error)
+                }
+            })
             .map_err(|error| {
                 if error.kind() == io::ErrorKind::AlreadyExists {
                     restore_failed(format!(
@@ -1010,12 +1096,15 @@ impl<'a> TargetReplacementGuard<'a> {
                     ))
                 }
             })?;
+        let mut lock_file = lock_file;
         lock_file
             .write_all(lock_token.as_bytes())
             .and_then(|()| lock_file.sync_all())
             .map_err(|error| {
                 restore_failed(format!("could not initialize target lock: {error}"))
             })?;
+        sync_directory(parent)
+            .map_err(|error| restore_failed(format!("could not sync target lock: {error}")))?;
         let guard = Self {
             root,
             target: &operation.target,
@@ -1052,13 +1141,20 @@ impl<'a> TargetReplacementGuard<'a> {
     ) -> Result<(), RehomeError> {
         validate_operation_state(operation)?;
         ensure_safe_codex_target(self.root, self.target)?;
+        reject_hard_linked_target(self.target)?;
         replace_file(temporary.path(), self.target).map_err(|error| {
             restore_failed(format!(
                 "could not atomically replace bridge target {}: {error}",
                 self.target.display()
             ))
         })?;
-        Ok(())
+        let parent = self
+            .target
+            .parent()
+            .ok_or_else(|| restore_failed("bridge target has no parent directory"))?;
+        sync_directory(parent).map_err(|error| {
+            restore_failed(format!("could not sync bridge target directory: {error}"))
+        })
     }
 }
 
@@ -1070,6 +1166,9 @@ impl Drop for TargetReplacementGuard<'_> {
         drop(self.lock_file.take());
         if owns_lock {
             let _ = fs::remove_file(&self.lock_path);
+            if let Some(parent) = self.lock_path.parent() {
+                let _ = sync_directory(parent);
+            }
         }
     }
 }
@@ -1108,6 +1207,16 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(not(windows))]
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn hash_file(path: &Path) -> Result<String, RehomeError> {

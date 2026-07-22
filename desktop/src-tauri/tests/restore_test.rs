@@ -5,12 +5,15 @@ use common::{synthetic_codex_fixture, SyntheticCodexFixture, THREAD_ID};
 use rehome_desktop_lib::core::{
     error::ErrorCode,
     models::{
-        ContentCounts, CreatePackageRequest, RecoveryStatus, RestoreOptions, RestorePlan, SourceOs,
-        TargetInventory,
+        ChangeKind, ContentCounts, CreatePackageRequest, RecoveryStatus, RegistrationStatus,
+        RestoreOptions, RestorePlan, SourceOs, TargetInventory,
     },
     package::{create_package, inspect_package},
     planner::build_restore_plan,
-    restore::{apply_restore, recover_incomplete_transactions, rollback},
+    restore::{
+        apply_restore, apply_restore_by_id, apply_restore_with_registrar,
+        recover_incomplete_transactions, rollback,
+    },
 };
 use rusqlite::Connection;
 use serde_json::Value;
@@ -21,11 +24,13 @@ use std::{
     error::Error,
     ffi::OsString,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
 use tempfile::TempDir;
 use uuid::Uuid;
+use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -162,6 +167,326 @@ fn restore_requires_explicit_confirmation_that_codex_is_closed() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn apply_rejects_caller_forged_roots_before_any_write() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let outside = tempfile::tempdir()?;
+    let forged_target = outside.path().join("README.md");
+    let mut forged = harness.plan.clone();
+    let operation = forged
+        .operations
+        .iter_mut()
+        .find(|operation| operation.package_source.ends_with("/README.md"))
+        .unwrap();
+    operation.target = forged_target.clone();
+    forged.projects_root = outside.path().to_path_buf();
+
+    let error = apply_restore(forged, harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("plan") && error.message.contains("server"));
+    assert!(!forged_target.exists());
+    assert!(!harness.transactions_dir().exists());
+    Ok(())
+}
+
+#[test]
+fn opaque_plan_id_applies_the_server_held_plan() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+
+    let report = apply_restore_by_id(harness.plan.plan_id, harness.options())?;
+
+    assert_eq!(report.package_id, harness.plan.package_id);
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::Committed);
+    Ok(())
+}
+
+#[test]
+fn forbidden_package_is_rejected_before_journal_or_backup_creation() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package_path, _| {
+        let preview = inspect_package(package_path)?;
+        let name = format!("{}/.env", preview.manifest.projects[0].archive_path);
+        add_forbidden_payload(package_path, &name, b"SECRET=1\n")
+    })?;
+    assert!(inspect_package(&harness.plan.package_path)?.forbidden_files_total > 0);
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::PackageInvalid);
+    assert!(error.message.contains("forbidden"));
+    assert!(!harness.transactions_dir().exists());
+    assert!(!harness.backup_root.exists());
+    Ok(())
+}
+
+#[test]
+fn changed_noop_target_prevents_commit() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |_, target_root| {
+        let target = target_root
+            .join("projects")
+            .join("visual")
+            .join("README.md");
+        fs::create_dir_all(target.parent().unwrap())?;
+        fs::write(target, b"# Visual project\n")?;
+        Ok(())
+    })?;
+    let operation = harness
+        .plan
+        .operations
+        .iter()
+        .find(|operation| operation.package_source.ends_with("/README.md"))
+        .unwrap();
+    assert_eq!(operation.action, ChangeKind::Unchanged);
+    fs::write(&operation.target, b"changed after planning\n")?;
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("changed") || error.message.contains("verification"));
+    assert_ne!(harness.single_journal_status()?, RecoveryStatus::Committed);
+    Ok(())
+}
+
+#[test]
+fn recovery_reports_corrupt_uuid_named_journal() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    fs::create_dir_all(harness.transactions_dir())?;
+    fs::write(
+        harness
+            .transactions_dir()
+            .join(format!("{}.json", Uuid::new_v4())),
+        b"{not-json",
+    )?;
+
+    let first = recover_incomplete_transactions().unwrap_err();
+    let second = recover_incomplete_transactions().unwrap_err();
+
+    assert_eq!(first.code, ErrorCode::RollbackFailed);
+    assert_eq!(first.message, second.message);
+    assert!(first.message.contains("journal") && first.message.contains("invalid"));
+    Ok(())
+}
+
+#[test]
+fn rollback_retries_after_remove_before_progress_persisted() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let operation = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["backup_kind"] == "absent")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    fs::remove_file(target)?;
+    operation["rollback_progress"] = Value::String("pending".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn rollback_retries_after_restore_before_progress_persisted() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("rolling_back".into());
+    let backup_root = PathBuf::from(journal["backup_root"].as_str().unwrap());
+    let operation = journal["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["backup_kind"] == "file")
+        .unwrap();
+    let target = PathBuf::from(operation["target"].as_str().unwrap());
+    let backup = backup_root
+        .join(report.transaction_id.to_string())
+        .join(operation["backup_path"].as_str().unwrap());
+    fs::copy(backup, target)?;
+    operation["rollback_progress"] = Value::String("target_removed".into());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn recovery_removes_only_a_journal_owned_crash_lock() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("applying".into());
+    let target = &harness.plan.sessions[0].target;
+    let owned_lock = journal["locks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lock| lock["target"] == target.to_string_lossy().as_ref())
+        .unwrap();
+    let lock_path = PathBuf::from(owned_lock["path"].as_str().unwrap());
+    let token = owned_lock["token"].as_str().unwrap().to_owned();
+    assert_eq!(token, report.transaction_id.to_string());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+    fs::write(&lock_path, token)?;
+
+    let pending = recover_incomplete_transactions()?;
+
+    assert_eq!(pending.len(), 1);
+    assert!(!lock_path.exists());
+    Ok(())
+}
+
+#[test]
+fn recovery_preserves_a_foreign_lock_at_an_owned_path() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("applying".into());
+    let lock_path = PathBuf::from(journal["locks"][0]["path"].as_str().unwrap());
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+    fs::write(&lock_path, b"another-transaction")?;
+
+    let pending = recover_incomplete_transactions()?;
+
+    assert_eq!(pending.len(), 1);
+    assert_eq!(fs::read_to_string(lock_path)?, "another-transaction");
+    Ok(())
+}
+
+#[test]
+fn apply_rejects_a_hardlink_added_after_planning() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let index = harness
+        .plan
+        .operations
+        .iter()
+        .find(|operation| operation.package_source == "codex/session_index.jsonl")
+        .unwrap();
+    let outside = harness._fixture.root.join("outside-index.jsonl");
+    fs::hard_link(&index.target, &outside)?;
+    let outside_before = fs::read(&outside)?;
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("hard link"));
+    assert_eq!(fs::read(outside)?, outside_before);
+    Ok(())
+}
+
+#[test]
+fn registration_runs_after_commit_and_sets_app_visible_ready() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let mut options = harness.options();
+    options.register_projects = true;
+    let transactions = harness.transactions_dir();
+    let mut observed_committed = false;
+
+    let report = apply_restore_with_registrar(harness.plan.clone(), options, |_, _| {
+        let entry = fs::read_dir(&transactions)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let journal: Value = serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+        observed_committed = journal["status"] == "committed";
+        RegistrationStatus::Registered
+    })?;
+
+    assert!(observed_committed);
+    assert_eq!(report.registrations.len(), 1);
+    assert_eq!(
+        report.registrations[0].status,
+        RegistrationStatus::Registered
+    );
+    assert!(report.verification.app_registration_valid);
+    assert!(report.verification.app_visible_ready);
+    Ok(())
+}
+
+#[test]
+fn registration_attempts_every_project_and_reports_partial_failure() -> Result<(), Box<dyn Error>> {
+    let harness =
+        RestoreHarness::new_with_projects(DatabaseSchema::Compatible, true, |_, _| Ok(()))?;
+    let mut options = harness.options();
+    options.register_projects = true;
+    let mut attempts = 0;
+
+    let report = apply_restore_with_registrar(harness.plan.clone(), options, |_, _| {
+        attempts += 1;
+        if attempts == 1 {
+            RegistrationStatus::InvocationFailed {
+                message: "first project failed".into(),
+            }
+        } else {
+            RegistrationStatus::Registered
+        }
+    })?;
+
+    assert_eq!(attempts, 2);
+    assert_eq!(report.registrations.len(), 2);
+    assert!(report
+        .registrations
+        .iter()
+        .any(|result| result.status == RegistrationStatus::Registered));
+    assert!(report
+        .registrations
+        .iter()
+        .any(|result| matches!(result.status, RegistrationStatus::InvocationFailed { .. })));
+    assert!(!report.verification.app_registration_valid);
+    assert!(!report.verification.app_visible_ready);
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::Committed);
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_backup_restores_a_coherent_self_contained_database() -> Result<(), Box<dyn Error>> {
+    let mut harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let keeper = Connection::open(&database)?;
+    keeper.pragma_update(None, "journal_mode", "WAL")?;
+    keeper.pragma_update(None, "wal_autocheckpoint", 0)?;
+    keeper.execute_batch(
+        "CREATE TABLE rollback_marker(value TEXT NOT NULL);\
+         INSERT INTO rollback_marker VALUES ('from-wal');",
+    )?;
+    assert!(sqlite_sidecar(&database, "-wal").exists());
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    harness.plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    drop(keeper);
+    rollback(report.transaction_id)?;
+
+    let restored = Connection::open(&database)?;
+    let marker: String =
+        restored.query_row("SELECT value FROM rollback_marker", [], |row| row.get(0))?;
+    assert_eq!(marker, "from-wal");
+    drop(restored);
+    assert!(!sqlite_sidecar(&database, "-wal").exists());
+    assert!(!sqlite_sidecar(&database, "-shm").exists());
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum DatabaseSchema {
     Compatible,
@@ -179,6 +504,21 @@ struct RestoreHarness {
 
 impl RestoreHarness {
     fn new(schema: DatabaseSchema) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_setup(schema, |_, _| Ok(()))
+    }
+
+    fn new_with_setup(
+        schema: DatabaseSchema,
+        setup: impl FnOnce(&Path, &Path) -> Result<(), Box<dyn Error>>,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_projects(schema, false, setup)
+    }
+
+    fn new_with_projects(
+        schema: DatabaseSchema,
+        include_second_project: bool,
+        setup: impl FnOnce(&Path, &Path) -> Result<(), Box<dyn Error>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let env_lock = APP_DATA_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -189,9 +529,16 @@ impl RestoreHarness {
         let fixture = synthetic_codex_fixture()?;
         align_fixture_project_metadata(&fixture)?;
         let package_path = fixture.root.join("handoff.rehome");
+        let mut project_paths = vec![fixture.project_path.clone()];
+        if include_second_project {
+            let second = fixture.root.join("projects").join("second");
+            fs::create_dir_all(&second)?;
+            fs::write(second.join("README.md"), b"# Second project\n")?;
+            project_paths.push(second);
+        }
         create_package(CreatePackageRequest {
             codex_home: fixture.codex_home.clone(),
-            project_paths: vec![fixture.project_path.clone()],
+            project_paths,
             conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
             output_path: package_path.clone(),
             source_device_id: Uuid::nil(),
@@ -199,7 +546,6 @@ impl RestoreHarness {
             include_plugins: false,
             include_generated_images: false,
         })?;
-        let preview = inspect_package(&package_path)?;
         let target_root = fixture.root.join("target");
         let codex_home = target_root.join(".codex");
         let projects_root = target_root.join("projects");
@@ -209,6 +555,8 @@ impl RestoreHarness {
             b"{\"id\":\"99999999-9999-4999-8999-999999999999\",\"title\":\"Target\"}\n",
         )?;
         create_target_database(&codex_home.join("state_5.sqlite"), schema)?;
+        setup(&package_path, &target_root)?;
+        let preview = inspect_package(&package_path)?;
         let target = TargetInventory {
             codex_home,
             target_os: current_source_os(),
@@ -262,6 +610,46 @@ impl RestoreHarness {
         let journal: Value = serde_json::from_slice(&fs::read(entries[0].path())?)?;
         Ok(serde_json::from_value(journal["status"].clone())?)
     }
+}
+
+fn add_forbidden_payload(
+    package_path: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let source = fs::File::open(package_path)?;
+    let mut archive = ZipArchive::new(source)?;
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.is_dir() || entry.name() == "checksums.sha256" {
+            continue;
+        }
+        let mut contents = Vec::new();
+        std::io::copy(&mut entry, &mut contents)?;
+        entries.push((entry.name().to_owned(), contents));
+    }
+    entries.push((name.to_owned(), bytes.to_vec()));
+    let temporary = package_path.with_extension("rehome.tmp");
+    let mut writer = ZipWriter::new(fs::File::create(&temporary)?);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
+        .unix_permissions(0o644);
+    for (entry_name, contents) in &entries {
+        writer.start_file(entry_name, options)?;
+        writer.write_all(contents)?;
+    }
+    let checksums = entries
+        .iter()
+        .filter(|(entry_name, _)| entry_name != "manifest.json")
+        .map(|(entry_name, contents)| format!("{:x}  {entry_name}\n", Sha256::digest(contents)))
+        .collect::<String>();
+    writer.start_file("checksums.sha256", options)?;
+    writer.write_all(checksums.as_bytes())?;
+    writer.finish()?;
+    fs::rename(temporary, package_path)?;
+    Ok(())
 }
 
 impl Drop for RestoreHarness {
@@ -354,6 +742,12 @@ fn snapshot_mutable_targets(
             Ok((path, hash))
         })
         .collect()
+}
+
+fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
+    let mut path = database.as_os_str().to_owned();
+    path.push(suffix);
+    PathBuf::from(path)
 }
 
 fn current_source_os() -> SourceOs {

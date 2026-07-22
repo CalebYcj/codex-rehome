@@ -192,6 +192,7 @@ fn restore_and_recovery_contracts_use_typed_state() {
         rollback_required: true,
     };
     let plan = RestorePlan {
+        plan_id: Uuid::nil(),
         package_path: PathBuf::from("handoff.rehome"),
         package_id: Uuid::nil(),
         archive_hash: "archive-sha256".into(),

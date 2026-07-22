@@ -199,6 +199,7 @@ pub struct PlannedOperation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestorePlan {
+    pub plan_id: Uuid,
     pub package_path: PathBuf,
     pub package_id: Uuid,
     pub archive_hash: String,
@@ -233,12 +234,20 @@ pub struct VerificationReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectRegistration {
+    pub project_id: Uuid,
+    pub project_path: PathBuf,
+    pub status: RegistrationStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestoreReport {
     pub transaction_id: Uuid,
     pub package_id: Uuid,
     pub completed_at: String,
     pub restored_files: u64,
     pub restored_bytes: u64,
+    pub registrations: Vec<ProjectRegistration>,
     pub verification: VerificationReport,
 }
 

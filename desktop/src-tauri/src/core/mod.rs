@@ -6,5 +6,6 @@ pub mod exclusions;
 pub mod models;
 pub mod package;
 pub mod paths;
+pub(crate) mod plan_store;
 pub mod planner;
 pub mod restore;

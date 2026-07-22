@@ -4,6 +4,7 @@ use crate::core::{
     models::{PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport},
 };
 use chrono::{SecondsFormat, Utc};
+use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,6 +12,7 @@ use std::{
     env, fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -26,6 +28,22 @@ pub(crate) enum BackupKind {
     Absent,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RollbackProgress {
+    #[default]
+    Pending,
+    TargetRemoved,
+    OriginalRestored,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct JournalLock {
+    pub target: PathBuf,
+    pub path: PathBuf,
+    pub token: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct BackupOperation {
     pub package_source: String,
@@ -36,6 +54,8 @@ pub(crate) struct BackupOperation {
     pub applied_hash: Option<String>,
     pub readonly: Option<bool>,
     pub unix_mode: Option<u32>,
+    #[serde(default)]
+    pub rollback_progress: RollbackProgress,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +68,8 @@ pub(crate) struct TransactionJournal {
     pub backup_root: PathBuf,
     pub target_codex_home: PathBuf,
     pub projects_root: PathBuf,
+    #[serde(default)]
+    pub locks: Vec<JournalLock>,
 }
 
 pub(crate) struct PreparedTransaction {
@@ -74,25 +96,52 @@ pub(crate) fn prepare_transaction(
     let transaction_backup = backup_root.join(transaction_id.to_string());
     fs::create_dir(&transaction_backup)
         .map_err(|error| restore_failed(format!("could not create transaction backup: {error}")))?;
+    sync_directory(&backup_root).map_err(|error| {
+        restore_failed(format!("could not sync transaction backup parent: {error}"))
+    })?;
     let objects = transaction_backup.join("objects");
     fs::create_dir(&objects)
         .map_err(|error| restore_failed(format!("could not create backup objects: {error}")))?;
+    sync_directory(&transaction_backup)
+        .map_err(|error| restore_failed(format!("could not sync backup directory: {error}")))?;
 
     let targets = mutable_targets(plan)?;
     let mut operations = Vec::with_capacity(targets.len());
     for (index, (package_source, target, expected_hash)) in targets.into_iter().enumerate() {
         let root = operation_root(plan, &target)?;
         validate_restore_target(root, &target)?;
-        let operation = backup_target(
-            &objects,
-            index,
-            package_source,
-            target,
-            expected_hash.as_deref(),
-        )?;
+        let operation = if package_source == "codex/metadata/threads.json" {
+            backup_sqlite_database(
+                &objects,
+                index,
+                package_source,
+                target,
+                expected_hash.as_deref(),
+            )?
+        } else if package_source.starts_with("codex/metadata/sqlite-sidecar") {
+            backup_sqlite_sidecar(package_source, target)?
+        } else {
+            backup_target(
+                &objects,
+                index,
+                package_source,
+                target,
+                expected_hash.as_deref(),
+            )?
+        };
         operations.push(operation);
     }
 
+    let locks = operations
+        .iter()
+        .map(|operation| {
+            Ok(JournalLock {
+                target: operation.target.clone(),
+                path: target_lock_path(&operation.target)?,
+                token: transaction_id.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, RehomeError>>()?;
     let journal = TransactionJournal {
         transaction_id,
         package_id: plan.package_id,
@@ -102,6 +151,7 @@ pub(crate) fn prepare_transaction(
         backup_root,
         target_codex_home: plan.target_codex_home.clone(),
         projects_root: plan.projects_root.clone(),
+        locks,
     };
     let journal_path = transactions.join(format!("{transaction_id}.json"));
     write_journal(&journal_path, &journal)?;
@@ -127,6 +177,9 @@ pub(crate) fn record_applied_hashes(prepared: &mut PreparedTransaction) -> Resul
                     "restored target is not a regular file: {}",
                     operation.target.display()
                 )))
+            }
+            Ok(_) if operation.package_source == "codex/metadata/threads.json" => {
+                Some(hash_sqlite_database(&operation.target)?)
             }
             Ok(_) => Some(hash_file(&operation.target)?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -174,12 +227,17 @@ pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeE
         }
     };
     let mut pending = Vec::new();
+    let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|error| {
+        rollback_failed(format!("could not read transaction journal entry: {error}"))
+    })?;
+    entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        let Ok(entry) = entry else { continue };
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let file_type = entry.file_type().map_err(|error| {
+            rollback_failed(format!(
+                "could not inspect transaction journal entry: {error}"
+            ))
+        })?;
         if !file_type.is_file()
             || file_type.is_symlink()
             || path.extension().is_none_or(|x| x != "json")
@@ -192,9 +250,8 @@ pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeE
         let Ok(transaction_id) = Uuid::parse_str(stem) else {
             continue;
         };
-        let Ok(journal) = load_validated_journal(&path, Some(transaction_id)) else {
-            continue;
-        };
+        let journal = load_validated_journal(&path, Some(transaction_id))?;
+        remove_owned_stale_locks(&journal)?;
         if matches!(
             journal.status,
             RecoveryStatus::Committed | RecoveryStatus::RolledBack
@@ -301,6 +358,7 @@ fn backup_target(
                 applied_hash: None,
                 readonly: Some(metadata.permissions().readonly()),
                 unix_mode: unix_mode(&metadata),
+                rollback_progress: RollbackProgress::Pending,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -319,6 +377,7 @@ fn backup_target(
                 applied_hash: None,
                 readonly: None,
                 unix_mode: None,
+                rollback_progress: RollbackProgress::Pending,
             })
         }
         Err(error) => Err(restore_failed(format!(
@@ -326,6 +385,123 @@ fn backup_target(
             target.display()
         ))),
     }
+}
+
+fn backup_sqlite_database(
+    objects: &Path,
+    index: usize,
+    package_source: String,
+    target: PathBuf,
+    expected_hash: Option<&str>,
+) -> Result<BackupOperation, RehomeError> {
+    let metadata = fs::symlink_metadata(&target).map_err(|error| {
+        restore_failed(format!("could not inspect target SQLite database: {error}"))
+    })?;
+    if metadata_is_link_or_reparse(&metadata)
+        || !metadata.is_file()
+        || raw_file_link_count(&target)
+            .map_err(|error| restore_failed(format!("could not inspect SQLite links: {error}")))?
+            > 1
+    {
+        return Err(restore_failed(
+            "target SQLite database is not a regular unlinked file",
+        ));
+    }
+    let before_hash = hash_file(&target)?;
+    if expected_hash.is_some_and(|expected| !before_hash.eq_ignore_ascii_case(expected)) {
+        return Err(restore_failed(
+            "target SQLite database changed after planning",
+        ));
+    }
+
+    let relative = PathBuf::from("objects").join(format!("{index:08}.bin"));
+    let destination = objects.join(format!("{index:08}.bin"));
+    let temporary = NamedTempFile::new_in(objects)
+        .map_err(|error| restore_failed(format!("could not create SQLite backup: {error}")))?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let source = Connection::open_with_flags(&target, flags).map_err(|error| {
+        restore_failed(format!("could not open target SQLite database: {error}"))
+    })?;
+    source
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| {
+            restore_failed(format!("could not configure SQLite backup lock: {error}"))
+        })?;
+    let snapshot_result = (|| {
+        let mut snapshot = Connection::open(temporary.path()).map_err(|error| {
+            restore_failed(format!("could not open SQLite backup destination: {error}"))
+        })?;
+        let backup = Backup::new(&source, &mut snapshot)
+            .map_err(|error| restore_failed(format!("could not start SQLite backup: {error}")))?;
+        backup
+            .run_to_completion(128, Duration::from_millis(1), None)
+            .map_err(|error| {
+                restore_failed(format!("could not complete SQLite backup: {error}"))
+            })?;
+        drop(backup);
+        snapshot
+            .close()
+            .map_err(|(_, error)| restore_failed(format!("could not close SQLite backup: {error}")))
+    })();
+    snapshot_result?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| restore_failed(format!("could not flush SQLite backup: {error}")))?;
+    replace_file(temporary.path(), &destination)
+        .map_err(|error| restore_failed(format!("could not publish SQLite backup: {error}")))?;
+    sync_directory(objects).map_err(|error| {
+        restore_failed(format!("could not sync SQLite backup directory: {error}"))
+    })?;
+    let original_hash = hash_file(&destination)?;
+    Ok(BackupOperation {
+        package_source,
+        target,
+        backup_kind: BackupKind::File,
+        backup_path: Some(relative),
+        original_hash: Some(original_hash),
+        applied_hash: None,
+        readonly: Some(metadata.permissions().readonly()),
+        unix_mode: unix_mode(&metadata),
+        rollback_progress: RollbackProgress::Pending,
+    })
+}
+
+fn backup_sqlite_sidecar(
+    package_source: String,
+    target: PathBuf,
+) -> Result<BackupOperation, RehomeError> {
+    match fs::symlink_metadata(&target) {
+        Ok(metadata)
+            if metadata_is_link_or_reparse(&metadata)
+                || !metadata.is_file()
+                || raw_file_link_count(&target).map_err(|error| {
+                    restore_failed(format!("could not inspect SQLite sidecar links: {error}"))
+                })? > 1 =>
+        {
+            return Err(restore_failed(
+                "SQLite sidecar is not a regular unlinked file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(restore_failed(format!(
+                "could not inspect SQLite sidecar: {error}"
+            )))
+        }
+    }
+    Ok(BackupOperation {
+        package_source,
+        target,
+        backup_kind: BackupKind::Absent,
+        backup_path: None,
+        original_hash: None,
+        applied_hash: None,
+        readonly: None,
+        unix_mode: None,
+        rollback_progress: RollbackProgress::Pending,
+    })
 }
 
 fn rollback_loaded(
@@ -342,18 +518,15 @@ fn rollback_loaded(
     write_journal(journal_path, journal)?;
 
     let result = (|| {
-        for operation in &journal.operations {
-            remove_current_target(journal, operation)?;
-        }
-        let mut restored_files = 0_u64;
-        for operation in &journal.operations {
-            if operation.backup_kind == BackupKind::File {
-                restore_backup_file(journal, operation)?;
-                restored_files += 1;
-            }
+        for index in 0..journal.operations.len() {
+            rollback_operation(journal_path, journal, index, enforce_applied_hash)?;
         }
         verify_original_state(journal)?;
-        Ok(restored_files)
+        Ok(journal
+            .operations
+            .iter()
+            .filter(|operation| operation.backup_kind == BackupKind::File)
+            .count() as u64)
     })();
 
     match result {
@@ -372,6 +545,89 @@ fn rollback_loaded(
             let _ = write_journal(journal_path, journal);
             Err(error)
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentState {
+    Applied,
+    Absent,
+    Original,
+}
+
+fn rollback_operation(
+    journal_path: &Path,
+    journal: &mut TransactionJournal,
+    index: usize,
+    enforce_applied_hash: bool,
+) -> Result<(), RehomeError> {
+    let operation = journal.operations[index].clone();
+    let state = current_state(&operation, enforce_applied_hash)?;
+    if state == CurrentState::Original {
+        journal.operations[index].rollback_progress = RollbackProgress::OriginalRestored;
+        return write_journal(journal_path, journal);
+    }
+    if state == CurrentState::Applied {
+        remove_current_target(journal, &operation)?;
+    }
+    journal.operations[index].rollback_progress = RollbackProgress::TargetRemoved;
+    write_journal(journal_path, journal)?;
+
+    if operation.backup_kind == BackupKind::File {
+        restore_backup_file(journal, &operation)?;
+    }
+    journal.operations[index].rollback_progress = RollbackProgress::OriginalRestored;
+    write_journal(journal_path, journal)
+}
+
+fn current_state(
+    operation: &BackupOperation,
+    enforce_applied_hash: bool,
+) -> Result<CurrentState, RehomeError> {
+    match fs::symlink_metadata(&operation.target) {
+        Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
+            Err(rollback_failed(format!(
+                "rollback target is not a regular file: {}",
+                operation.target.display()
+            )))
+        }
+        Ok(_) => {
+            if operation
+                .package_source
+                .starts_with("codex/metadata/sqlite-sidecar")
+            {
+                return Ok(CurrentState::Applied);
+            }
+            let actual = if operation.package_source == "codex/metadata/threads.json" {
+                hash_sqlite_database(&operation.target)?
+            } else {
+                hash_file(&operation.target)?
+            };
+            if operation
+                .original_hash
+                .as_deref()
+                .is_some_and(|hash| actual.eq_ignore_ascii_case(hash))
+            {
+                return Ok(CurrentState::Original);
+            }
+            if operation
+                .applied_hash
+                .as_deref()
+                .is_some_and(|hash| actual.eq_ignore_ascii_case(hash))
+                || !enforce_applied_hash
+            {
+                return Ok(CurrentState::Applied);
+            }
+            Err(rollback_failed(format!(
+                "restored target changed after commit: {}",
+                operation.target.display()
+            )))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(CurrentState::Absent),
+        Err(error) => Err(rollback_failed(format!(
+            "could not inspect rollback target {}: {error}",
+            operation.target.display()
+        ))),
     }
 }
 
@@ -395,36 +651,9 @@ fn validate_rollback_inputs(
                 ));
             }
         }
-        if enforce_applied_hash || operation.applied_hash.is_some() {
-            validate_applied_state(operation)?;
-        }
+        let _ = current_state(operation, enforce_applied_hash)?;
     }
     Ok(())
-}
-
-fn validate_applied_state(operation: &BackupOperation) -> Result<(), RehomeError> {
-    match (
-        &operation.applied_hash,
-        fs::symlink_metadata(&operation.target),
-    ) {
-        (Some(expected), Ok(metadata))
-            if !metadata_is_link_or_reparse(&metadata) && metadata.is_file() =>
-        {
-            if hash_file(&operation.target)?.eq_ignore_ascii_case(expected) {
-                Ok(())
-            } else {
-                Err(rollback_failed(format!(
-                    "restored target changed after commit: {}",
-                    operation.target.display()
-                )))
-            }
-        }
-        (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        _ => Err(rollback_failed(format!(
-            "restored target state changed after commit: {}",
-            operation.target.display()
-        ))),
-    }
 }
 
 fn remove_current_target(
@@ -440,12 +669,21 @@ fn remove_current_target(
                 operation.target.display()
             )))
         }
-        Ok(_) => fs::remove_file(&operation.target).map_err(|error| {
-            rollback_failed(format!(
-                "could not clear rollback target {}: {error}",
-                operation.target.display()
-            ))
-        }),
+        Ok(_) => fs::remove_file(&operation.target)
+            .map_err(|error| {
+                rollback_failed(format!(
+                    "could not clear rollback target {}: {error}",
+                    operation.target.display()
+                ))
+            })
+            .and_then(|()| {
+                if let Some(parent) = operation.target.parent() {
+                    sync_directory(parent).map_err(|error| {
+                        rollback_failed(format!("could not sync rollback directory: {error}"))
+                    })?;
+                }
+                Ok(())
+            }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(rollback_failed(format!(
             "could not inspect rollback target {}: {error}",
@@ -467,6 +705,25 @@ fn restore_backup_file(
     fs::create_dir_all(parent).map_err(|error| {
         rollback_failed(format!("could not create rollback directory: {error}"))
     })?;
+    if operation.package_source == "codex/metadata/threads.json" {
+        for suffix in SQLITE_SIDECARS {
+            let sidecar = sqlite_sidecar(&operation.target, suffix);
+            match fs::symlink_metadata(&sidecar) {
+                Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() => {
+                    return Err(rollback_failed("SQLite sidecar is unsafe during rollback"));
+                }
+                Ok(_) => fs::remove_file(&sidecar).map_err(|error| {
+                    rollback_failed(format!("could not clear SQLite sidecar: {error}"))
+                })?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(rollback_failed(format!(
+                        "could not inspect SQLite sidecar: {error}"
+                    )))
+                }
+            }
+        }
+    }
     validate_restore_target(root, &operation.target)?;
     let backup = backup_file_path(journal, operation)?;
     copy_file_atomically(&backup, &operation.target)?;
@@ -478,7 +735,9 @@ fn restore_backup_file(
     }
     set_unix_mode(&mut permissions, operation.unix_mode);
     fs::set_permissions(&operation.target, permissions)
-        .map_err(|error| rollback_failed(format!("could not restore file permissions: {error}")))
+        .map_err(|error| rollback_failed(format!("could not restore file permissions: {error}")))?;
+    sync_directory(parent)
+        .map_err(|error| rollback_failed(format!("could not flush restored backup: {error}")))
 }
 
 fn verify_original_state(journal: &TransactionJournal) -> Result<(), RehomeError> {
@@ -489,16 +748,34 @@ fn verify_original_state(journal: &TransactionJournal) -> Result<(), RehomeError
                     .original_hash
                     .as_deref()
                     .ok_or_else(|| rollback_failed("file backup has no original hash"))?;
-                if !hash_file(&operation.target)?.eq_ignore_ascii_case(expected) {
+                let actual = if operation.package_source == "codex/metadata/threads.json" {
+                    hash_sqlite_database(&operation.target)?
+                } else {
+                    hash_file(&operation.target)?
+                };
+                if !actual.eq_ignore_ascii_case(expected) {
                     return Err(rollback_failed(
                         "rollback did not restore the original hash",
                     ));
                 }
             }
-            BackupKind::Absent if operation.target.exists() => {
+            BackupKind::Absent
+                if !operation
+                    .package_source
+                    .starts_with("codex/metadata/sqlite-sidecar")
+                    && operation.target.exists() =>
+            {
                 return Err(rollback_failed("rollback did not restore an absent target"));
             }
             BackupKind::Absent => {}
+        }
+    }
+    for operation in &journal.operations {
+        if operation
+            .package_source
+            .starts_with("codex/metadata/sqlite-sidecar")
+        {
+            remove_current_target(journal, operation)?;
         }
     }
     Ok(())
@@ -575,6 +852,70 @@ fn validate_journal(journal: &TransactionJournal) -> Result<(), RehomeError> {
                 ));
             }
             BackupKind::Absent => {}
+        }
+    }
+    for lock in &journal.locks {
+        operation_root_from_journal(journal, &lock.target)?;
+        if lock.path != target_lock_path(&lock.target)?
+            || lock.token != journal.transaction_id.to_string()
+        {
+            return Err(rollback_failed(
+                "transaction journal contains invalid lock ownership",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn target_lock_path(target: &Path) -> Result<PathBuf, RehomeError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| rollback_failed("restore target has no parent directory"))?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| rollback_failed("restore target has no file name"))?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{file_name}.codex-rehome.lock")))
+}
+
+fn remove_owned_stale_locks(journal: &TransactionJournal) -> Result<(), RehomeError> {
+    for lock in &journal.locks {
+        operation_root_from_journal(journal, &lock.target)?;
+        if lock.path != target_lock_path(&lock.target)? {
+            return Err(rollback_failed("transaction lock path is unsafe"));
+        }
+        let metadata = match fs::symlink_metadata(&lock.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(rollback_failed(format!(
+                    "could not inspect transaction lock: {error}"
+                )))
+            }
+        };
+        if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+            continue;
+        }
+        if raw_file_link_count(&lock.path).map_err(|error| {
+            rollback_failed(format!("could not inspect transaction lock links: {error}"))
+        })? != 1
+        {
+            continue;
+        }
+        let token = fs::read_to_string(&lock.path).map_err(|error| {
+            rollback_failed(format!("could not read transaction lock: {error}"))
+        })?;
+        if token == lock.token {
+            fs::remove_file(&lock.path).map_err(|error| {
+                rollback_failed(format!("could not remove transaction lock: {error}"))
+            })?;
+            if let Some(parent) = lock.path.parent() {
+                sync_directory(parent).map_err(|error| {
+                    rollback_failed(format!(
+                        "could not sync transaction lock directory: {error}"
+                    ))
+                })?;
+            }
         }
     }
     Ok(())
@@ -688,6 +1029,12 @@ fn create_and_canonicalize_directory(path: &Path, label: &str) -> Result<PathBuf
             "{label} is not a regular directory"
         )));
     }
+    sync_directory(path)
+        .map_err(|error| restore_failed(format!("could not sync {label}: {error}")))?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)
+            .map_err(|error| restore_failed(format!("could not sync {label} parent: {error}")))?;
+    }
     fs::canonicalize(path)
         .map_err(|error| restore_failed(format!("could not resolve {label}: {error}")))
 }
@@ -719,7 +1066,9 @@ fn write_journal(path: &Path, journal: &TransactionJournal) -> Result<(), Rehome
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|error| restore_failed(format!("could not flush transaction journal: {error}")))?;
     replace_file(temporary.path(), path)
-        .map_err(|error| restore_failed(format!("could not atomically write journal: {error}")))
+        .map_err(|error| restore_failed(format!("could not atomically write journal: {error}")))?;
+    sync_directory(parent)
+        .map_err(|error| restore_failed(format!("could not sync journal directory: {error}")))
 }
 
 fn copy_file_atomically(source: &Path, destination: &Path) -> Result<(), RehomeError> {
@@ -736,7 +1085,19 @@ fn copy_file_atomically(source: &Path, destination: &Path) -> Result<(), RehomeE
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|error| restore_failed(format!("could not copy file atomically: {error}")))?;
     replace_file(temporary.path(), destination)
-        .map_err(|error| restore_failed(format!("could not publish copied file: {error}")))
+        .map_err(|error| restore_failed(format!("could not publish copied file: {error}")))?;
+    sync_directory(parent)
+        .map_err(|error| restore_failed(format!("could not sync file directory: {error}")))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -792,6 +1153,40 @@ fn hash_file(path: &Path) -> Result<String, RehomeError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn hash_sqlite_database(path: &Path) -> Result<String, RehomeError> {
+    let directory = tempfile::tempdir().map_err(|error| {
+        restore_failed(format!("could not create SQLite hash directory: {error}"))
+    })?;
+    let snapshot_path = directory.path().join("snapshot.sqlite");
+    let source = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        restore_failed(format!(
+            "could not open SQLite database for hashing: {error}"
+        ))
+    })?;
+    source
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| {
+            restore_failed(format!("could not configure SQLite hash lock: {error}"))
+        })?;
+    let mut destination = Connection::open(&snapshot_path).map_err(|error| {
+        restore_failed(format!("could not open SQLite hash destination: {error}"))
+    })?;
+    let backup = Backup::new(&source, &mut destination)
+        .map_err(|error| restore_failed(format!("could not start SQLite hash backup: {error}")))?;
+    backup
+        .run_to_completion(128, Duration::from_millis(1), None)
+        .map_err(|error| {
+            restore_failed(format!("could not complete SQLite hash backup: {error}"))
+        })?;
+    drop(backup);
+    drop(destination);
+    hash_file(&snapshot_path)
+}
+
 fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
     let mut path = database.as_os_str().to_owned();
     path.push(suffix);
@@ -832,6 +1227,34 @@ fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn raw_file_link_count(path: &Path) -> io::Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = fs::File::open(path)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(u64::from(information.nNumberOfLinks))
+    }
+}
+
+#[cfg(unix)]
+fn raw_file_link_count(path: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).map(|metadata| metadata.nlink())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn raw_file_link_count(path: &Path) -> io::Result<u64> {
+    fs::metadata(path).map(|_| 1)
 }
 
 fn timestamp() -> String {

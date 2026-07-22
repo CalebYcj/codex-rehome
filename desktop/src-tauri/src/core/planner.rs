@@ -327,7 +327,8 @@ pub fn build_restore_plan(
                 .ok_or_else(|| restore_failed("restore plan size exceeds the supported range"))
         })?;
 
-    Ok(RestorePlan {
+    let mut plan = RestorePlan {
+        plan_id: Uuid::nil(),
         package_path: package.package_path.clone(),
         package_id: package.manifest.package_id,
         archive_hash: package.archive_hash.clone(),
@@ -338,7 +339,12 @@ pub fn build_restore_plan(
         reference_rewrites,
         conflict_count,
         required_bytes,
-    })
+    };
+    let canonical = serde_json::to_vec(&plan)
+        .map_err(|error| restore_failed(format!("could not seal restore plan: {error}")))?;
+    plan.plan_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, &canonical);
+    crate::core::plan_store::store(&plan)?;
+    Ok(plan)
 }
 
 fn validate_plan_inputs(

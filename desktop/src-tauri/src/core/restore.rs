@@ -3,11 +3,15 @@ use crate::core::{
         prepare_transaction, record_applied_hashes, rollback_prepared, update_status,
         PreparedTransaction,
     },
-    bridge::{apply_bridge_plan, apply_file_operation, register_project_with_detected_cli},
+    bridge::{
+        apply_bridge_plan_for_transaction, apply_file_operation_for_transaction,
+        register_project_with_detected_cli,
+    },
     error::{ErrorCode, RehomeError},
     models::{
-        ChangeKind, PendingRecovery, RecoveryStatus, ReferenceRewriteKind, RegistrationStatus,
-        RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs, VerificationReport,
+        ChangeKind, PendingRecovery, ProjectRegistration, RecoveryStatus, ReferenceRewriteKind,
+        RegistrationStatus, RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs,
+        VerificationReport,
     },
     package::{inspect_package_for_planning, VerifiedPackage},
 };
@@ -25,6 +29,36 @@ pub fn apply_restore(
     plan: RestorePlan,
     options: RestoreOptions,
 ) -> Result<RestoreReport, RehomeError> {
+    let plan = crate::core::plan_store::load_exact(&plan)?;
+    apply_server_plan(plan, options, |target_os, project| {
+        register_project_with_detected_cli(target_os, project)
+    })
+}
+
+pub fn apply_restore_by_id(
+    plan_id: Uuid,
+    options: RestoreOptions,
+) -> Result<RestoreReport, RehomeError> {
+    let plan = crate::core::plan_store::load(plan_id)?;
+    apply_server_plan(plan, options, |target_os, project| {
+        register_project_with_detected_cli(target_os, project)
+    })
+}
+
+pub fn apply_restore_with_registrar(
+    plan: RestorePlan,
+    options: RestoreOptions,
+    registrar: impl FnMut(SourceOs, &Path) -> RegistrationStatus,
+) -> Result<RestoreReport, RehomeError> {
+    let plan = crate::core::plan_store::load_exact(&plan)?;
+    apply_server_plan(plan, options, registrar)
+}
+
+fn apply_server_plan(
+    plan: RestorePlan,
+    options: RestoreOptions,
+    mut registrar: impl FnMut(SourceOs, &Path) -> RegistrationStatus,
+) -> Result<RestoreReport, RehomeError> {
     if !options.codex_closed_confirmed {
         return Err(RehomeError::new(
             ErrorCode::CodexRunning,
@@ -34,9 +68,15 @@ pub fn apply_restore(
     validate_plan(&plan)?;
     let verified = inspect_package_for_planning(&plan.package_path)?;
     validate_package_identity(&plan, &verified)?;
+    if verified.preview.forbidden_files_total > 0 {
+        return Err(RehomeError::new(
+            ErrorCode::PackageInvalid,
+            "restore package contains forbidden files",
+        ));
+    }
     let mut transaction = prepare_transaction(&plan, &options.backup_root)?;
 
-    let result = apply_transaction(&plan, &options, &verified, &mut transaction);
+    let result = apply_transaction(&plan, &options, &verified, &mut transaction, &mut registrar);
     match result {
         Ok(report) => Ok(report),
         Err(error) => match rollback_prepared(&mut transaction) {
@@ -65,10 +105,13 @@ fn apply_transaction(
     options: &RestoreOptions,
     verified: &VerifiedPackage,
     transaction: &mut PreparedTransaction,
+    registrar: &mut impl FnMut(SourceOs, &Path) -> RegistrationStatus,
 ) -> Result<RestoreReport, RehomeError> {
     update_status(transaction, RecoveryStatus::Applying)?;
-    let (mut restored_files, mut restored_bytes) = apply_regular_files(plan, verified)?;
-    let bridge = apply_bridge_plan(plan).map_err(|error| {
+    let transaction_id = transaction.journal.transaction_id;
+    let (mut restored_files, mut restored_bytes) =
+        apply_regular_files(plan, verified, transaction_id)?;
+    let bridge = apply_bridge_plan_for_transaction(plan, transaction_id).map_err(|error| {
         if plan
             .operations
             .iter()
@@ -88,7 +131,7 @@ fn apply_transaction(
     restored_bytes += changed_target_bytes(plan)?;
 
     update_status(transaction, RecoveryStatus::Verifying)?;
-    let verification = verify_restore(plan, options, verified)?;
+    let mut verification = verify_restore(plan, verified)?;
     if !data_verification_passed(&verification) {
         return Err(restore_failed(format!(
             "restore verification did not pass: {verification:?}"
@@ -96,6 +139,13 @@ fn apply_transaction(
     }
     record_applied_hashes(transaction)?;
     update_status(transaction, RecoveryStatus::Committed)?;
+    let registrations = register_projects(plan, options, verified, registrar);
+    verification.app_registration_valid = options.register_projects
+        && registrations
+            .iter()
+            .all(|result| result.status == RegistrationStatus::Registered);
+    verification.app_visible_ready =
+        data_verification_passed(&verification) && verification.app_registration_valid;
 
     Ok(RestoreReport {
         transaction_id: transaction.journal.transaction_id,
@@ -103,6 +153,7 @@ fn apply_transaction(
         completed_at: timestamp(),
         restored_files,
         restored_bytes,
+        registrations,
         verification,
     })
 }
@@ -170,6 +221,7 @@ fn validate_package_identity(
 fn apply_regular_files(
     plan: &RestorePlan,
     verified: &VerifiedPackage,
+    transaction_id: Uuid,
 ) -> Result<(u64, u64), RehomeError> {
     let mut restored_files = 0_u64;
     let mut restored_bytes = 0_u64;
@@ -181,7 +233,7 @@ fn apply_regular_files(
         }
         let bytes = verified.authenticated_payload(&operation.package_source)?;
         let root = operation_root(plan, &operation.target)?;
-        apply_file_operation(root, operation, &bytes)?;
+        apply_file_operation_for_transaction(root, operation, &bytes, transaction_id)?;
         restored_files += 1;
         restored_bytes = restored_bytes
             .checked_add(bytes.len() as u64)
@@ -222,7 +274,6 @@ fn changed_target_bytes(plan: &RestorePlan) -> Result<u64, RehomeError> {
 
 fn verify_restore(
     plan: &RestorePlan,
-    options: &RestoreOptions,
     verified: &VerifiedPackage,
 ) -> Result<VerificationReport, RehomeError> {
     let current = inspect_package_for_planning(&plan.package_path)?;
@@ -244,8 +295,7 @@ fn verify_restore(
     let bridge = verify_bridge_metadata(plan)?;
     let forbidden_files_absent = current.preview.forbidden_files_total == 0;
     let project_files_valid = verify_project_files(plan, verified)?;
-    let app_registration_valid = verify_registration(plan, options, &current)?;
-    let mut report = VerificationReport {
+    Ok(VerificationReport {
         package_checksum_valid,
         files_valid,
         sessions_valid,
@@ -254,16 +304,14 @@ fn verify_restore(
         path_mapping_valid: bridge.path_mapping_valid,
         forbidden_files_absent,
         project_files_valid,
-        app_registration_valid,
+        app_registration_valid: false,
         app_visible_ready: false,
-    };
-    report.app_visible_ready = data_verification_passed(&report) && app_registration_valid;
-    Ok(report)
+    })
 }
 
 fn verify_plain_files(plan: &RestorePlan, verified: &VerifiedPackage) -> Result<bool, RehomeError> {
     for operation in &plan.operations {
-        if !matches!(operation.action, ChangeKind::Add | ChangeKind::Update)
+        if operation.action == ChangeKind::Conflict
             || is_bridge_operation(plan, &operation.package_source)
         {
             continue;
@@ -290,7 +338,7 @@ fn verify_project_files(
         .operations
         .iter()
         .filter(|operation| operation.target.starts_with(&plan.projects_root))
-        .filter(|operation| matches!(operation.action, ChangeKind::Add | ChangeKind::Update))
+        .filter(|operation| operation.action != ChangeKind::Conflict)
     {
         let expected = &verified
             .payloads
@@ -479,23 +527,35 @@ fn read_sqlite_rows(plan: &RestorePlan) -> Result<SqliteRows, RehomeError> {
     Ok(result)
 }
 
-fn verify_registration(
+fn register_projects(
     plan: &RestorePlan,
     options: &RestoreOptions,
     verified: &VerifiedPackage,
-) -> Result<bool, RehomeError> {
+    registrar: &mut impl FnMut(SourceOs, &Path) -> RegistrationStatus,
+) -> Vec<ProjectRegistration> {
     if !options.register_projects {
-        return Ok(false);
+        return Vec::new();
     }
     let target_os = if cfg!(target_os = "macos") {
         SourceOs::Macos
     } else {
         SourceOs::Windows
     };
-    Ok(verified.preview.manifest.projects.iter().all(|project| {
-        register_project_with_detected_cli(target_os, &plan.projects_root.join(&project.name))
-            == RegistrationStatus::Registered
-    }))
+    verified
+        .preview
+        .manifest
+        .projects
+        .iter()
+        .map(|project| {
+            let project_path = plan.projects_root.join(&project.name);
+            let status = registrar(target_os, &project_path);
+            ProjectRegistration {
+                project_id: project.project_id,
+                project_path,
+                status,
+            }
+        })
+        .collect()
 }
 
 fn data_verification_passed(report: &VerificationReport) -> bool {
