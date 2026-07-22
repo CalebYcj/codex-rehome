@@ -233,6 +233,36 @@ impl VerifiedPackage {
         authenticate_payload_bytes(bytes, verified)?;
         Ok(bytes)
     }
+
+    pub(crate) fn authenticated_payload(&self, source: &str) -> Result<Vec<u8>, RehomeError> {
+        let verified = self
+            .payloads
+            .get(source)
+            .ok_or_else(|| package_invalid("restore operation references a missing payload"))?;
+        let mut file = fs::File::open(&self.preview.package_path)
+            .map_err(|error| package_invalid(format!("could not reopen package: {error}")))?;
+        let archive_hash = hash_archive_file(&mut file)?;
+        if !archive_hash.eq_ignore_ascii_case(&self.preview.archive_hash) {
+            return Err(package_invalid(
+                "package archive changed after restore planning",
+            ));
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
+        let mut entry = archive.by_name(source).map_err(|error| {
+            package_invalid(format!(
+                "could not reopen verified payload {source}: {error}"
+            ))
+        })?;
+        if entry.is_dir() {
+            return Err(package_invalid("restore payload is not a regular file"));
+        }
+        let bytes = read_payload_entry(&mut entry)?;
+        authenticate_payload_bytes(&bytes, verified)?;
+        Ok(bytes)
+    }
 }
 
 pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {

@@ -257,6 +257,20 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
     })
 }
 
+pub(crate) fn apply_file_operation(
+    root: &Path,
+    operation: &PlannedOperation,
+    bytes: &[u8],
+) -> Result<(), RehomeError> {
+    ensure_writable_change(operation)?;
+    let guard = TargetReplacementGuard::acquire(root, operation)?;
+    guard.commit_bytes(operation, bytes)
+}
+
+pub(crate) fn validate_restore_target(root: &Path, target: &Path) -> Result<(), RehomeError> {
+    ensure_safe_codex_target(root, target)
+}
+
 pub fn merge_session_index(
     target_bytes: &[u8],
     package_bytes: &[u8],

@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod bridge;
 pub mod discovery;
 pub mod error;
@@ -6,3 +7,4 @@ pub mod models;
 pub mod package;
 pub mod paths;
 pub mod planner;
+pub mod restore;
