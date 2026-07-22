@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -32,6 +32,15 @@ const viewTitles: Record<View, string> = {
 
 export default function App() {
   const [view, setView] = useState<View>("home");
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const previousViewRef = useRef(view);
+
+  useEffect(() => {
+    if (previousViewRef.current !== view) {
+      headingRef.current?.focus();
+      previousViewRef.current = view;
+    }
+  }, [view]);
 
   return (
     <div className="app-shell">
@@ -79,7 +88,9 @@ export default function App() {
           <div className="home-view">
             <section className="intro" aria-labelledby="home-title">
               <p className="eyebrow">CODEX WORKSPACE</p>
-              <h1 id="home-title">迁移工作台</h1>
+              <h1 id="home-title" ref={headingRef} tabIndex={-1}>
+                迁移工作台
+              </h1>
             </section>
 
             <section className="actions" aria-label="迁移操作">
@@ -104,7 +115,9 @@ export default function App() {
         ) : (
           <section className="view-panel">
             <p className="eyebrow">REHOME</p>
-            <h1>{viewTitles[view]}</h1>
+            <h1 ref={headingRef} tabIndex={-1}>
+              {viewTitles[view]}
+            </h1>
             <div className="view-rule" aria-hidden="true" />
           </section>
         )}

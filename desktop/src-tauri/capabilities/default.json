@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core window capability for ReHome Desktop",
+  "description": "No IPC permissions are required by the ReHome Desktop shell",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": []
 }
