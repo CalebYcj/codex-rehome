@@ -7,6 +7,7 @@ use crate::core::{
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
 };
+use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -115,7 +116,7 @@ pub fn build_restore_plan(
         }
 
         let source_bytes = verified
-            .session_payloads
+            .planning_payloads
             .get(&conversation.archive_path)
             .ok_or_else(|| package_invalid("verified session payload bytes are missing"))?;
         let source_task_id = conversation.task_id;
@@ -159,7 +160,7 @@ pub fn build_restore_plan(
                 Some(hash),
                 ChangeKind::Unchanged,
                 base_hash,
-                Vec::new(),
+                base_rewrites,
             ),
             TargetState::Missing => (
                 SessionAction::Import,
@@ -227,33 +228,50 @@ pub fn build_restore_plan(
             consumed.insert(source.to_owned());
         }
     }
-    if sessions
-        .iter()
-        .any(|session| session.action != SessionAction::Skip)
-    {
-        if let Some(payload) = payloads.get(SESSION_INDEX_SOURCE) {
+    if !sessions.is_empty() {
+        let planned_rewrites = rewrites.values().cloned().collect::<Vec<_>>();
+        let all_sessions_skipped = sessions
+            .iter()
+            .all(|session| session.action == SessionAction::Skip);
+        if payloads.contains_key(SESSION_INDEX_SOURCE) {
             let target_path =
                 join_target(&target.codex_home, "session_index.jsonl", target.target_os)?;
-            operations.push(classify_merge(
+            let bytes = verified
+                .planning_payloads
+                .get(SESSION_INDEX_SOURCE)
+                .ok_or_else(|| package_invalid("verified session index bytes are missing"))?;
+            if let Some(operation) = plan_index_merge(
                 SESSION_INDEX_SOURCE,
                 target_path,
-                payload,
+                bytes,
+                &planned_rewrites,
+                all_sessions_skipped,
                 target.target_os,
-            )?);
+            )? {
+                operations.push(operation);
+            }
         }
-        if let Some(payload) = payloads.get(THREAD_METADATA_SOURCE) {
+        if payloads.contains_key(THREAD_METADATA_SOURCE) {
             let target_path = find_state_database(&target.codex_home)?.ok_or_else(|| {
                 RehomeError::new(
                     ErrorCode::CodexNotFound,
                     "target Codex state database was not found",
                 )
             })?;
-            operations.push(classify_merge(
+            let bytes = verified
+                .planning_payloads
+                .get(THREAD_METADATA_SOURCE)
+                .ok_or_else(|| package_invalid("verified thread metadata bytes are missing"))?;
+            if let Some(operation) = plan_thread_metadata_merge(
                 THREAD_METADATA_SOURCE,
                 target_path,
-                payload,
+                bytes,
+                &planned_rewrites,
+                all_sessions_skipped,
                 target.target_os,
-            )?);
+            )? {
+                operations.push(operation);
+            }
         }
     }
 
@@ -399,28 +417,58 @@ fn classify_file(
     })
 }
 
-fn classify_merge(
+fn plan_index_merge(
     source: &str,
     target: PathBuf,
-    payload: &VerifiedPayload,
+    bytes: &[u8],
+    rewrites: &[ReferenceRewrite],
+    all_sessions_skipped: bool,
     target_os: SourceOs,
-) -> Result<PlannedOperation, RehomeError> {
+) -> Result<Option<PlannedOperation>, RehomeError> {
     let state = target_state(&target, target_os)?;
+    if let TargetState::File(hash) = &state {
+        let desired = rewrite_jsonl_payload(bytes, rewrites, source)?;
+        let current = read_hashed_target(&target, hash)?;
+        if all_sessions_skipped && jsonl_metadata_contains(&current, &desired)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(classify_bridge_change(source, target, state)))
+}
+
+fn plan_thread_metadata_merge(
+    source: &str,
+    target: PathBuf,
+    bytes: &[u8],
+    rewrites: &[ReferenceRewrite],
+    all_sessions_skipped: bool,
+    target_os: SourceOs,
+) -> Result<Option<PlannedOperation>, RehomeError> {
+    let state = target_state(&target, target_os)?;
+    if let TargetState::File(hash) = &state {
+        let desired = rewrite_metadata_document(bytes, rewrites, source)?;
+        let metadata_ready = sqlite_threads_contain(&target, &desired)?;
+        ensure_target_hash(&target, hash)?;
+        if all_sessions_skipped && metadata_ready {
+            return Ok(None);
+        }
+    }
+    Ok(Some(classify_bridge_change(source, target, state)))
+}
+
+fn classify_bridge_change(source: &str, target: PathBuf, state: TargetState) -> PlannedOperation {
     let (action, expected_previous_hash) = match state {
         TargetState::Missing => (ChangeKind::Add, None),
-        TargetState::File(hash) if hash == payload.content_hash => {
-            (ChangeKind::Unchanged, Some(hash))
-        }
         TargetState::File(hash) => (ChangeKind::Update, Some(hash)),
         TargetState::Other => (ChangeKind::Conflict, None),
     };
-    Ok(PlannedOperation {
+    PlannedOperation {
         package_source: source.to_owned(),
         target,
         expected_previous_hash,
         action,
         rollback_required: matches!(action, ChangeKind::Add | ChangeKind::Update),
-    })
+    }
 }
 
 fn classify_target_state(state: &TargetState, incoming_hash: &str) -> (ChangeKind, Option<String>) {
@@ -585,7 +633,7 @@ fn plan_branch_session(
                         Some(hash),
                         ChangeKind::Unchanged,
                         expected_hash,
-                        Vec::new(),
+                        candidate_rewrites,
                     ));
                 }
             }
@@ -604,7 +652,7 @@ fn plan_branch_session(
                     Some(hash.clone()),
                     ChangeKind::Unchanged,
                     expected_hash,
-                    Vec::new(),
+                    candidate_rewrites,
                 ));
             }
         }
@@ -704,29 +752,268 @@ pub(crate) fn rewrite_jsonl_payload(
 }
 
 fn rewrite_json_value(value: &mut serde_json::Value, rewrites: &[&ReferenceRewrite]) {
-    match value {
-        serde_json::Value::String(text) => {
-            if let Some(rewrite) = rewrites.iter().find(|rewrite| text == &rewrite.from) {
-                *text = rewrite.to.clone();
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    match object.get("type").and_then(serde_json::Value::as_str) {
+        Some("session_meta") => {
+            if let Some(payload) = object.get_mut("payload") {
+                rewrite_known_metadata_fields(payload, rewrites, true);
             }
         }
+        Some("turn_context") => {
+            if let Some(payload) = object.get_mut("payload") {
+                rewrite_known_metadata_fields(payload, rewrites, false);
+            }
+        }
+        Some(_) => {}
+        None => rewrite_known_metadata_fields(value, rewrites, true),
+    }
+}
+
+fn rewrite_known_metadata_fields(
+    value: &mut serde_json::Value,
+    rewrites: &[&ReferenceRewrite],
+    include_identity: bool,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for (field, value) in object {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        let allowed = rewrites.iter().find(|rewrite| {
+            text == rewrite.from
+                && match rewrite.kind {
+                    ReferenceRewriteKind::ConversationId => {
+                        include_identity
+                            && matches!(field.as_str(), "id" | "thread_id" | "conversation_id")
+                    }
+                    ReferenceRewriteKind::ConversationTitle => include_identity && field == "title",
+                    ReferenceRewriteKind::ProjectPath => matches!(
+                        field.as_str(),
+                        "project" | "project_path" | "cwd" | "rollout" | "rollout_path" | "path"
+                    ),
+                }
+        });
+        if let Some(rewrite) = allowed {
+            *value = serde_json::Value::String(rewrite.to.clone());
+        }
+    }
+}
+
+fn rewrite_metadata_document(
+    bytes: &[u8],
+    rewrites: &[ReferenceRewrite],
+    source: &str,
+) -> Result<serde_json::Value, RehomeError> {
+    let selected = rewrites
+        .iter()
+        .filter(|rewrite| rewrite.package_source == source)
+        .collect::<Vec<_>>();
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| package_invalid(format!("bridge metadata JSON is invalid: {error}")))?;
+    match &mut value {
         serde_json::Value::Array(values) => {
             for value in values {
-                rewrite_json_value(value, rewrites);
+                rewrite_json_value(value, &selected);
             }
         }
-        serde_json::Value::Object(values) => {
-            for value in values.values_mut() {
-                rewrite_json_value(value, rewrites);
+        serde_json::Value::Object(_) => rewrite_json_value(&mut value, &selected),
+        _ => return Err(package_invalid("bridge metadata JSON has an invalid shape")),
+    }
+    Ok(value)
+}
+
+fn read_hashed_target(path: &Path, expected_hash: &str) -> Result<Vec<u8>, RehomeError> {
+    let bytes = fs::read(path).map_err(|error| {
+        restore_failed(format!(
+            "could not read restore target {}: {error}",
+            path.display()
+        ))
+    })?;
+    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Err(restore_failed(format!(
+            "restore target changed while it was being planned: {}",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn ensure_target_hash(path: &Path, expected_hash: &str) -> Result<(), RehomeError> {
+    let actual_hash = hash_file(path)?;
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Err(restore_failed(format!(
+            "restore target changed while it was being planned: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn jsonl_metadata_contains(current: &[u8], desired: &[u8]) -> Result<bool, RehomeError> {
+    let desired = jsonl_metadata_by_id(desired, true)?;
+    let current = jsonl_metadata_by_id(current, false)?;
+    Ok(desired.iter().all(|(id, desired_value)| {
+        current
+            .get(id)
+            .is_some_and(|current_value| metadata_fields_match(current_value, desired_value))
+    }))
+}
+
+fn metadata_fields_match(current: &serde_json::Value, desired: &serde_json::Value) -> bool {
+    match (current.as_object(), desired.as_object()) {
+        (Some(current), Some(desired)) => desired
+            .iter()
+            .all(|(field, value)| current.get(field) == Some(value)),
+        _ => current == desired,
+    }
+}
+
+fn jsonl_metadata_by_id(
+    bytes: &[u8],
+    package_metadata: bool,
+) -> Result<BTreeMap<String, serde_json::Value>, RehomeError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        if package_metadata {
+            package_invalid("session index is not UTF-8")
+        } else {
+            restore_failed("target session index is not UTF-8")
+        }
+    })?;
+    let mut records = BTreeMap::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            if package_metadata {
+                package_invalid(format!("session index JSONL is invalid: {error}"))
+            } else {
+                restore_failed(format!("target session index JSONL is invalid: {error}"))
+            }
+        })?;
+        let id = metadata_id(&value).ok_or_else(|| {
+            if package_metadata {
+                package_invalid("session index entry is missing its conversation ID")
+            } else {
+                restore_failed("target session index entry is missing its conversation ID")
+            }
+        })?;
+        records.insert(id.to_owned(), value);
+    }
+    Ok(records)
+}
+
+fn metadata_id(value: &serde_json::Value) -> Option<&str> {
+    let object = value.as_object()?;
+    ["id", "thread_id", "conversation_id"]
+        .iter()
+        .find_map(|field| object.get(*field).and_then(serde_json::Value::as_str))
+}
+
+fn sqlite_threads_contain(
+    database: &Path,
+    desired: &serde_json::Value,
+) -> Result<bool, RehomeError> {
+    let rows = desired
+        .as_array()
+        .ok_or_else(|| package_invalid("thread metadata must be a JSON array"))?;
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| {
+            restore_failed(format!(
+                "could not open target Codex state database {}: {error}",
+                database.display()
+            ))
+        })?;
+    let columns = sqlite_thread_columns(&connection)?;
+    if !columns.contains("id") {
+        return Ok(false);
+    }
+
+    for desired_row in rows {
+        let object = desired_row
+            .as_object()
+            .ok_or_else(|| package_invalid("thread metadata row must be a JSON object"))?;
+        let id = metadata_id(desired_row)
+            .ok_or_else(|| package_invalid("thread metadata row is missing its conversation ID"))?;
+        let compared_columns = object
+            .keys()
+            .filter(|column| columns.contains(column.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let projection = compared_columns
+            .iter()
+            .map(|column| quote_sql_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!("SELECT {projection} FROM threads WHERE id = ?1");
+        let mut statement = connection.prepare(&query).map_err(|error| {
+            restore_failed(format!(
+                "could not inspect target Codex thread {id}: {error}"
+            ))
+        })?;
+        let mut query_rows = statement.query([id]).map_err(|error| {
+            restore_failed(format!("could not query target Codex thread {id}: {error}"))
+        })?;
+        let Some(current_row) = query_rows.next().map_err(|error| {
+            restore_failed(format!("could not read target Codex thread {id}: {error}"))
+        })?
+        else {
+            return Ok(false);
+        };
+        for (index, column) in compared_columns.iter().enumerate() {
+            let current = sqlite_value_as_json(current_row.get_ref(index).map_err(|error| {
+                restore_failed(format!("could not read target Codex thread field: {error}"))
+            })?);
+            if object.get(column) != Some(&current) {
+                return Ok(false);
             }
         }
-        _ => {}
+    }
+    Ok(true)
+}
+
+fn sqlite_thread_columns(connection: &Connection) -> Result<HashSet<String>, RehomeError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(threads)")
+        .map_err(|error| restore_failed(format!("could not inspect target threads: {error}")))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| restore_failed(format!("could not inspect target threads: {error}")))?;
+    let mut columns = HashSet::new();
+    for name in names {
+        columns.insert(name.map_err(|error| {
+            restore_failed(format!("could not read target thread schema: {error}"))
+        })?);
+    }
+    Ok(columns)
+}
+
+fn quote_sql_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sqlite_value_as_json(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(value) => serde_json::Value::from(value),
+        ValueRef::Real(value) => serde_json::Value::from(value),
+        ValueRef::Text(value) => {
+            serde_json::Value::String(String::from_utf8_lossy(value).into_owned())
+        }
+        ValueRef::Blob(value) => serde_json::Value::String(
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        ),
     }
 }
 
 fn normalize_target_component(component: &str, target_os: SourceOs) -> String {
     let normalized = component.nfc().collect::<String>();
-    if target_os == SourceOs::Windows {
+    if matches!(target_os, SourceOs::Windows | SourceOs::Macos) {
         normalized
             .chars()
             .flat_map(char::to_lowercase)
@@ -1013,23 +1300,91 @@ mod tests {
     }
 
     #[test]
-    fn session_rewrites_are_recursive_exact_and_deterministic() {
+    fn final_target_registry_uses_default_macos_collision_keys() {
+        for (first, second) in [
+            ("/restore/Visual/item", "/restore/visual/item"),
+            ("/restore/Caf\u{00e9}/item", "/restore/Cafe\u{0301}/item"),
+        ] {
+            let operations = [first, second]
+                .into_iter()
+                .enumerate()
+                .map(|(index, target)| PlannedOperation {
+                    package_source: format!("source-{index}"),
+                    target: PathBuf::from(target),
+                    expected_previous_hash: None,
+                    action: ChangeKind::Add,
+                    rollback_required: true,
+                })
+                .collect::<Vec<_>>();
+
+            let error = validate_final_targets(
+                &operations,
+                Path::new("/codex"),
+                Path::new("/projects"),
+                SourceOs::Macos,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::RestoreFailed);
+            assert!(error.message.contains("overlap"));
+        }
+    }
+
+    #[test]
+    fn session_rewrites_are_schema_aware_exact_and_deterministic() {
         let source = "codex/sessions/thread.jsonl";
-        let rewrites = vec![ReferenceRewrite {
-            package_source: source.into(),
-            kind: ReferenceRewriteKind::ProjectPath,
-            from: "C:/old".into(),
-            to: "/Users/new".into(),
-        }];
-        let bytes = br#"{"nested":{"cwd":"C:/old"},"note":"prefix C:/old suffix"}
-"#;
-
-        let rewritten = rewrite_jsonl_payload(bytes, &rewrites, source).unwrap();
-
-        assert_eq!(
-            rewritten,
-            br#"{"nested":{"cwd":"/Users/new"},"note":"prefix C:/old suffix"}
-"#
+        let old_id = "11111111-1111-4111-8111-111111111111";
+        let new_id = "22222222-2222-4222-8222-222222222222";
+        let rewrites = vec![
+            ReferenceRewrite {
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::ProjectPath,
+                from: "C:/old".into(),
+                to: "/Users/new".into(),
+            },
+            ReferenceRewrite {
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::ConversationId,
+                from: old_id.into(),
+                to: new_id.into(),
+            },
+            ReferenceRewrite {
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::ConversationTitle,
+                from: "Old title".into(),
+                to: "New title".into(),
+            },
+        ];
+        let bytes = format!(
+            concat!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{old_id}\",\"title\":\"Old title\",\"cwd\":\"C:/old\"}}}}\n",
+                "{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"C:/old\"}}}}\n",
+                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Old title\"}},{{\"type\":\"input_text\",\"text\":\"{old_id}\"}},{{\"type\":\"input_text\",\"text\":\"C:/old\"}}]}}}}\n",
+                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"Old title\"}},{{\"type\":\"output_text\",\"text\":\"{old_id}\"}},{{\"type\":\"output_text\",\"text\":\"C:/old\"}}]}}}}\n",
+                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"output\":\"C:/old\",\"id\":\"{old_id}\",\"title\":\"Old title\"}}}}\n"
+            ),
+            old_id = old_id,
         );
+
+        let rewritten = rewrite_jsonl_payload(bytes.as_bytes(), &rewrites, source).unwrap();
+        let rewritten = String::from_utf8(rewritten).unwrap();
+        let lines = rewritten
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines[0]["payload"]["id"], new_id);
+        assert_eq!(lines[0]["payload"]["title"], "New title");
+        assert_eq!(lines[0]["payload"]["cwd"], "/Users/new");
+        assert_eq!(lines[1]["payload"]["cwd"], "/Users/new");
+        assert_eq!(lines[2]["payload"]["content"][0]["text"], "Old title");
+        assert_eq!(lines[2]["payload"]["content"][1]["text"], old_id);
+        assert_eq!(lines[2]["payload"]["content"][2]["text"], "C:/old");
+        assert_eq!(lines[3]["payload"]["content"][0]["text"], "Old title");
+        assert_eq!(lines[3]["payload"]["content"][1]["text"], old_id);
+        assert_eq!(lines[3]["payload"]["content"][2]["text"], "C:/old");
+        assert_eq!(lines[4]["payload"]["output"], "C:/old");
+        assert_eq!(lines[4]["payload"]["id"], old_id);
+        assert_eq!(lines[4]["payload"]["title"], "Old title");
     }
 }

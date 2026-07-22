@@ -209,7 +209,7 @@ pub(crate) struct VerifiedPayload {
 pub(crate) struct VerifiedPackage {
     pub preview: PackagePreview,
     pub payloads: BTreeMap<String, VerifiedPayload>,
-    pub session_payloads: BTreeMap<String, Vec<u8>>,
+    pub planning_payloads: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
@@ -326,17 +326,29 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         .ok_or_else(|| package_invalid("checksums.sha256 is missing"))?;
     verify_checksums(checksum_bytes, &payload_hashes)?;
 
-    let mut session_payloads = BTreeMap::new();
-    for conversation in &manifest.conversations {
-        let mut entry = archive
-            .by_name(&conversation.archive_path)
-            .map_err(|error| {
-                package_invalid(format!(
-                    "could not reopen verified session payload: {error}"
-                ))
-            })?;
+    let mut planning_sources = manifest
+        .conversations
+        .iter()
+        .map(|conversation| conversation.archive_path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for source in ["codex/session_index.jsonl", "codex/metadata/threads.json"] {
+        if payloads.contains_key(source) {
+            planning_sources.insert(source.to_owned());
+        }
+    }
+    let mut planning_payloads = BTreeMap::new();
+    for source in planning_sources {
+        let mut entry = archive.by_name(&source).map_err(|error| {
+            package_invalid(format!(
+                "could not reopen verified planning payload: {error}"
+            ))
+        })?;
         let bytes = read_payload_entry(&mut entry)?;
-        session_payloads.insert(conversation.archive_path.clone(), bytes);
+        let payload = payloads
+            .get(&source)
+            .ok_or_else(|| package_invalid("verified planning payload metadata is missing"))?;
+        authenticate_payload_bytes(&bytes, payload)?;
+        planning_payloads.insert(source, bytes);
     }
 
     let mut file = archive.into_inner();
@@ -360,7 +372,7 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
             forbidden_files_total,
         },
         payloads,
-        session_payloads,
+        planning_payloads,
     })
 }
 
@@ -1219,6 +1231,36 @@ fn read_payload_entry<R: Read>(reader: &mut R) -> Result<Vec<u8>, RehomeError> {
         ));
     }
     Ok(bytes)
+}
+
+fn authenticate_payload_bytes(bytes: &[u8], verified: &VerifiedPayload) -> Result<(), RehomeError> {
+    let content_hash = format!("{:x}", Sha256::digest(bytes));
+    if bytes.len() as u64 != verified.size_bytes
+        || !content_hash.eq_ignore_ascii_case(&verified.content_hash)
+    {
+        return Err(RehomeError::new(
+            ErrorCode::ChecksumMismatch,
+            "ZIP payload changed after checksum verification",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod authenticated_payload_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_consumed_payload_bytes_that_do_not_match_the_verified_hash() {
+        let verified = VerifiedPayload {
+            content_hash: format!("{:x}", Sha256::digest(b"verified bytes")),
+            size_bytes: b"verified bytes".len() as u64,
+        };
+
+        let error = authenticate_payload_bytes(b"tampered bytes", &verified).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ChecksumMismatch);
+    }
 }
 
 fn hash_archive_file(file: &mut fs::File) -> Result<String, RehomeError> {

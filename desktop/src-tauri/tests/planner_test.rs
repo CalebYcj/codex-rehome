@@ -8,6 +8,7 @@ use rehome_desktop_lib::core::{
     package::inspect_package,
     planner::build_restore_plan,
 };
+use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::{
     error::Error,
@@ -194,6 +195,31 @@ fn branch_import_is_deterministic_and_exposes_every_package_reference_rewrite(
 }
 
 #[test]
+fn branch_import_never_classifies_required_bridge_merges_as_unchanged() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = planner_fixture(None)?;
+    fixture.target.conversations = vec![conversation(checksum(b"different session\n"))];
+    write_target_session(&fixture, b"different session\n")?;
+    fs::write(
+        fixture.target.codex_home.join("session_index.jsonl"),
+        index_bytes(),
+    )?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::ImportAsBranch);
+    assert_eq!(
+        operation_for(&plan.operations, INDEX_SOURCE).action,
+        ChangeKind::Update
+    );
+    assert_eq!(
+        operation_for(&plan.operations, THREADS_SOURCE).action,
+        ChangeKind::Update
+    );
+    Ok(())
+}
+
+#[test]
 fn existing_deterministic_branch_target_is_never_overwritten() -> Result<(), Box<dyn Error>> {
     let mut fixture = planner_fixture(None)?;
     fixture.target.conversations = vec![conversation(checksum(b"different session\n"))];
@@ -331,7 +357,35 @@ fn repeated_restore_skips_its_existing_rewritten_branch() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn all_skipped_sessions_do_not_emit_bridge_metadata_operations() -> Result<(), Box<dyn Error>> {
+fn all_skipped_fully_registered_sessions_do_not_emit_bridge_metadata_operations(
+) -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let incoming = incoming_session_bytes();
+    fixture.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(
+        &fixture,
+        &rewritten_session_bytes(
+            Uuid::parse_str(TASK_ID)?,
+            "Synthetic migration thread",
+            &fixture.projects_root.join("visual"),
+        ),
+    )?;
+    write_ready_bridge_metadata(&fixture, Uuid::parse_str(TASK_ID)?)?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::Skip);
+    assert!(!plan.operations.iter().any(|operation| {
+        matches!(
+            operation.package_source.as_str(),
+            INDEX_SOURCE | THREADS_SOURCE
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn skipped_session_repairs_missing_index_and_sqlite_registration() -> Result<(), Box<dyn Error>> {
     let mut fixture = planner_fixture(None)?;
     let incoming = incoming_session_bytes();
     fixture.target.conversations = vec![conversation(checksum(&incoming))];
@@ -347,12 +401,51 @@ fn all_skipped_sessions_do_not_emit_bridge_metadata_operations() -> Result<(), B
     let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
 
     assert_eq!(plan.sessions[0].action, SessionAction::Skip);
-    assert!(!plan.operations.iter().any(|operation| {
-        matches!(
-            operation.package_source.as_str(),
-            INDEX_SOURCE | THREADS_SOURCE
-        )
-    }));
+    assert_eq!(
+        operation_for(&plan.operations, INDEX_SOURCE).action,
+        ChangeKind::Add
+    );
+    assert_eq!(
+        operation_for(&plan.operations, THREADS_SOURCE).action,
+        ChangeKind::Update
+    );
+    Ok(())
+}
+
+#[test]
+fn skipped_session_repairs_stale_index_and_sqlite_metadata() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let incoming = incoming_session_bytes();
+    fixture.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(
+        &fixture,
+        &rewritten_session_bytes(
+            Uuid::parse_str(TASK_ID)?,
+            "Synthetic migration thread",
+            &fixture.projects_root.join("visual"),
+        ),
+    )?;
+    fs::write(
+        fixture.target.codex_home.join("session_index.jsonl"),
+        format!("{{\"id\":\"{TASK_ID}\",\"title\":\"Stale\",\"cwd\":\"C:/stale\"}}\n"),
+    )?;
+    let connection = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
+    connection.execute(
+        "INSERT INTO threads (id, title, cwd) VALUES (?1, 'Stale', 'C:/stale')",
+        params![TASK_ID],
+    )?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(plan.sessions[0].action, SessionAction::Skip);
+    assert_eq!(
+        operation_for(&plan.operations, INDEX_SOURCE).action,
+        ChangeKind::Update
+    );
+    assert_eq!(
+        operation_for(&plan.operations, THREADS_SOURCE).action,
+        ChangeKind::Update
+    );
     Ok(())
 }
 
@@ -638,6 +731,42 @@ fn project_target_names_use_unicode_normalized_collision_rules() -> Result<(), B
 }
 
 #[test]
+fn macos_project_target_names_use_case_insensitive_unicode_collision_rules(
+) -> Result<(), Box<dyn Error>> {
+    for (first, second) in [("Visual", "visual"), ("Caf\u{00e9}", "Cafe\u{0301}")] {
+        let temp = tempfile::tempdir()?;
+        let mut preview = project_preview(temp.path(), true)?;
+        preview.manifest.projects[0].name = first.into();
+        preview.manifest.projects[1].name = second.into();
+        let manifest = preview.manifest.clone();
+        write_project_preview_payloads(&preview.package_path, &manifest)?;
+        preview = inspect_package(&preview.package_path)?;
+        let target = TargetInventory {
+            codex_home: PathBuf::from("/Users/test/.codex"),
+            target_os: SourceOs::Macos,
+            target_arch: "aarch64".into(),
+            counts: ContentCounts::default(),
+            projects: vec![],
+            conversations: vec![],
+        };
+
+        let error = build_restore_plan(
+            &preview,
+            &target,
+            Path::new("/Users/test/Codex-Restored-Projects"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code,
+            ErrorCode::ProjectConflict,
+            "{first:?} / {second:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn derived_ids_are_reserved_against_future_planned_imports() -> Result<(), Box<dyn Error>> {
     let mut fixture = planner_fixture(None)?;
     let package_id = Uuid::parse_str(PACKAGE_ID)?;
@@ -705,7 +834,7 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
     let codex_home = target_root.join(".codex");
     let projects_root = target_root.join("projects");
     fs::create_dir_all(&codex_home)?;
-    fs::write(codex_home.join("state_5.sqlite"), b"target database")?;
+    create_target_database(&codex_home.join("state_5.sqlite"))?;
 
     let project_id = Uuid::parse_str(PROJECT_ID)?;
     let session_bytes = incoming_session_bytes();
@@ -774,6 +903,77 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
         projects_root,
         project_target,
     })
+}
+
+fn write_project_preview_payloads(
+    path: &Path,
+    manifest: &PackageManifest,
+) -> Result<(), Box<dyn Error>> {
+    write_package(
+        path,
+        manifest,
+        &[
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+            (
+                "projects/33333333-3333-4333-8333-333333333333/files/README.md",
+                b"second project\n",
+            ),
+            (
+                "projects/33333333-3333-4333-8333-333333333333/project.json",
+                b"{}",
+            ),
+        ],
+    )
+}
+
+fn create_target_database(path: &Path) -> Result<(), Box<dyn Error>> {
+    let connection = Connection::open(path)?;
+    connection.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            cwd TEXT,
+            rollout_path TEXT,
+            title TEXT,
+            updated_at INTEGER,
+            archived INTEGER,
+            has_user_event INTEGER,
+            preview TEXT
+        );",
+    )?;
+    Ok(())
+}
+
+fn write_ready_bridge_metadata(
+    fixture: &PlannerFixture,
+    task_id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let project_path = fixture.projects_root.join("visual");
+    let ready_index = serde_json::to_vec(&serde_json::json!({
+        "id": task_id.to_string(),
+        "title": "Synthetic migration thread",
+        "cwd": project_path.to_string_lossy(),
+        "target_only": "preserve me",
+    }))?;
+    let mut ready_index_line = ready_index;
+    ready_index_line.push(b'\n');
+    fs::write(
+        fixture.target.codex_home.join("session_index.jsonl"),
+        ready_index_line,
+    )?;
+    let connection = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
+    connection.execute(
+        "INSERT INTO threads (id, title, cwd) VALUES (?1, ?2, ?3)",
+        params![
+            task_id.to_string(),
+            "Synthetic migration thread",
+            project_path.to_string_lossy().as_ref()
+        ],
+    )?;
+    Ok(())
 }
 
 fn project_only_preview(root: &Path) -> Result<PackagePreview, Box<dyn Error>> {
@@ -883,11 +1083,17 @@ fn incoming_session_bytes() -> Vec<u8> {
 }
 
 fn thread_metadata_bytes() -> Vec<u8> {
-    format!("[{{\"id\":\"{TASK_ID}\"}}]").into_bytes()
+    format!(
+        "[{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\"}}]"
+    )
+    .into_bytes()
 }
 
 fn index_bytes() -> Vec<u8> {
-    format!("{{\"id\":\"{TASK_ID}\"}}\n").into_bytes()
+    format!(
+        "{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\"}}\n"
+    )
+    .into_bytes()
 }
 
 fn rewritten_session_bytes(task_id: Uuid, title: &str, project_path: &Path) -> Vec<u8> {
