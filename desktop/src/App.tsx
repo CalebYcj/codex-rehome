@@ -9,7 +9,7 @@ import {
 
 import "./App.css";
 
-type View = "home" | "send" | "receive" | "history";
+export type View = "home" | "send" | "receive" | "history";
 
 const views: Array<{
   id: View;
