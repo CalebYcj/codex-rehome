@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    env, fs,
+    env, fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -42,8 +42,7 @@ pub fn resolve_codex_home_for_os(
     source_os: SourceOs,
 ) -> Result<PathBuf, RehomeError> {
     let platform_default = match source_os {
-        SourceOs::Windows => nonempty_path(context.user_profile.clone())
-            .or_else(|| nonempty_path(context.home.clone())),
+        SourceOs::Windows => nonempty_path(context.user_profile.clone()),
         SourceOs::Macos => nonempty_path(context.home.clone()),
     };
 
@@ -133,6 +132,8 @@ pub fn discover_codex_with_context(
             read_state_database_roots(path, &mut project_paths, &mut seen_projects, &mut warnings)
         })
         .unwrap_or(0);
+
+    dedupe_warnings(&mut warnings);
 
     Ok(CodexInventory {
         codex_home,
@@ -244,12 +245,25 @@ fn collect_files_inner(
     let metadata = match fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(_) => {
-            warnings.push(format!("Could not inspect optional {label} data"));
+        Err(error) => {
+            push_warning_unique(
+                warnings,
+                format!(
+                    "Could not inspect optional {label} data at {}: {error}",
+                    root.display()
+                ),
+            );
             return;
         }
     };
     if metadata.file_type().is_symlink() {
+        push_warning_unique(
+            warnings,
+            format!(
+                "Skipped symbolic link in optional {label} data: {}",
+                root.display()
+            ),
+        );
         return;
     }
     if metadata.is_file() {
@@ -264,19 +278,50 @@ fn collect_files_inner(
 
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => {
-            warnings.push(format!("Could not read optional {label} data"));
+        Err(error) => {
+            push_warning_unique(
+                warnings,
+                format!(
+                    "Could not read optional {label} data at {}: {error}",
+                    root.display()
+                ),
+            );
             return;
         }
     };
-    let mut children = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
+    let mut children = collect_child_paths(
+        entries.map(|entry| entry.map(|entry| entry.path())),
+        root,
+        label,
+        warnings,
+    );
     children.sort();
     for child in children {
         collect_files_inner(&child, matches, label, warnings, files);
     }
+}
+
+fn collect_child_paths(
+    entries: impl Iterator<Item = io::Result<PathBuf>>,
+    root: &Path,
+    label: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<PathBuf> {
+    entries
+        .filter_map(|entry| match entry {
+            Ok(path) => Some(path),
+            Err(error) => {
+                push_warning_unique(
+                    warnings,
+                    format!(
+                        "Could not read a directory entry in optional {label} data at {}: {error}",
+                        root.display(),
+                    ),
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 fn newest_state_database(codex_home: &Path, warnings: &mut Vec<String>) -> Option<PathBuf> {
@@ -288,7 +333,20 @@ fn newest_state_database(codex_home: &Path, warnings: &mut Vec<String>) -> Optio
         }
     };
     let mut candidates = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                push_warning_unique(
+                    warnings,
+                    format!(
+                        "Could not read a Codex home entry while listing state databases at {}: {error}",
+                        codex_home.display()
+                    ),
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
@@ -311,7 +369,7 @@ fn newest_state_database(codex_home: &Path, warnings: &mut Vec<String>) -> Optio
 fn read_global_project_roots(
     path: &Path,
     projects: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
+    seen: &mut HashSet<ProjectPathKey>,
     warnings: &mut Vec<String>,
 ) {
     match fs::symlink_metadata(path) {
@@ -379,11 +437,20 @@ fn read_global_project_roots(
 fn read_state_database_roots(
     path: &Path,
     projects: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
+    seen: &mut HashSet<ProjectPathKey>,
     warnings: &mut Vec<String>,
 ) -> u64 {
+    let snapshot = match StateDatabaseSnapshot::create(path) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warnings.push(format!(
+                "Could not snapshot the newest Codex state database: {error}"
+            ));
+            return 0;
+        }
+    };
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let connection = match Connection::open_with_flags(path, flags) {
+    let connection = match Connection::open_with_flags(&snapshot.database_path, flags) {
         Ok(connection) => connection,
         Err(_) => {
             warnings.push("Could not open the newest Codex state database read-only".to_owned());
@@ -427,14 +494,165 @@ fn read_state_database_roots(
     count
 }
 
-fn push_unique_path(raw: &str, projects: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+fn push_unique_path(raw: &str, projects: &mut Vec<PathBuf>, seen: &mut HashSet<ProjectPathKey>) {
     if raw.is_empty() {
         return;
     }
     let path = PathBuf::from(raw);
-    if seen.insert(path.clone()) {
+    if seen.insert(ProjectPathKey::new(raw, &path)) {
         projects.push(path);
     }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum ProjectPathKey {
+    Windows(String),
+    Native(PathBuf),
+}
+
+impl ProjectPathKey {
+    fn new(raw: &str, path: &Path) -> Self {
+        if looks_like_windows_path(raw) {
+            let normalized = raw.replace('\\', "/");
+            let prefix = if normalized.starts_with("//") {
+                "//"
+            } else {
+                ""
+            };
+            let components = normalized
+                .split('/')
+                .filter(|component| !component.is_empty())
+                .collect::<Vec<_>>()
+                .join("/");
+            Self::Windows(format!("{prefix}{components}").to_lowercase())
+        } else {
+            Self::Native(path.to_path_buf())
+        }
+    }
+}
+
+fn looks_like_windows_path(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    raw.contains('\\')
+        || raw.starts_with("//")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+struct StateDatabaseSnapshot {
+    _directory: tempfile::TempDir,
+    database_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceFileFingerprint {
+    suffix: &'static str,
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+impl StateDatabaseSnapshot {
+    fn create(source_database: &Path) -> io::Result<Self> {
+        const MAX_ATTEMPTS: usize = 3;
+
+        let directory = tempfile::Builder::new()
+            .prefix("rehome-state-snapshot-")
+            .tempdir()?;
+        let file_name = source_database.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "state database has no file name",
+            )
+        })?;
+        let database_path = directory.path().join(file_name);
+
+        let mut last_error = None;
+        for _ in 0..MAX_ATTEMPTS {
+            match copy_state_database_once(source_database, &database_path, directory.path()) {
+                Ok(true) => {
+                    return Ok(Self {
+                        _directory: directory,
+                        database_path,
+                    });
+                }
+                Ok(false) => {
+                    last_error = Some(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "state database changed while it was being snapshotted",
+                    ));
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| io::Error::other("state database snapshot did not run")))
+    }
+}
+
+fn copy_state_database_once(
+    source_database: &Path,
+    database_path: &Path,
+    snapshot_directory: &Path,
+) -> io::Result<bool> {
+    let before = source_database_files(source_database)?;
+    clear_snapshot_files(snapshot_directory)?;
+    for source in &before {
+        let destination = sqlite_sidecar_path(database_path, source.suffix);
+        fs::copy(&source.path, destination)?;
+    }
+    Ok(before == source_database_files(source_database)?)
+}
+
+fn source_database_files(database: &Path) -> io::Result<Vec<SourceFileFingerprint>> {
+    let mut files = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let path = sqlite_sidecar_path(database, suffix);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                files.push(SourceFileFingerprint {
+                    suffix,
+                    path,
+                    len: metadata.len(),
+                    modified: metadata.modified()?,
+                });
+            }
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "state database snapshot source is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !suffix.is_empty() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(files)
+}
+
+fn clear_snapshot_files(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(database: &Path, suffix: &str) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+fn push_warning_unique(warnings: &mut Vec<String>, warning: impl Into<String>) {
+    let warning = warning.into();
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
+}
+
+fn dedupe_warnings(warnings: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    warnings.retain(|warning| seen.insert(warning.clone()));
 }
 
 fn extension_is(path: &Path, expected: &str) -> bool {
@@ -447,4 +665,36 @@ fn file_name_is(path: &Path, expected: &str) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_child_paths;
+    use std::{
+        io,
+        path::{Path, PathBuf},
+    };
+
+    #[test]
+    fn individual_directory_entry_errors_warn_once_and_keep_readable_children() {
+        let readable = PathBuf::from("sessions/readable.jsonl");
+        let entries = vec![
+            Ok(readable.clone()),
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+        ];
+        let mut warnings = Vec::new();
+
+        let children = collect_child_paths(
+            entries.into_iter(),
+            Path::new("sessions"),
+            "sessions",
+            &mut warnings,
+        );
+
+        assert_eq!(children, vec![readable]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("directory entry"));
+        assert!(warnings[0].contains("sessions"));
+    }
 }

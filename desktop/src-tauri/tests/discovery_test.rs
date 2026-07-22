@@ -11,8 +11,16 @@ use rehome_desktop_lib::core::{
     models::SourceOs,
     paths::{normalize_entry, validate_source_containment},
 };
+use rusqlite::{params, Connection};
 use serde_json::json;
-use std::{error::Error, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 #[test]
 fn mandatory_exclusions_are_component_aware() {
@@ -120,6 +128,26 @@ fn portable_archive_entries_reject_unsafe_or_ambiguous_names() {
 }
 
 #[test]
+fn portable_archive_entries_reject_windows_forbidden_characters_and_controls() {
+    for character in ['<', '>', '"', '|', '?', '*'] {
+        let entry = format!("project/file{character}name");
+        assert!(
+            normalize_entry(Path::new(&entry)).is_err(),
+            "expected rejection: {entry:?}"
+        );
+    }
+
+    for control in '\u{1}'..='\u{1f}' {
+        let entry = format!("project/file{control}name");
+        assert!(
+            normalize_entry(Path::new(&entry)).is_err(),
+            "expected rejection of U+{:04X}",
+            control as u32
+        );
+    }
+}
+
+#[test]
 fn codex_home_resolution_has_explicit_precedence() {
     let context = DiscoveryContext {
         codex_home_env: Some(Path::new("env-home").to_path_buf()),
@@ -154,6 +182,15 @@ fn codex_home_resolution_has_explicit_precedence() {
         resolve_codex_home_for_os(None, &mac_default, SourceOs::Macos).unwrap(),
         Path::new("unix-user").join(".codex")
     );
+
+    let windows_with_only_home = DiscoveryContext {
+        codex_home_env: None,
+        user_profile: None,
+        home: Some(Path::new("unix-user").to_path_buf()),
+    };
+    let error =
+        resolve_codex_home_for_os(None, &windows_with_only_home, SourceOs::Windows).unwrap_err();
+    assert_eq!(error.code, ErrorCode::CodexNotFound);
 }
 
 #[test]
@@ -220,6 +257,71 @@ fn discovery_combines_global_state_and_sqlite_roots_in_stable_order() -> Result<
         inventory.project_paths,
         vec![first, second, Path::new(WINDOWS_CWD).to_path_buf()]
     );
+    Ok(())
+}
+
+#[test]
+fn discovery_dedupes_windows_paths_without_rewriting_the_first_path() -> Result<(), Box<dyn Error>>
+{
+    let fixture = synthetic_codex_fixture()?;
+    let first = r"C:\Users\OldUser\Documents\Visual\";
+    fs::write(
+        fixture.codex_home.join(".codex-global-state.json"),
+        serde_json::to_vec(&json!({
+            "electron-saved-workspace-roots": [first]
+        }))?,
+    )?;
+    let connection = Connection::open(&fixture.state_db_path)?;
+    connection.execute(
+        "UPDATE threads SET cwd = ?1",
+        [r"c:/users/olduser/documents/visual"],
+    )?;
+    drop(connection);
+
+    let inventory =
+        discover_codex_with_context(Some(fixture.codex_home), &DiscoveryContext::default())?;
+
+    assert_eq!(inventory.project_paths, vec![PathBuf::from(first)]);
+    Ok(())
+}
+
+#[test]
+fn discovery_reads_a_private_wal_snapshot_without_touching_source_sidecars(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = wal_codex_fixture()?;
+    let before = snapshot_directory(&fixture.codex_home)?;
+    assert!(before.contains_key(&OsString::from("state_7.sqlite-wal")));
+    assert!(!before.contains_key(&OsString::from("state_7.sqlite-shm")));
+
+    let inventory = discover_codex_with_context(
+        Some(fixture.codex_home.clone()),
+        &DiscoveryContext::default(),
+    )?;
+
+    assert_eq!(inventory.counts.sqlite_threads, 1);
+    assert_eq!(inventory.project_paths, vec![PathBuf::from(WINDOWS_CWD)]);
+    assert_eq!(snapshot_directory(&fixture.codex_home)?, before);
+    Ok(())
+}
+
+#[test]
+fn traversal_warns_when_a_linked_directory_is_skipped() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let outside = fixture.root.join("outside-sessions");
+    let linked = fixture.codex_home.join("sessions").join("linked");
+    fs::create_dir(&outside)?;
+    fs::write(outside.join("outside.jsonl"), b"{}\n")?;
+    create_directory_link(&outside, &linked)?;
+
+    let inventory =
+        discover_codex_with_context(Some(fixture.codex_home), &DiscoveryContext::default())?;
+
+    assert_eq!(inventory.counts.conversations, 1);
+    assert!(inventory.warnings.iter().any(|warning| {
+        warning.contains("sessions")
+            && warning.contains("symbolic link")
+            && warning.contains("linked")
+    }));
     Ok(())
 }
 
@@ -377,6 +479,62 @@ fn windows_symlink_privilege_is_unavailable(error: &std::io::Error) -> bool {
 }
 
 #[cfg(unix)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    create_junction(target, link)
+}
+
+#[cfg(windows)]
+fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn junctioned_codex_home_is_rejected_without_symlink_privileges() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let real_home = temp.path().join("real-codex-home");
+    let junction_home = temp.path().join("junction-codex-home");
+    fs::create_dir(&real_home)?;
+    create_junction(&real_home, &junction_home)?;
+
+    let error =
+        discover_codex_with_context(Some(junction_home), &DiscoveryContext::default()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::CodexNotFound);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn source_containment_rejects_junctions_escaping_the_selected_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("selected");
+    let outside = temp.path().join("outside");
+    let junction = root.join("junction");
+    fs::create_dir(&root)?;
+    fs::create_dir(&outside)?;
+    create_junction(&outside, &junction)?;
+
+    assert!(validate_source_containment(&root, &junction).is_err());
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn source_containment_rejects_symlinks_escaping_the_selected_root() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
@@ -390,6 +548,83 @@ fn source_containment_rejects_symlinks_escaping_the_selected_root() -> Result<()
 
     assert!(validate_source_containment(&root, &root.join("link")).is_err());
     Ok(())
+}
+
+struct WalCodexFixture {
+    _temp_dir: tempfile::TempDir,
+    _writer: Connection,
+    codex_home: PathBuf,
+}
+
+fn wal_codex_fixture() -> Result<WalCodexFixture, Box<dyn Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let generator = temp_dir.path().join("generator.sqlite");
+    let codex_home = temp_dir.path().join(".codex");
+    fs::create_dir(&codex_home)?;
+
+    let writer = Connection::open(&generator)?;
+    writer.pragma_update(None, "journal_mode", "WAL")?;
+    writer.pragma_update(None, "wal_autocheckpoint", 0)?;
+    writer.execute(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT NOT NULL)",
+        [],
+    )?;
+    writer.execute(
+        "INSERT INTO threads (id, cwd) VALUES (?1, ?2)",
+        params!["wal-thread", WINDOWS_CWD],
+    )?;
+
+    let source_wal = sqlite_sidecar(&generator, "-wal");
+    let state_db = codex_home.join("state_7.sqlite");
+    fs::copy(&generator, &state_db)?;
+    fs::copy(source_wal, sqlite_sidecar(&state_db, "-wal"))?;
+
+    Ok(WalCodexFixture {
+        _temp_dir: temp_dir,
+        _writer: writer,
+        codex_home,
+    })
+}
+
+fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DirectoryEntrySnapshot {
+    bytes: Option<Vec<u8>>,
+    is_file: bool,
+    is_dir: bool,
+    len: u64,
+    readonly: bool,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+}
+
+fn snapshot_directory(
+    directory: &Path,
+) -> Result<BTreeMap<OsString, DirectoryEntrySnapshot>, Box<dyn Error>> {
+    let mut snapshot = BTreeMap::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        snapshot.insert(
+            entry.file_name(),
+            DirectoryEntrySnapshot {
+                bytes: metadata.is_file().then(|| fs::read(&path)).transpose()?,
+                is_file: metadata.is_file(),
+                is_dir: metadata.is_dir(),
+                len: metadata.len(),
+                readonly: metadata.permissions().readonly(),
+                modified: metadata.modified().ok(),
+                created: metadata.created().ok(),
+            },
+        );
+    }
+    Ok(snapshot)
 }
 
 #[cfg(windows)]

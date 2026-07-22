@@ -31,6 +31,14 @@ pub fn normalize_entry(path: &Path) -> Result<String, RehomeError> {
                 "drive prefixes and alternate data streams are not allowed",
             ));
         }
+        if component.chars().any(|character| {
+            matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+                || ('\u{1}'..='\u{1f}').contains(&character)
+        }) {
+            return Err(invalid_entry(
+                "archive entry contains characters forbidden on Windows",
+            ));
+        }
         if component.trim() != component || component.ends_with('.') {
             return Err(invalid_entry("archive entry is not portable"));
         }
