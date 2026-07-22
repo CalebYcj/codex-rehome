@@ -883,12 +883,11 @@ fn checksum(bytes: &[u8]) -> String {
 }
 
 fn current_source_os() -> SourceOs {
-    #[cfg(target_os = "windows")]
-    return SourceOs::Windows;
-    #[cfg(target_os = "macos")]
-    return SourceOs::Macos;
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    return SourceOs::Linux;
+    if cfg!(target_os = "macos") {
+        SourceOs::Macos
+    } else {
+        SourceOs::Windows
+    }
 }
 
 fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
