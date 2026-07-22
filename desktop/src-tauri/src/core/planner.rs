@@ -236,6 +236,15 @@ pub fn build_restore_plan(
     }
     if !sessions.is_empty() {
         let planned_rewrites = rewrites.values().cloned().collect::<Vec<_>>();
+        let desired_thread_rollout_paths = sessions
+            .iter()
+            .map(|session| {
+                Ok((
+                    session.target_task_id.to_string(),
+                    target_path_text(&session.target)?.to_owned(),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, RehomeError>>()?;
         let all_sessions_skipped = sessions
             .iter()
             .all(|session| session.action == SessionAction::Skip);
@@ -273,6 +282,7 @@ pub fn build_restore_plan(
                 target_path,
                 bytes,
                 &planned_rewrites,
+                &desired_thread_rollout_paths,
                 all_sessions_skipped,
                 target.target_os,
             )? {
@@ -447,12 +457,13 @@ fn plan_thread_metadata_merge(
     target: PathBuf,
     bytes: &[u8],
     rewrites: &[ReferenceRewrite],
+    desired_rollout_paths: &BTreeMap<String, String>,
     all_sessions_skipped: bool,
     target_os: SourceOs,
 ) -> Result<Option<PlannedOperation>, RehomeError> {
     let state = target_state(&target, target_os)?;
     if let TargetState::File(hash) = &state {
-        let desired = rewrite_metadata_document(bytes, rewrites, source)?;
+        let desired = rewrite_metadata_document(bytes, rewrites, source, desired_rollout_paths)?;
         let metadata_ready = sqlite_threads_contain(&target, &desired)?;
         ensure_target_hash(&target, hash)?;
         if all_sessions_skipped && metadata_ready {
@@ -855,6 +866,7 @@ fn rewrite_metadata_document(
     bytes: &[u8],
     rewrites: &[ReferenceRewrite],
     source: &str,
+    desired_rollout_paths: &BTreeMap<String, String>,
 ) -> Result<serde_json::Value, RehomeError> {
     let selected = rewrites
         .iter()
@@ -866,12 +878,31 @@ fn rewrite_metadata_document(
         serde_json::Value::Array(values) => {
             for value in values {
                 rewrite_scoped_metadata_row(value, &selected);
+                set_desired_rollout_path(value, desired_rollout_paths);
             }
         }
-        serde_json::Value::Object(_) => rewrite_scoped_metadata_row(&mut value, &selected),
+        serde_json::Value::Object(_) => {
+            rewrite_scoped_metadata_row(&mut value, &selected);
+            set_desired_rollout_path(&mut value, desired_rollout_paths);
+        }
         _ => return Err(package_invalid("bridge metadata JSON has an invalid shape")),
     }
     Ok(value)
+}
+
+fn set_desired_rollout_path(
+    value: &mut serde_json::Value,
+    desired_rollout_paths: &BTreeMap<String, String>,
+) {
+    let desired = metadata_id(value)
+        .and_then(|id| desired_rollout_paths.get(id))
+        .cloned();
+    if let (Some(object), Some(desired)) = (value.as_object_mut(), desired) {
+        object.insert(
+            "rollout_path".to_owned(),
+            serde_json::Value::String(desired),
+        );
+    }
 }
 
 fn read_hashed_target(path: &Path, expected_hash: &str) -> Result<Vec<u8>, RehomeError> {
@@ -996,6 +1027,9 @@ fn sqlite_threads_contain(
             .ok_or_else(|| package_invalid("thread metadata row must be a JSON object"))?;
         let id = metadata_id(desired_row)
             .ok_or_else(|| package_invalid("thread metadata row is missing its conversation ID"))?;
+        if object.contains_key("rollout_path") && !columns.contains("rollout_path") {
+            return Ok(false);
+        }
         let compared_columns = object
             .keys()
             .filter(|column| columns.contains(column.as_str()))

@@ -13,7 +13,7 @@ use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     env, fs,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -449,7 +449,7 @@ impl PayloadCollection {
 #[derive(Default)]
 struct SessionIndexMetadata {
     bytes: Vec<u8>,
-    by_id: HashMap<Uuid, Value>,
+    by_id: BTreeMap<Uuid, Value>,
 }
 
 fn stage_projects(
@@ -642,12 +642,7 @@ fn read_selected_session_index(
             continue;
         };
         if selected.contains(&id) {
-            let encoded = serde_json::to_vec(&value).map_err(|error| {
-                package_invalid(format!("could not encode session index: {error}"))
-            })?;
-            result.bytes.extend_from_slice(&encoded);
-            result.bytes.push(b'\n');
-            ensure_control_size("codex/session_index.jsonl", result.bytes.len() as u64)?;
+            // Source order is stable, so the last row is the deterministic winner.
             result.by_id.insert(id, value);
         }
     }
@@ -655,6 +650,13 @@ fn read_selected_session_index(
         return Err(package_invalid(
             "source file changed in size or modification time while being read",
         ));
+    }
+    for value in result.by_id.values() {
+        let encoded = serde_json::to_vec(value)
+            .map_err(|error| package_invalid(format!("could not encode session index: {error}")))?;
+        result.bytes.extend_from_slice(&encoded);
+        result.bytes.push(b'\n');
+        ensure_control_size("codex/session_index.jsonl", result.bytes.len() as u64)?;
     }
     Ok(result)
 }

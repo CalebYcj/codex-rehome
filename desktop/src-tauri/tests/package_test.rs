@@ -171,6 +171,50 @@ fn packages_selected_fixture_content_without_mutating_sources() -> Result<(), Bo
 }
 
 #[test]
+fn package_deduplicates_selected_index_rows_with_a_stable_last_row_winner(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let first = serde_json::json!({
+        "id": THREAD_ID,
+        "title": "Older title",
+        "updated_at": "2026-07-21T00:00:00Z",
+        "rollout_path": "C:/older.jsonl",
+    });
+    let winner = serde_json::json!({
+        "id": THREAD_ID,
+        "title": "Stable winner",
+        "updated_at": "2026-07-22T00:00:00Z",
+        "rollout_path": "C:/winner.jsonl",
+    });
+    fs::write(
+        &fixture.session_index_path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first)?,
+            serde_json::to_string(&winner)?
+        ),
+    )?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("deduplicated-index.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let index = String::from_utf8(read_zip_entry(&package, "codex/session_index.jsonl")?)?;
+    let rows = index
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?;
+    assert_eq!(rows, vec![winner]);
+    let preview = inspect_package(&package)?;
+    assert_eq!(preview.manifest.conversations[0].title, "Stable winner");
+    assert_eq!(
+        preview.manifest.conversations[0].updated_at,
+        "2026-07-22T00:00:00Z"
+    );
+    Ok(())
+}
+
+#[test]
 fn package_exports_threads_from_a_private_wal_snapshot() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let generator_directory = tempfile::tempdir()?;

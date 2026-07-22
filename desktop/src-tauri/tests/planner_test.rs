@@ -486,6 +486,82 @@ fn stale_source_rollout_path_is_not_ready() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn missing_exported_rollout_path_requires_exact_planned_sqlite_path() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = planner_fixture(None)?;
+    let incoming = incoming_session_bytes();
+    let thread_metadata = format!(
+        "[{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"C:/Users/OldUser/Documents/visual\"}}]"
+    )
+    .into_bytes();
+    let manifest = fixture.preview.manifest.clone();
+    write_package(
+        &fixture.preview.package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, thread_metadata.as_slice()),
+            (INDEX_SOURCE, index_bytes().as_slice()),
+            (SESSION_SOURCE, incoming.as_slice()),
+            ("codex/skills/example/SKILL.md", b"# Example\n"),
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    fixture.preview = inspect_package(&fixture.preview.package_path)?;
+    fixture.target.conversations = vec![conversation(checksum(&incoming))];
+    write_target_session(
+        &fixture,
+        &rewritten_session_bytes(
+            Uuid::parse_str(TASK_ID)?,
+            "Synthetic migration thread",
+            &fixture.projects_root.join("visual"),
+        ),
+    )?;
+    let planned_target = target_session_path(&fixture);
+    write_ready_bridge_metadata(
+        &fixture,
+        Uuid::parse_str(TASK_ID)?,
+        "Synthetic migration thread",
+        &planned_target,
+    )?;
+    let connection = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
+
+    connection.execute(
+        "UPDATE threads SET rollout_path = NULL WHERE id = ?1",
+        [TASK_ID],
+    )?;
+    let null_plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    assert_eq!(
+        operation_for(&null_plan.operations, THREADS_SOURCE).action,
+        ChangeKind::Update
+    );
+
+    connection.execute(
+        "UPDATE threads SET rollout_path = 'C:/stale.jsonl' WHERE id = ?1",
+        [TASK_ID],
+    )?;
+    let stale_plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    assert_eq!(
+        operation_for(&stale_plan.operations, THREADS_SOURCE).action,
+        ChangeKind::Update
+    );
+
+    connection.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        params![planned_target.to_string_lossy().as_ref(), TASK_ID],
+    )?;
+    let ready_plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    assert!(!ready_plan
+        .operations
+        .iter()
+        .any(|operation| operation.package_source == THREADS_SOURCE));
+    Ok(())
+}
+
+#[test]
 fn duplicate_target_index_rows_plan_a_repair() -> Result<(), Box<dyn Error>> {
     let mut fixture = planner_fixture(None)?;
     let incoming = incoming_session_bytes();
