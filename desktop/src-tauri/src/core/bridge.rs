@@ -7,7 +7,11 @@ use crate::core::{
     package::inspect_package_for_planning,
     planner::rewrite_jsonl_payload,
 };
-use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
+use chrono::DateTime;
+use rusqlite::{
+    backup::Backup, params_from_iter, types::Value as SqlValue, Connection, OpenFlags,
+    OptionalExtension,
+};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,8 +23,10 @@ use std::{
     path::Path,
     path::PathBuf,
     process::Command,
+    time::Duration,
 };
 use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 const INDEX_IMPORT_FIELDS: &[&str] = &[
     "archived",
@@ -34,6 +40,14 @@ const INDEX_IMPORT_FIELDS: &[&str] = &[
     "rollout_path",
     "title",
     "updated_at",
+];
+const INDEX_REPAIR_FIELDS: &[&str] = &[
+    "cwd",
+    "project",
+    "project_id",
+    "project_path",
+    "rollout",
+    "rollout_path",
 ];
 const THREAD_IMPORT_FIELDS: &[&str] = &[
     "id",
@@ -158,6 +172,11 @@ pub fn rewrite_session_jsonl(
 
 pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, RehomeError> {
     let verified = inspect_package_for_planning(&plan.package_path)?;
+    if verified.preview.archive_hash != plan.archive_hash {
+        return Err(package_invalid(
+            "restore plan archive hash does not match the package on disk",
+        ));
+    }
     if verified.preview.manifest.package_id != plan.package_id {
         return Err(package_invalid(
             "restore plan package ID does not match the package on disk",
@@ -171,18 +190,13 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
                 "planned session operation target does not match the planned session",
             ));
         }
-        ensure_safe_codex_target(&plan.target_codex_home, &session.target)?;
-        validate_operation_state(operation)?;
         if session.action == SessionAction::Skip {
+            ensure_safe_codex_target(&plan.target_codex_home, &session.target)?;
+            validate_operation_state(operation)?;
             continue;
         }
         ensure_writable_change(operation)?;
-        let bytes = verified
-            .planning_payloads
-            .get(&session.package_source)
-            .ok_or_else(|| {
-                package_invalid("planned session payload is missing from the package")
-            })?;
+        let bytes = verified.authenticated_planning_payload(&session.package_source)?;
         let rewritten =
             rewrite_session_jsonl(bytes, &plan.reference_rewrites, &session.package_source)?;
         let final_hash = sha256_hex(&rewritten);
@@ -192,20 +206,16 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
                 session.target.display()
             )));
         }
-        validate_operation_state(operation)?;
-        atomic_write(&session.target, &rewritten)?;
+        let guard = TargetReplacementGuard::acquire(&plan.target_codex_home, operation)?;
+        guard.commit_bytes(operation, &rewritten)?;
         sessions_written += 1;
     }
 
     let mut index_entries_merged = 0;
     if let Some(operation) = operation_for(plan, "codex/session_index.jsonl") {
-        ensure_safe_codex_target(&plan.target_codex_home, &operation.target)?;
-        validate_operation_state(operation)?;
         ensure_writable_change(operation)?;
-        let package_bytes = verified
-            .planning_payloads
-            .get("codex/session_index.jsonl")
-            .ok_or_else(|| package_invalid("planned session index payload is missing"))?;
+        let guard = TargetReplacementGuard::acquire(&plan.target_codex_home, operation)?;
+        let package_bytes = verified.authenticated_planning_payload("codex/session_index.jsonl")?;
         let target_bytes = match fs::read(&operation.target) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -222,22 +232,18 @@ pub fn apply_bridge_plan(plan: &RestorePlan) -> Result<BridgeApplyReport, Rehome
             &plan.sessions,
             &plan.reference_rewrites,
         )?;
-        validate_operation_state(operation)?;
-        atomic_write(&operation.target, &merged)?;
+        guard.commit_bytes(operation, &merged)?;
         index_entries_merged = plan.sessions.len();
     }
 
     let mut sqlite_threads_imported = 0;
     if let Some(operation) = operation_for(plan, "codex/metadata/threads.json") {
-        ensure_safe_codex_target(&plan.target_codex_home, &operation.target)?;
-        validate_operation_state(operation)?;
         ensure_writable_change(operation)?;
-        let package_bytes = verified
-            .planning_payloads
-            .get("codex/metadata/threads.json")
-            .ok_or_else(|| package_invalid("planned thread metadata payload is missing"))?;
-        sqlite_threads_imported = import_sqlite_threads(
-            &operation.target,
+        let package_bytes =
+            verified.authenticated_planning_payload("codex/metadata/threads.json")?;
+        sqlite_threads_imported = import_sqlite_threads_for_operation(
+            &plan.target_codex_home,
+            operation,
             package_bytes,
             &plan.sessions,
             &plan.reference_rewrites,
@@ -259,51 +265,133 @@ pub fn merge_session_index(
 ) -> Result<Vec<u8>, RehomeError> {
     let rewritten_package =
         rewrite_jsonl_payload(package_bytes, rewrites, "codex/session_index.jsonl")?;
-    let mut target = parse_index(target_bytes, false)?;
-    let imported = parse_index(&rewritten_package, true)?;
+    let target = parse_target_index(target_bytes)?;
+    let imported = parse_package_index(&rewritten_package)?;
     let planned = sessions
         .iter()
         .map(|session| (session.target_task_id.to_string(), session))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
+    let mut target_bases = BTreeMap::<String, Value>::new();
+    for row in &target {
+        let Some(id) = &row.id else {
+            continue;
+        };
+        if !planned.contains_key(id) {
+            continue;
+        }
+        let Some(candidate) = row.value.as_ref() else {
+            continue;
+        };
+        match target_bases.entry(id.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(candidate.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if compare_metadata_freshness(candidate, entry.get()).is_gt() {
+                    entry.insert(candidate.clone());
+                }
+            }
+        }
+    }
 
-    for (id, session) in planned {
-        let incoming = imported.get(&id).ok_or_else(|| {
+    let mut merged_rows = BTreeMap::new();
+    for (id, session) in &planned {
+        let incoming = imported.get(id).ok_or_else(|| {
             package_invalid(format!(
                 "session index is missing planned conversation {id}"
             ))
         })?;
-        let row = target
-            .entry(id.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
+        let mut row = target_bases
+            .remove(id)
+            .unwrap_or_else(|| Value::Object(Map::new()));
         let object = row.as_object_mut().ok_or_else(|| {
             restore_failed(format!("target session index row {id} is not an object"))
         })?;
         let incoming = incoming.as_object().ok_or_else(|| {
             package_invalid(format!("package session index row {id} is not an object"))
         })?;
+        let incoming_is_older = incoming_metadata_is_older(object, incoming);
         for field in INDEX_IMPORT_FIELDS {
-            if let Some(value) = incoming.get(*field) {
-                object.insert((*field).to_owned(), value.clone());
+            if !incoming_is_older || INDEX_REPAIR_FIELDS.contains(field) {
+                if let Some(value) = incoming.get(*field) {
+                    object.insert((*field).to_owned(), value.clone());
+                }
             }
         }
         object.remove("thread_id");
         object.remove("conversation_id");
-        object.insert("id".into(), Value::String(id));
-        object.insert("title".into(), Value::String(session.title.clone()));
+        object.insert("id".into(), Value::String(id.clone()));
+        if !incoming_is_older {
+            object.insert("title".into(), Value::String(session.title.clone()));
+        }
         object.insert(
             "rollout_path".into(),
             Value::String(path_text(&session.target)?.to_owned()),
         );
+        merged_rows.insert(id.clone(), row);
     }
 
     let mut output = Vec::new();
-    for row in target.into_values() {
-        serde_json::to_writer(&mut output, &row).map_err(|error| {
-            restore_failed(format!("could not encode target session index: {error}"))
-        })?;
-        output.push(b'\n');
+    let mut emitted = HashSet::new();
+    for row in target {
+        let Some(id) = row.id else {
+            output.extend_from_slice(&row.raw);
+            continue;
+        };
+        let Some(merged) = merged_rows.get(&id) else {
+            output.extend_from_slice(&row.raw);
+            continue;
+        };
+        if emitted.insert(id) {
+            write_index_row(&mut output, merged)?;
+        }
+    }
+    for (id, row) in merged_rows {
+        if emitted.insert(id) {
+            if output.last().is_some_and(|byte| *byte != b'\n') {
+                output.push(b'\n');
+            }
+            write_index_row(&mut output, &row)?;
+        }
     }
     Ok(output)
+}
+
+fn incoming_metadata_is_older(target: &Map<String, Value>, incoming: &Map<String, Value>) -> bool {
+    compare_updated_at(target.get("updated_at"), incoming.get("updated_at")).is_gt()
+}
+
+fn compare_metadata_freshness(left: &Value, right: &Value) -> std::cmp::Ordering {
+    let left = left.as_object().and_then(|row| row.get("updated_at"));
+    let right = right.as_object().and_then(|row| row.get("updated_at"));
+    compare_updated_at(left, right)
+}
+
+fn compare_updated_at(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
+    let left = left.and_then(Value::as_str);
+    let right = right.and_then(Value::as_str);
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            match (
+                DateTime::parse_from_rfc3339(left),
+                DateTime::parse_from_rfc3339(right),
+            ) {
+                (Ok(left), Ok(right)) => left.cmp(&right),
+                _ => left.cmp(right),
+            }
+        }
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn write_index_row(output: &mut Vec<u8>, row: &Value) -> Result<(), RehomeError> {
+    serde_json::to_writer(&mut *output, row).map_err(|error| {
+        restore_failed(format!("could not encode target session index: {error}"))
+    })?;
+    output.push(b'\n');
+    Ok(())
 }
 
 pub fn import_sqlite_threads(
@@ -312,15 +400,47 @@ pub fn import_sqlite_threads(
     sessions: &[PlannedSession],
     rewrites: &[ReferenceRewrite],
 ) -> Result<usize, RehomeError> {
+    let parent = database
+        .parent()
+        .ok_or_else(|| restore_failed("target Codex state database has no parent directory"))?;
+    let operation = PlannedOperation {
+        package_source: "codex/metadata/threads.json".into(),
+        target: database.to_path_buf(),
+        expected_previous_hash: Some(hash_file(database)?),
+        action: ChangeKind::Update,
+        rollback_required: true,
+    };
+    import_sqlite_threads_for_operation(parent, &operation, package_bytes, sessions, rewrites)
+}
+
+fn import_sqlite_threads_for_operation(
+    root: &Path,
+    operation: &PlannedOperation,
+    package_bytes: &[u8],
+    sessions: &[PlannedSession],
+    rewrites: &[ReferenceRewrite],
+) -> Result<usize, RehomeError> {
     let rows = package_thread_rows(package_bytes, sessions, rewrites)?;
-    let mut connection = Connection::open(database).map_err(|error| {
+    let guard = TargetReplacementGuard::acquire(root, operation)?;
+    reject_hard_linked_sqlite(&operation.target)?;
+    let parent = operation
+        .target
+        .parent()
+        .ok_or_else(|| restore_failed("target Codex state database has no parent directory"))?;
+    let temporary = NamedTempFile::new_in(parent).map_err(|error| {
         restore_failed(format!(
-            "could not open target Codex state database {}: {error}",
-            database.display()
+            "could not create private Codex database copy: {error}"
         ))
     })?;
-    let available = thread_columns(&connection)?;
-    if !available.contains("id") {
+    backup_sqlite_database(&operation.target, temporary.path())?;
+    validate_operation_state(operation)?;
+    let mut connection = Connection::open(temporary.path()).map_err(|error| {
+        restore_failed(format!(
+            "could not open private Codex state database copy: {error}"
+        ))
+    })?;
+    let schema = thread_columns(&connection)?;
+    if !schema.contains_key("id") {
         return Err(restore_failed(
             "target Codex threads table has no id column",
         ));
@@ -329,12 +449,52 @@ pub fn import_sqlite_threads(
         .transaction()
         .map_err(|error| restore_failed(format!("could not start Codex thread import: {error}")))?;
     for row in &rows {
-        upsert_thread(&transaction, row, &available)?;
+        import_thread_row(&transaction, row, &schema)?;
     }
     transaction.commit().map_err(|error| {
         restore_failed(format!("could not commit Codex thread import: {error}"))
     })?;
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|error| {
+            restore_failed(format!(
+                "could not checkpoint private Codex database copy: {error}"
+            ))
+        })?;
+    drop(connection);
+    temporary.as_file().sync_all().map_err(|error| {
+        restore_failed(format!(
+            "could not sync private Codex database copy: {error}"
+        ))
+    })?;
+    guard.commit_temporary(operation, &temporary)?;
     Ok(rows.len())
+}
+
+fn backup_sqlite_database(source: &Path, destination: &Path) -> Result<(), RehomeError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let source = Connection::open_with_flags(source, flags).map_err(|error| {
+        restore_failed(format!(
+            "could not open target Codex state database for private backup: {error}"
+        ))
+    })?;
+    let mut destination = Connection::open(destination).map_err(|error| {
+        restore_failed(format!(
+            "could not open private Codex database destination: {error}"
+        ))
+    })?;
+    let backup = Backup::new(&source, &mut destination).map_err(|error| {
+        restore_failed(format!(
+            "could not start private Codex database backup: {error}"
+        ))
+    })?;
+    backup
+        .run_to_completion(128, Duration::from_millis(1), None)
+        .map_err(|error| {
+            restore_failed(format!(
+                "could not complete private Codex database backup: {error}"
+            ))
+        })
 }
 
 fn package_thread_rows(
@@ -412,56 +572,82 @@ fn package_thread_rows(
     Ok(result)
 }
 
-fn thread_columns(connection: &Connection) -> Result<HashSet<String>, RehomeError> {
+#[derive(Debug)]
+struct ThreadColumn {
+    name: String,
+    not_null: bool,
+    has_default: bool,
+}
+
+fn thread_columns(connection: &Connection) -> Result<HashMap<String, ThreadColumn>, RehomeError> {
     let mut statement = connection
         .prepare("PRAGMA table_info(threads)")
         .map_err(|error| restore_failed(format!("could not inspect Codex threads: {error}")))?;
     let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
+        .query_map([], |row| {
+            Ok(ThreadColumn {
+                name: row.get(1)?,
+                not_null: row.get::<_, i64>(3)? != 0,
+                has_default: row.get::<_, Option<String>>(4)?.is_some(),
+            })
+        })
         .map_err(|error| restore_failed(format!("could not inspect Codex threads: {error}")))?;
-    let mut result = HashSet::new();
+    let mut result = HashMap::new();
     for column in columns {
-        result.insert(
-            column
-                .map_err(|error| {
-                    restore_failed(format!("could not inspect Codex thread column: {error}"))
-                })?
-                .to_ascii_lowercase(),
-        );
+        let column = column.map_err(|error| {
+            restore_failed(format!("could not inspect Codex thread column: {error}"))
+        })?;
+        result.insert(column.name.to_ascii_lowercase(), column);
     }
     Ok(result)
 }
 
-fn upsert_thread(
+fn import_thread_row(
     connection: &Connection,
     row: &Map<String, Value>,
-    available: &HashSet<String>,
+    schema: &HashMap<String, ThreadColumn>,
 ) -> Result<(), RehomeError> {
     let columns = THREAD_IMPORT_FIELDS
         .iter()
         .copied()
-        .filter(|column| available.contains(*column) && row.contains_key(*column))
+        .filter(|column| schema.contains_key(*column) && row.contains_key(*column))
         .collect::<Vec<_>>();
     if !columns.contains(&"id") {
         return Err(package_invalid("thread metadata row is missing its id"));
     }
+    let id = row
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| package_invalid("thread metadata row id is not a string"))?;
+    let exists = connection
+        .query_row("SELECT 1 FROM threads WHERE id = ?1", [id], |_| Ok(()))
+        .optional()
+        .map_err(|error| restore_failed(format!("could not inspect Codex thread row: {error}")))?
+        .is_some();
+    if exists {
+        return update_thread(connection, row, &columns, id);
+    }
+
+    let missing_required = schema
+        .iter()
+        .filter(|(name, column)| {
+            column.not_null && !column.has_default && !columns.contains(&name.as_str())
+        })
+        .map(|(_, column)| column.name.as_str())
+        .collect::<Vec<_>>();
+    if !missing_required.is_empty() {
+        return Err(restore_failed(format!(
+            "cannot insert Codex thread because required target-only columns have no defaults: {}",
+            missing_required.join(", ")
+        )));
+    }
+
     let placeholders = (1..=columns.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let updates = columns
-        .iter()
-        .copied()
-        .filter(|column| *column != "id")
-        .map(|column| format!("{column} = excluded.{column}"))
-        .collect::<Vec<_>>();
-    let conflict = if updates.is_empty() {
-        "DO NOTHING".to_owned()
-    } else {
-        format!("DO UPDATE SET {}", updates.join(", "))
-    };
     let sql = format!(
-        "INSERT INTO threads ({}) VALUES ({placeholders}) ON CONFLICT(id) {conflict}",
+        "INSERT INTO threads ({}) VALUES ({placeholders})",
         columns.join(", ")
     );
     let values = columns
@@ -471,6 +657,39 @@ fn upsert_thread(
     connection
         .execute(&sql, params_from_iter(values))
         .map_err(|error| restore_failed(format!("could not import Codex thread row: {error}")))?;
+    Ok(())
+}
+
+fn update_thread(
+    connection: &Connection,
+    row: &Map<String, Value>,
+    columns: &[&str],
+    id: &str,
+) -> Result<(), RehomeError> {
+    let updates = columns
+        .iter()
+        .copied()
+        .filter(|column| *column != "id")
+        .collect::<Vec<_>>();
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let assignments = updates
+        .iter()
+        .enumerate()
+        .map(|(index, column)| format!("{column} = ?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let id_parameter = updates.len() + 1;
+    let sql = format!("UPDATE threads SET {assignments} WHERE id = ?{id_parameter}");
+    let mut values = updates
+        .iter()
+        .map(|column| json_sql_value(&row[*column]))
+        .collect::<Result<Vec<_>, _>>()?;
+    values.push(SqlValue::Text(id.to_owned()));
+    connection
+        .execute(&sql, params_from_iter(values))
+        .map_err(|error| restore_failed(format!("could not update Codex thread row: {error}")))?;
     Ok(())
 }
 
@@ -548,7 +767,7 @@ fn validate_operation_state(operation: &PlannedOperation) -> Result<(), RehomeEr
             operation.target.display()
         ))),
         (Some(expected), Ok(metadata)) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+            if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
                 return Err(restore_failed(format!(
                     "restore target is no longer a regular file: {}",
                     operation.target.display()
@@ -565,6 +784,50 @@ fn validate_operation_state(operation: &PlannedOperation) -> Result<(), RehomeEr
             }
         }
     }
+}
+
+fn reject_hard_linked_sqlite(path: &Path) -> Result<(), RehomeError> {
+    let links = file_link_count(path).map_err(|error| {
+        restore_failed(format!(
+            "could not inspect target Codex state database links {}: {error}",
+            path.display()
+        ))
+    })?;
+    if links > 1 {
+        return Err(restore_failed(format!(
+            "target Codex state database has more than one hard link: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn file_link_count(path: &Path) -> io::Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = fs::File::open(path)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(u64::from(information.nNumberOfLinks))
+    }
+}
+
+#[cfg(unix)]
+fn file_link_count(path: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(fs::metadata(path)?.nlink())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn file_link_count(path: &Path) -> io::Result<u64> {
+    fs::metadata(path).map(|_| 1)
 }
 
 fn ensure_safe_codex_target(root: &Path, target: &Path) -> Result<(), RehomeError> {
@@ -586,19 +849,29 @@ fn ensure_safe_codex_target(root: &Path, target: &Path) -> Result<(), RehomeErro
     {
         return Err(restore_failed("bridge target path is unsafe"));
     }
-    let mut current = root.to_path_buf();
-    if fs::symlink_metadata(&current)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(restore_failed(
-            "planned Codex home cannot be a symbolic link",
-        ));
+    for ancestor in root.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() => {
+                return Err(restore_failed(format!(
+                    "planned Codex home ancestry is unsafe: {}",
+                    ancestor.display()
+                )))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(restore_failed(format!(
+                    "could not inspect planned Codex home ancestry {}: {error}",
+                    ancestor.display()
+                )))
+            }
+        }
     }
+    let mut current = root.to_path_buf();
     for component in relative.parent().into_iter().flat_map(Path::components) {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Ok(metadata) if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() => {
                 return Err(restore_failed(format!(
                     "bridge target ancestor is unsafe: {}",
                     current.display()
@@ -617,33 +890,128 @@ fn ensure_safe_codex_target(root: &Path, target: &Path) -> Result<(), RehomeErro
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), RehomeError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| restore_failed("bridge target has no parent directory"))?;
-    fs::create_dir_all(parent).map_err(|error| {
-        restore_failed(format!(
-            "could not create bridge target directory {}: {error}",
-            parent.display()
-        ))
-    })?;
-    let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-        restore_failed(format!("could not create bridge temporary file: {error}"))
-    })?;
-    temporary
-        .write_all(bytes)
-        .and_then(|()| temporary.as_file().sync_all())
-        .map_err(|error| {
-            restore_failed(format!("could not write bridge temporary file: {error}"))
+#[cfg(windows)]
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+struct TargetReplacementGuard<'a> {
+    root: &'a Path,
+    target: &'a Path,
+    lock_path: PathBuf,
+    lock_token: String,
+    lock_file: Option<fs::File>,
+}
+
+impl<'a> TargetReplacementGuard<'a> {
+    fn acquire(root: &'a Path, operation: &'a PlannedOperation) -> Result<Self, RehomeError> {
+        ensure_safe_codex_target(root, &operation.target)?;
+        let parent = operation
+            .target
+            .parent()
+            .ok_or_else(|| restore_failed("bridge target has no parent directory"))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            restore_failed(format!(
+                "could not create bridge target directory {}: {error}",
+                parent.display()
+            ))
         })?;
-    replace_file(temporary.path(), path).map_err(|error| {
-        restore_failed(format!(
-            "could not atomically replace bridge target {}: {error}",
-            path.display()
-        ))
-    })?;
-    drop(temporary);
-    Ok(())
+        ensure_safe_codex_target(root, &operation.target)?;
+        let file_name = operation
+            .target
+            .file_name()
+            .ok_or_else(|| restore_failed("bridge target has no file name"))?
+            .to_string_lossy();
+        let lock_path = parent.join(format!(".{file_name}.codex-rehome.lock"));
+        let lock_token = Uuid::new_v4().to_string();
+        let mut lock_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    restore_failed(format!(
+                        "restore target is locked by another apply: {}",
+                        operation.target.display()
+                    ))
+                } else {
+                    restore_failed(format!(
+                        "could not lock restore target {}: {error}",
+                        operation.target.display()
+                    ))
+                }
+            })?;
+        lock_file
+            .write_all(lock_token.as_bytes())
+            .and_then(|()| lock_file.sync_all())
+            .map_err(|error| {
+                restore_failed(format!("could not initialize target lock: {error}"))
+            })?;
+        let guard = Self {
+            root,
+            target: &operation.target,
+            lock_path,
+            lock_token,
+            lock_file: Some(lock_file),
+        };
+        ensure_safe_codex_target(root, &operation.target)?;
+        validate_operation_state(operation)?;
+        Ok(guard)
+    }
+
+    fn commit_bytes(&self, operation: &PlannedOperation, bytes: &[u8]) -> Result<(), RehomeError> {
+        let parent = self
+            .target
+            .parent()
+            .ok_or_else(|| restore_failed("bridge target has no parent directory"))?;
+        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
+            restore_failed(format!("could not create bridge temporary file: {error}"))
+        })?;
+        temporary
+            .write_all(bytes)
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|error| {
+                restore_failed(format!("could not write bridge temporary file: {error}"))
+            })?;
+        self.commit_temporary(operation, &temporary)
+    }
+
+    fn commit_temporary(
+        &self,
+        operation: &PlannedOperation,
+        temporary: &NamedTempFile,
+    ) -> Result<(), RehomeError> {
+        validate_operation_state(operation)?;
+        ensure_safe_codex_target(self.root, self.target)?;
+        replace_file(temporary.path(), self.target).map_err(|error| {
+            restore_failed(format!(
+                "could not atomically replace bridge target {}: {error}",
+                self.target.display()
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+impl Drop for TargetReplacementGuard<'_> {
+    fn drop(&mut self) {
+        let owns_lock = fs::read_to_string(&self.lock_path)
+            .map(|token| token == self.lock_token)
+            .unwrap_or(false);
+        drop(self.lock_file.take());
+        if owns_lock {
+            let _ = fs::remove_file(&self.lock_path);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -703,31 +1071,56 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn parse_index(bytes: &[u8], package: bool) -> Result<BTreeMap<String, Value>, RehomeError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| {
-        if package {
-            package_invalid("session index is not UTF-8")
-        } else {
-            restore_failed("target session index is not UTF-8")
+#[derive(Debug)]
+struct TargetIndexRow {
+    raw: Vec<u8>,
+    id: Option<String>,
+    value: Option<Value>,
+}
+
+fn parse_target_index(bytes: &[u8]) -> Result<Vec<TargetIndexRow>, RehomeError> {
+    std::str::from_utf8(bytes).map_err(|_| restore_failed("target session index is not UTF-8"))?;
+    let mut rows = Vec::new();
+    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let without_newline = raw.strip_suffix(b"\n").unwrap_or(raw);
+        let json = without_newline
+            .strip_suffix(b"\r")
+            .unwrap_or(without_newline);
+        if json.is_empty() {
+            rows.push(TargetIndexRow {
+                raw: raw.to_vec(),
+                id: None,
+                value: None,
+            });
+            continue;
         }
-    })?;
+        let value: Value = serde_json::from_slice(json).map_err(|error| {
+            restore_failed(format!("target session index JSONL is invalid: {error}"))
+        })?;
+        let id = metadata_id(&value)
+            .ok_or_else(|| {
+                restore_failed("target session index entry is missing its conversation ID")
+            })?
+            .to_owned();
+        rows.push(TargetIndexRow {
+            raw: raw.to_vec(),
+            id: Some(id),
+            value: Some(value),
+        });
+    }
+    Ok(rows)
+}
+
+fn parse_package_index(bytes: &[u8]) -> Result<BTreeMap<String, Value>, RehomeError> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| package_invalid("session index is not UTF-8"))?;
     let mut rows = BTreeMap::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
-        let value: Value = serde_json::from_str(line).map_err(|error| {
-            if package {
-                package_invalid(format!("session index JSONL is invalid: {error}"))
-            } else {
-                restore_failed(format!("target session index JSONL is invalid: {error}"))
-            }
-        })?;
-        let id = metadata_id(&value).ok_or_else(|| {
-            if package {
-                package_invalid("session index entry is missing its conversation ID")
-            } else {
-                restore_failed("target session index entry is missing its conversation ID")
-            }
-        })?;
-        if package && rows.contains_key(id) {
+        let value: Value = serde_json::from_str(line)
+            .map_err(|error| package_invalid(format!("session index JSONL is invalid: {error}")))?;
+        let id = metadata_id(&value)
+            .ok_or_else(|| package_invalid("session index entry is missing its conversation ID"))?;
+        if rows.contains_key(id) {
             return Err(package_invalid(
                 "session index contains duplicate conversation IDs",
             ));

@@ -201,6 +201,7 @@ pub struct PlannedOperation {
 pub struct RestorePlan {
     pub package_path: PathBuf,
     pub package_id: Uuid,
+    pub archive_hash: String,
     pub target_codex_home: PathBuf,
     pub projects_root: PathBuf,
     pub operations: Vec<PlannedOperation>,

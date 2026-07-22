@@ -330,6 +330,7 @@ pub fn build_restore_plan(
     Ok(RestorePlan {
         package_path: package.package_path.clone(),
         package_id: package.manifest.package_id,
+        archive_hash: package.archive_hash.clone(),
         target_codex_home: target.codex_home.clone(),
         projects_root: projects_root.to_path_buf(),
         operations,
@@ -1282,14 +1283,16 @@ fn add_project_path_rewrites(
         restore_failed("target project path cannot be represented in Codex JSON metadata")
     })?;
     for source in reference_sources(payloads, &conversation.archive_path) {
-        insert_rewrite(
-            rewrites,
-            conversation.task_id,
-            source,
-            ReferenceRewriteKind::ProjectPath,
-            project.source_path.clone(),
-            target.to_owned(),
-        );
+        for source_path in windows_source_path_variants(&project.source_path) {
+            insert_rewrite(
+                rewrites,
+                conversation.task_id,
+                source.clone(),
+                ReferenceRewriteKind::ProjectPath,
+                source_path,
+                target.to_owned(),
+            );
+        }
     }
     Ok(())
 }
@@ -1306,17 +1309,54 @@ fn add_session_path_rewrites(
             continue;
         };
         for source_rollout in metadata_rollout_paths(bytes, source, source_task_id)? {
-            insert_rewrite(
-                rewrites,
-                source_task_id,
-                source.to_owned(),
-                ReferenceRewriteKind::SessionPath,
-                source_rollout,
-                target.clone(),
-            );
+            for source_path in windows_source_path_variants(&source_rollout) {
+                insert_rewrite(
+                    rewrites,
+                    source_task_id,
+                    source.to_owned(),
+                    ReferenceRewriteKind::SessionPath,
+                    source_path,
+                    target.clone(),
+                );
+            }
         }
     }
     Ok(())
+}
+
+fn windows_source_path_variants(path: &str) -> Vec<String> {
+    let backslash = path.replace('/', "\\");
+    let (body, is_unc) = if let Some(body) = backslash.strip_prefix(r"\\?\UNC\") {
+        (body, true)
+    } else if let Some(body) = backslash.strip_prefix(r"\\?\") {
+        (body, false)
+    } else if let Some(body) = backslash.strip_prefix(r"\\") {
+        (body, true)
+    } else if is_windows_drive_path(&backslash) {
+        (backslash.as_str(), false)
+    } else {
+        return vec![path.to_owned()];
+    };
+
+    let mut variants = std::collections::BTreeSet::new();
+    if is_unc {
+        let body = body.trim_start_matches('\\');
+        variants.insert(format!(r"\\{body}"));
+        variants.insert(format!("//{}", body.replace('\\', "/")));
+        variants.insert(format!(r"\\?\UNC\{body}"));
+    } else if is_windows_drive_path(body) {
+        variants.insert(body.to_owned());
+        variants.insert(body.replace('\\', "/"));
+        variants.insert(format!(r"\\?\{body}"));
+    } else {
+        variants.insert(path.to_owned());
+    }
+    variants.into_iter().collect()
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
 }
 
 fn metadata_rollout_paths(

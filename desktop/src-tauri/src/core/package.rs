@@ -212,6 +212,29 @@ pub(crate) struct VerifiedPackage {
     pub planning_payloads: BTreeMap<String, Vec<u8>>,
 }
 
+impl VerifiedPackage {
+    pub(crate) fn authenticated_planning_payload(
+        &self,
+        source: &str,
+    ) -> Result<&[u8], RehomeError> {
+        let bytes = self
+            .planning_payloads
+            .get(source)
+            .ok_or_else(|| package_invalid("verified planning payload bytes are missing"))?;
+        if bytes.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(package_invalid(
+                "verified planning payload exceeds the inspection limit",
+            ));
+        }
+        let verified = self
+            .payloads
+            .get(source)
+            .ok_or_else(|| package_invalid("verified planning payload metadata is missing"))?;
+        authenticate_payload_bytes(bytes, verified)?;
+        Ok(bytes)
+    }
+}
+
 pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
     Ok(inspect_package_for_planning(path)?.preview)
 }

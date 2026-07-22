@@ -195,16 +195,80 @@ fn branch_import_is_deterministic_and_exposes_every_package_reference_rewrite(
         .iter()
         .filter(|rewrite| rewrite.kind == ReferenceRewriteKind::SessionPath)
         .collect::<Vec<_>>();
-    assert_eq!(session_path_rewrites.len(), 2);
+    assert_eq!(session_path_rewrites.len(), 6);
     assert!(session_path_rewrites.iter().all(|rewrite| {
-        rewrite.source_task_id == source_task_id
-            && rewrite.from == SOURCE_ROLLOUT_PATH
-            && Path::new(&rewrite.to) == session.target
+        rewrite.source_task_id == source_task_id && Path::new(&rewrite.to) == session.target
     }));
+    let rollout_variants = session_path_rewrites
+        .iter()
+        .map(|rewrite| rewrite.from.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(rollout_variants.len(), 3);
+    assert!(rollout_variants.contains(SOURCE_ROLLOUT_PATH));
+    assert!(rollout_variants.contains(r"C:\Users\OldUser\.codex\sessions\2026\07\22\thread.jsonl"));
+    assert!(
+        rollout_variants.contains(r"\\?\C:\Users\OldUser\.codex\sessions\2026\07\22\thread.jsonl")
+    );
     assert!(first.reference_rewrites.iter().all(|rewrite| {
         !rewrite.package_source.is_empty() && !rewrite.from.is_empty() && !rewrite.to.is_empty()
     }));
 
+    Ok(())
+}
+
+#[test]
+fn windows_project_paths_generate_slash_backslash_and_verbatim_rewrites(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = planner_fixture(None)?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    let variants = plan
+        .reference_rewrites
+        .iter()
+        .filter(|rewrite| rewrite.kind == ReferenceRewriteKind::ProjectPath)
+        .map(|rewrite| rewrite.from.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert!(variants.contains(r"C:\Users\OldUser\Documents\visual"));
+    assert!(variants.contains("C:/Users/OldUser/Documents/visual"));
+    assert!(variants.contains(r"\\?\C:\Users\OldUser\Documents\visual"));
+    Ok(())
+}
+
+#[test]
+fn unc_project_paths_generate_unc_slash_and_verbatim_unc_rewrites() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let mut manifest = fixture.preview.manifest.clone();
+    manifest.projects[0].source_path = r"\\server\share\visual".into();
+    let session = incoming_session_bytes();
+    write_package(
+        &fixture.preview.package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, thread_metadata_bytes().as_slice()),
+            (INDEX_SOURCE, index_bytes().as_slice()),
+            (SESSION_SOURCE, session.as_slice()),
+            ("codex/skills/example/SKILL.md", b"# Example\n"),
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    fixture.preview = inspect_package(&fixture.preview.package_path)?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    let variants = plan
+        .reference_rewrites
+        .iter()
+        .filter(|rewrite| rewrite.kind == ReferenceRewriteKind::ProjectPath)
+        .map(|rewrite| rewrite.from.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert!(variants.contains(r"\\server\share\visual"));
+    assert!(variants.contains("//server/share/visual"));
+    assert!(variants.contains(r"\\?\UNC\server\share\visual"));
     Ok(())
 }
 

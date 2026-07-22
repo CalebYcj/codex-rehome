@@ -194,6 +194,7 @@ fn restore_and_recovery_contracts_use_typed_state() {
     let plan = RestorePlan {
         package_path: PathBuf::from("handoff.rehome"),
         package_id: Uuid::nil(),
+        archive_hash: "archive-sha256".into(),
         target_codex_home: PathBuf::from(r"C:\Users\NewUser\.codex"),
         projects_root: PathBuf::from(r"C:\Users\NewUser\Documents"),
         operations: vec![operation.clone()],

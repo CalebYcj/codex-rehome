@@ -20,7 +20,9 @@ use std::{
     cell::RefCell,
     error::Error,
     ffi::OsString,
+    io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Barrier},
 };
 use uuid::Uuid;
 
@@ -156,6 +158,61 @@ fn session_index_merge_preserves_target_rows_and_repairs_planned_metadata(
 }
 
 #[test]
+fn session_index_merge_preserves_newer_target_metadata_and_unrelated_duplicate_rows_exactly(
+) -> Result<(), Box<dyn Error>> {
+    let unrelated = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let first_unrelated = format!("{{ \"id\": \"{unrelated}\", \"title\": \"first\" }}\r\n");
+    let second_unrelated = format!("{{\"id\":\"{unrelated}\",\"title\":\"second\"}}\n");
+    let target = format!(
+        "{first_unrelated}{}\n{second_unrelated}",
+        serde_json::json!({
+            "id": TARGET_ID,
+            "title": "New target title",
+            "preview": "new target preview",
+            "cwd": r"C:\stale\target",
+            "rollout_path": r"C:\stale\thread.jsonl",
+            "updated_at": "2026-07-23T00:00:00Z",
+            "target_only": true,
+        })
+    );
+    let package = jsonl(&[serde_json::json!({
+        "id": SOURCE_ID,
+        "title": "Older incoming title",
+        "preview": "older incoming preview",
+        "cwd": WINDOWS_PROJECT,
+        "rollout_path": WINDOWS_SESSION,
+        "updated_at": "2026-07-22T00:00:00Z",
+    })]);
+
+    let merged = merge_session_index(
+        target.as_bytes(),
+        package.as_bytes(),
+        &[planned_session()],
+        &rewrites(INDEX_SOURCE),
+    )?;
+    let merged_text = String::from_utf8(merged.clone())?;
+    let imported = merged
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .map(serde_json::from_slice::<Value>)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|row| row["id"] == TARGET_ID)
+        .unwrap();
+
+    assert!(merged_text.contains(&first_unrelated));
+    assert!(merged_text.contains(&second_unrelated));
+    assert_eq!(imported["title"], "New target title");
+    assert_eq!(imported["preview"], "new target preview");
+    assert_eq!(imported["updated_at"], "2026-07-23T00:00:00Z");
+    assert_eq!(imported["cwd"], MAC_PROJECT);
+    assert_eq!(imported["rollout_path"], MAC_SESSION);
+    assert_eq!(imported["target_only"], true);
+    Ok(())
+}
+
+#[test]
 fn sqlite_import_uses_existing_allowlisted_columns_and_preserves_target_only_values(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -222,6 +279,139 @@ fn sqlite_import_uses_existing_allowlisted_columns_and_preserves_target_only_val
     );
     assert_eq!(std::fs::read(&memory)?, b"memory untouched");
     assert_eq!(std::fs::read(&goals)?, b"goals untouched");
+    Ok(())
+}
+
+#[test]
+fn sqlite_existing_row_update_preserves_required_target_only_column_without_default(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            cwd TEXT,
+            rollout_path TEXT,
+            target_only TEXT NOT NULL
+        );",
+    )?;
+    connection.execute(
+        "INSERT INTO threads (id, title, target_only) VALUES (?1, 'stale', 'preserve me')",
+        [TARGET_ID],
+    )?;
+    drop(connection);
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "title": "incoming",
+        "cwd": WINDOWS_PROJECT,
+    }]))?;
+
+    import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )?;
+
+    let connection = Connection::open(&database)?;
+    let row = connection.query_row(
+        "SELECT title, cwd, rollout_path, target_only FROM threads WHERE id = ?1",
+        [TARGET_ID],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    assert_eq!(
+        row,
+        (
+            "Original 路 ReHome".into(),
+            MAC_PROJECT.into(),
+            MAC_SESSION.into(),
+            "preserve me".into(),
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_missing_row_required_target_only_column_fails_without_changing_database(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            cwd TEXT,
+            rollout_path TEXT,
+            target_only TEXT NOT NULL
+        );",
+    )?;
+    drop(connection);
+    let before = std::fs::read(&database)?;
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "title": "incoming",
+    }]))?;
+
+    let error = import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::RestoreFailed
+    );
+    assert!(error.message.contains("target_only"));
+    assert_eq!(std::fs::read(&database)?, before);
+    Ok(())
+}
+
+#[test]
+fn sqlite_import_rejects_hard_linked_database_without_touching_either_name(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let alias = temp.path().join("state_alias.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, rollout_path TEXT);",
+    )?;
+    drop(connection);
+    std::fs::hard_link(&database, &alias)?;
+    let before = std::fs::read(&database)?;
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "title": "incoming",
+    }]))?;
+
+    let error = import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::RestoreFailed
+    );
+    assert!(error.message.contains("hard link"));
+    assert_eq!(std::fs::read(&database)?, before);
+    assert_eq!(std::fs::read(&alias)?, before);
     Ok(())
 }
 
@@ -449,6 +639,283 @@ fn bridge_revalidates_planned_hash_before_replacing_an_index() -> Result<(), Box
     Ok(())
 }
 
+#[test]
+fn bridge_revalidates_a_skipped_session_before_accepting_the_plan() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    align_fixture_project_metadata(&fixture)?;
+    let package_path = fixture.root.join("changed-skipped-session.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package_path.clone(),
+        source_device_id: Uuid::nil(),
+        include_skills: false,
+        include_plugins: false,
+        include_generated_images: false,
+    })?;
+    let preview = inspect_package(&package_path)?;
+    let target_root = fixture.root.join("changed-skipped-session-target");
+    let codex_home = target_root.join(".codex");
+    let projects_root = target_root.join("projects");
+    std::fs::create_dir_all(&codex_home)?;
+    let connection = Connection::open(codex_home.join("state_5.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT, title TEXT);",
+    )?;
+    drop(connection);
+    let mut target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let initial_plan = build_restore_plan(&preview, &target, &projects_root)?;
+    apply_bridge_plan(&initial_plan)?;
+    target.conversations = preview.manifest.conversations.clone();
+    let skip_plan = build_restore_plan(&preview, &target, &projects_root)?;
+    assert_eq!(skip_plan.sessions[0].action, SessionAction::Skip);
+    std::fs::write(
+        &skip_plan.sessions[0].target,
+        b"changed after skip planning\n",
+    )?;
+
+    let error = apply_bridge_plan(&skip_plan).unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::RestoreFailed
+    );
+    assert!(error.message.contains("changed after planning"));
+    Ok(())
+}
+
+#[test]
+fn bridge_rejects_changed_archive_with_same_package_id() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    align_fixture_project_metadata(&fixture)?;
+    let package_path = fixture.root.join("archive-hash.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package_path.clone(),
+        source_device_id: Uuid::nil(),
+        include_skills: false,
+        include_plugins: false,
+        include_generated_images: false,
+    })?;
+    let preview = inspect_package(&package_path)?;
+    let target_root = fixture.root.join("archive-hash-target");
+    let codex_home = target_root.join(".codex");
+    let projects_root = target_root.join("projects");
+    std::fs::create_dir_all(&codex_home)?;
+    let connection = Connection::open(codex_home.join("state_5.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT, title TEXT);",
+    )?;
+    drop(connection);
+    let target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(&preview, &target, &projects_root)?;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&package_path)?
+        .write_all(b"changed archive bytes")?;
+
+    let error = apply_bridge_plan(&plan).unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::PackageInvalid
+    );
+    assert!(error.message.contains("archive hash"));
+    Ok(())
+}
+
+#[test]
+fn concurrent_bridge_applies_use_compare_and_swap_so_only_one_plan_commits(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    align_fixture_project_metadata(&fixture)?;
+    let package_path = fixture.root.join("concurrent.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package_path.clone(),
+        source_device_id: Uuid::nil(),
+        include_skills: false,
+        include_plugins: false,
+        include_generated_images: false,
+    })?;
+    let preview = inspect_package(&package_path)?;
+    let target_root = fixture.root.join("concurrent-target");
+    let codex_home = target_root.join(".codex");
+    let projects_root = target_root.join("projects");
+    std::fs::create_dir_all(&codex_home)?;
+    let connection = Connection::open(codex_home.join("state_5.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT, title TEXT);",
+    )?;
+    drop(connection);
+    let target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = Arc::new(build_restore_plan(&preview, &target, &projects_root)?);
+    let workers = 8;
+    let barrier = Arc::new(Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|_| {
+            let plan = Arc::clone(&plan);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                apply_bridge_plan(&plan)
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("bridge apply thread panicked"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .all(|error| error.code == rehome_desktop_lib::core::error::ErrorCode::RestoreFailed));
+    Ok(())
+}
+
+#[test]
+fn bridge_refuses_to_replace_a_target_with_an_active_cas_lock() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    align_fixture_project_metadata(&fixture)?;
+    let package_path = fixture.root.join("locked-target.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package_path.clone(),
+        source_device_id: Uuid::nil(),
+        include_skills: false,
+        include_plugins: false,
+        include_generated_images: false,
+    })?;
+    let preview = inspect_package(&package_path)?;
+    let target_root = fixture.root.join("locked-target");
+    let codex_home = target_root.join(".codex");
+    let projects_root = target_root.join("projects");
+    std::fs::create_dir_all(&codex_home)?;
+    let connection = Connection::open(codex_home.join("state_5.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT, title TEXT);",
+    )?;
+    drop(connection);
+    let target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(&preview, &target, &projects_root)?;
+    let session_target = &plan.sessions[0].target;
+    std::fs::create_dir_all(session_target.parent().unwrap())?;
+    let lock_name = format!(
+        ".{}.codex-rehome.lock",
+        session_target.file_name().unwrap().to_string_lossy()
+    );
+    let lock_path = session_target.parent().unwrap().join(lock_name);
+    std::fs::write(&lock_path, b"another restore")?;
+
+    let error = apply_bridge_plan(&plan).unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::RestoreFailed
+    );
+    assert!(error.message.contains("locked"));
+    assert!(!session_target.exists());
+    assert_eq!(std::fs::read(lock_path)?, b"another restore");
+    Ok(())
+}
+
+#[test]
+fn bridge_revalidates_ancestry_after_a_planned_directory_is_swapped_for_a_link(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    align_fixture_project_metadata(&fixture)?;
+    let package_path = fixture.root.join("ancestor-swap.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package_path.clone(),
+        source_device_id: Uuid::nil(),
+        include_skills: false,
+        include_plugins: false,
+        include_generated_images: false,
+    })?;
+    let preview = inspect_package(&package_path)?;
+    let target_root = fixture.root.join("ancestor-swap-target");
+    let codex_home = target_root.join(".codex");
+    let projects_root = target_root.join("projects");
+    std::fs::create_dir_all(&codex_home)?;
+    let connection = Connection::open(codex_home.join("state_5.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT, title TEXT);",
+    )?;
+    drop(connection);
+    let target = TargetInventory {
+        codex_home,
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(&preview, &target, &projects_root)?;
+    let planned_parent = plan.sessions[0].target.parent().unwrap();
+    std::fs::create_dir_all(planned_parent)?;
+    let original_parent = target_root.join("original-session-parent");
+    std::fs::rename(planned_parent, &original_parent)?;
+    let outside = fixture.root.join("outside-restore-root");
+    std::fs::create_dir_all(&outside)?;
+    if let Err(error) = create_directory_link(&outside, planned_parent) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            eprintln!("skipping apply ancestry swap test: symlink privilege unavailable");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+
+    let error = apply_bridge_plan(&plan).unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::RestoreFailed
+    );
+    assert!(error.message.contains("ancestor") || error.message.contains("ancestry"));
+    assert_eq!(std::fs::read_dir(outside)?.count(), 0);
+    Ok(())
+}
+
 fn planned_session() -> PlannedSession {
     PlannedSession {
         package_source: SOURCE.into(),
@@ -557,6 +1024,26 @@ fn current_source_os() -> SourceOs {
     } else {
         SourceOs::Windows
     }
+}
+
+#[cfg(unix)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(not(windows))]
+fn windows_symlink_privilege_is_unavailable(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn windows_symlink_privilege_is_unavailable(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314)
 }
 
 fn align_fixture_project_metadata(
