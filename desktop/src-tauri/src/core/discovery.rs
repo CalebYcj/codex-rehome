@@ -2,13 +2,13 @@ use crate::core::{
     error::{ErrorCode, RehomeError},
     models::{CodexInventory, ContentCounts, SourceOs},
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde_json::Value;
 use std::{
     collections::HashSet,
     env, fs, io,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use uuid::Uuid;
 
@@ -565,6 +565,17 @@ impl StateDatabaseSnapshot {
             )
         })?;
         let database_path = directory.path().join(file_name);
+        let source_files = source_database_files(source_database)?;
+        let has_wal = source_files.iter().any(|source| source.suffix == "-wal");
+        let has_shm = source_files.iter().any(|source| source.suffix == "-shm");
+
+        if !has_wal || has_shm {
+            backup_live_database(source_database, &database_path)?;
+            return Ok(Self {
+                _directory: directory,
+                database_path,
+            });
+        }
 
         let mut last_error = None;
         for _ in 0..MAX_ATTEMPTS {
@@ -591,6 +602,20 @@ impl StateDatabaseSnapshot {
     pub(crate) fn database_path(&self) -> &Path {
         &self.database_path
     }
+}
+
+fn backup_live_database(source_database: &Path, database_path: &Path) -> io::Result<()> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let source = Connection::open_with_flags(source_database, flags).map_err(sqlite_io_error)?;
+    let mut destination = Connection::open(database_path).map_err(sqlite_io_error)?;
+    let backup = Backup::new(&source, &mut destination).map_err(sqlite_io_error)?;
+    backup
+        .run_to_completion(128, Duration::from_millis(1), None)
+        .map_err(sqlite_io_error)
+}
+
+fn sqlite_io_error(error: rusqlite::Error) -> io::Error {
+    io::Error::other(error)
 }
 
 fn copy_state_database_once(

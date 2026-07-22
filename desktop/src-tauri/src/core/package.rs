@@ -15,18 +15,34 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env, fs,
-    io::{self, Read},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 use tempfile::{Builder, NamedTempFile};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use walkdir::WalkDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 const FORMAT: &str = "codex-rehome";
 const SCHEMA_VERSION: u32 = 1;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_INSPECTION_BYTES: u64 = 1024 * 1024 * 1024;
+const STREAM_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
+const THREAD_EXPORT_COLUMNS_V1: &[&str] = &[
+    "id",
+    "cwd",
+    "rollout_path",
+    "title",
+    "updated_at",
+    "archived",
+    "has_user_event",
+    "preview",
+];
 const EXCLUSION_RULES: &[&str] = &[
     "credentials and authentication data",
     "environment and private key files",
@@ -44,13 +60,20 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
         ))
     })?;
 
+    let staging_root = private_app_temp_root()?;
+    validate_staging_location(
+        &staging_root,
+        output_parent,
+        &request.project_paths,
+        &request.codex_home,
+    )?;
     let staging = Builder::new()
         .prefix(".rehome-stage-")
-        .tempdir_in(output_parent)
+        .tempdir_in(&staging_root)
         .map_err(|error| package_invalid(format!("could not create private staging: {error}")))?;
     make_staging_private(staging.path())?;
 
-    let mut payloads = BTreeMap::new();
+    let mut payloads = PayloadCollection::new()?;
     let mut counts = ContentCounts::default();
     let mut excluded_files = 0_u64;
     let mut excluded_bytes = 0_u64;
@@ -154,10 +177,12 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
     };
 
     let checksums = render_checksums(&payloads);
+    ensure_control_size("checksums.sha256", checksums.len() as u64)?;
     write_staged_bytes(staging.path(), "checksums.sha256", checksums.as_bytes())?;
     // The manifest is deliberately materialized only after every payload and checksum.
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| package_invalid(format!("could not serialize manifest: {error}")))?;
+    ensure_control_size("manifest.json", manifest_bytes.len() as u64)?;
     write_staged_bytes(staging.path(), "manifest.json", &manifest_bytes)?;
 
     write_archive_atomically(staging.path(), &request.output_path, &payloads)?;
@@ -178,9 +203,18 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
         .map_err(|error| package_invalid(format!("could not open package: {error}")))?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(package_invalid(
+            "ZIP entry count exceeds the inspection limit",
+        ));
+    }
+
     let mut names = Vec::with_capacity(archive.len());
-    let mut seen = HashSet::new();
-    let mut files = BTreeMap::new();
+    let mut paths = PortablePathRegistry::default();
+    let mut file_paths = HashSet::new();
+    let mut payload_hashes = BTreeMap::new();
+    let mut manifest_bytes = None;
+    let mut checksum_bytes = None;
     let mut forbidden_files_total = 0_u64;
     let mut total_bytes = 0_u64;
 
@@ -190,10 +224,14 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
             .map_err(|error| package_invalid(format!("could not read ZIP entry: {error}")))?;
         let raw_name = entry.name().to_owned();
         let normalized = validate_zip_entry_name(&raw_name, entry.is_dir())?;
-        let duplicate_key = normalized.to_ascii_lowercase();
-        if !seen.insert(duplicate_key) {
-            return Err(package_invalid("duplicate ZIP entry name"));
-        }
+        paths.insert(
+            &normalized,
+            if entry.is_dir() {
+                ArchivePathKind::Directory
+            } else {
+                ArchivePathKind::File
+            },
+        )?;
 
         let preview_name = if entry.is_dir() {
             format!("{normalized}/")
@@ -208,6 +246,14 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
         if entry.is_dir() {
             continue;
         }
+        if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(package_invalid(
+                "ZIP entry size exceeds the inspection limit",
+            ));
+        }
+        if matches!(normalized.as_str(), "manifest.json" | "checksums.sha256") {
+            ensure_control_size(&normalized, entry.size())?;
+        }
         total_bytes = total_bytes
             .checked_add(entry.size())
             .ok_or_else(|| package_invalid("ZIP uncompressed size exceeds the inspection limit"))?;
@@ -216,15 +262,20 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
                 "ZIP uncompressed size exceeds the inspection limit",
             ));
         }
-        let mut bytes = Vec::with_capacity(entry.size().min(usize::MAX as u64) as usize);
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|error| package_invalid(format!("could not read ZIP payload: {error}")))?;
-        files.insert(normalized, bytes);
+        file_paths.insert(normalized.clone());
+        match normalized.as_str() {
+            "manifest.json" => manifest_bytes = Some(read_control_entry(&mut entry, &normalized)?),
+            "checksums.sha256" => {
+                checksum_bytes = Some(read_control_entry(&mut entry, &normalized)?)
+            }
+            _ => {
+                payload_hashes.insert(normalized, hash_reader(&mut entry)?);
+            }
+        }
     }
 
-    let manifest_bytes = files
-        .get("manifest.json")
+    let manifest_bytes = manifest_bytes
+        .as_deref()
         .ok_or_else(|| package_invalid("manifest.json is missing"))?;
     let manifest: PackageManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|error| package_invalid(format!("manifest.json is invalid: {error}")))?;
@@ -237,11 +288,12 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
             format!("unsupported package schema {}", manifest.schema_version),
         ));
     }
+    validate_manifest_archive_paths(&manifest, &file_paths, &payload_hashes)?;
 
-    let checksum_bytes = files
-        .get("checksums.sha256")
+    let checksum_bytes = checksum_bytes
+        .as_deref()
         .ok_or_else(|| package_invalid("checksums.sha256 is missing"))?;
-    verify_checksums(checksum_bytes, &files)?;
+    verify_checksums(checksum_bytes, &payload_hashes)?;
 
     names.sort();
     Ok(PackagePreview {
@@ -259,6 +311,70 @@ struct Payload {
     executable: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArchivePathKind {
+    File,
+    Directory,
+}
+
+#[derive(Default)]
+struct PortablePathRegistry {
+    entries: BTreeMap<String, ArchivePathKind>,
+}
+
+impl PortablePathRegistry {
+    fn insert(&mut self, path: &str, kind: ArchivePathKind) -> Result<(), RehomeError> {
+        let key = portable_collision_key(path);
+        if self.entries.contains_key(&key) {
+            return Err(package_invalid("portable archive path collision"));
+        }
+        for ancestor in portable_ancestors(&key) {
+            if self.entries.get(ancestor) == Some(&ArchivePathKind::File) {
+                return Err(package_invalid(
+                    "portable archive path collision between a file and descendant",
+                ));
+            }
+        }
+        if kind == ArchivePathKind::File {
+            let descendant_prefix = format!("{key}/");
+            if self
+                .entries
+                .keys()
+                .any(|existing| existing.starts_with(&descendant_prefix))
+            {
+                return Err(package_invalid(
+                    "portable archive path collision between a file and descendant",
+                ));
+            }
+        }
+        self.entries.insert(key, kind);
+        Ok(())
+    }
+}
+
+struct PayloadCollection {
+    entries: BTreeMap<String, Payload>,
+    paths: PortablePathRegistry,
+}
+
+impl PayloadCollection {
+    fn new() -> Result<Self, RehomeError> {
+        let mut paths = PortablePathRegistry::default();
+        paths.insert("manifest.json", ArchivePathKind::File)?;
+        paths.insert("checksums.sha256", ArchivePathKind::File)?;
+        Ok(Self {
+            entries: BTreeMap::new(),
+            paths,
+        })
+    }
+
+    fn insert(&mut self, path: String, payload: Payload) -> Result<(), RehomeError> {
+        self.paths.insert(&path, ArchivePathKind::File)?;
+        self.entries.insert(path, payload);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct SessionIndexMetadata {
     bytes: Vec<u8>,
@@ -268,7 +384,7 @@ struct SessionIndexMetadata {
 fn stage_projects(
     project_paths: &[PathBuf],
     staging_root: &Path,
-    payloads: &mut BTreeMap<String, Payload>,
+    payloads: &mut PayloadCollection,
     counts: &mut ContentCounts,
 ) -> Result<(Vec<ProjectEntry>, (u64, u64)), RehomeError> {
     let mut projects = Vec::new();
@@ -372,7 +488,7 @@ fn stage_conversations(
     selected_ids: &[Uuid],
     index: &SessionIndexMetadata,
     staging_root: &Path,
-    payloads: &mut BTreeMap<String, Payload>,
+    payloads: &mut PayloadCollection,
     counts: &mut ContentCounts,
 ) -> Result<Vec<ConversationEntry>, RehomeError> {
     let selected: HashSet<Uuid> = selected_ids.iter().copied().collect();
@@ -383,11 +499,19 @@ fn stage_conversations(
     let mut conversations = Vec::new();
 
     for source in paths {
-        let bytes = read_stable_source(source)?;
-        let Some((task_id, session_value)) = session_identity(&bytes) else {
+        let relative = source
+            .strip_prefix(codex_home)
+            .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
+        let archive_path = format!("codex/{}", normalize_entry(relative)?);
+        let archive_path = normalize_entry(Path::new(&archive_path))?;
+        let staged_payload = copy_source_to_staging(source, staging_root, &archive_path)?;
+        let staged_path = staging_root.join(Path::new(&archive_path));
+        let Some((task_id, session_value)) = session_identity_from_file(&staged_path)? else {
+            fs::remove_file(staged_path).map_err(io_package_error)?;
             continue;
         };
         if !selected.contains(&task_id) {
+            fs::remove_file(staged_path).map_err(io_package_error)?;
             continue;
         }
         if !found.insert(task_id) {
@@ -395,11 +519,8 @@ fn stage_conversations(
                 "selected conversation has multiple session files",
             ));
         }
-        let relative = source
-            .strip_prefix(codex_home)
-            .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
-        let archive_path = format!("codex/{}", normalize_entry(relative)?);
-        stage_source(source, staging_root, payloads, &archive_path)?;
+        let content_hash = staged_payload.hash.clone();
+        payloads.insert(archive_path.clone(), staged_payload)?;
         let metadata = index.by_id.get(&task_id).unwrap_or(&session_value);
         conversations.push(ConversationEntry {
             task_id,
@@ -410,7 +531,7 @@ fn stage_conversations(
             updated_at: json_string(metadata, &["updated_at", "timestamp"])
                 .or_else(|| json_string(&session_value, &["updated_at", "timestamp"]))
                 .unwrap_or_default(),
-            content_hash: sha256_hex(&bytes),
+            content_hash,
             archive_path,
         });
     }
@@ -432,13 +553,15 @@ fn read_selected_session_index(
     let Some(path) = path else {
         return Ok(SessionIndexMetadata::default());
     };
-    let bytes = read_stable_source(path)?;
     let selected: HashSet<Uuid> = selected_ids.iter().copied().collect();
     let mut result = SessionIndexMetadata::default();
-    for line in String::from_utf8(bytes)
-        .map_err(|_| package_invalid("session index is not UTF-8"))?
-        .lines()
-    {
+    let before = source_fingerprint(path)?;
+    let file = fs::File::open(path).map_err(io_package_error)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    while read_bounded_line(&mut reader, &mut line)? {
+        let line = std::str::from_utf8(strip_line_ending(&line))
+            .map_err(|_| package_invalid("session index is not UTF-8"))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -453,8 +576,14 @@ fn read_selected_session_index(
             })?;
             result.bytes.extend_from_slice(&encoded);
             result.bytes.push(b'\n');
+            ensure_control_size("codex/session_index.jsonl", result.bytes.len() as u64)?;
             result.by_id.insert(id, value);
         }
+    }
+    if before != source_fingerprint(path)? {
+        return Err(package_invalid(
+            "source file changed in size or modification time while being read",
+        ));
     }
     Ok(result)
 }
@@ -471,29 +600,31 @@ fn export_selected_threads(
         Connection::open_with_flags(snapshot.database_path(), flags).map_err(|error| {
             package_invalid(format!("could not read Codex state metadata: {error}"))
         })?;
-    let mut statement = connection
-        .prepare("SELECT * FROM threads ORDER BY rowid")
-        .map_err(|error| package_invalid(format!("could not read Codex threads: {error}")))?;
-    let columns: Vec<String> = statement
-        .column_names()
+    let available_columns = thread_table_columns(&connection)?;
+    if !available_columns.contains("id") {
+        return Err(package_invalid("Codex threads table has no id column"));
+    }
+    let columns: Vec<&str> = THREAD_EXPORT_COLUMNS_V1
         .iter()
-        .map(|column| (*column).to_owned())
+        .copied()
+        .filter(|column| available_columns.contains(*column))
         .collect();
-    let id_column = columns
-        .iter()
-        .position(|column| column.eq_ignore_ascii_case("id"))
-        .ok_or_else(|| package_invalid("Codex threads table has no id column"))?;
+    let query = format!("SELECT {} FROM threads ORDER BY rowid", columns.join(", "));
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| package_invalid(format!("could not read Codex threads: {error}")))?;
     let selected: HashSet<String> = selected_ids.iter().map(Uuid::to_string).collect();
     let mut rows = statement
         .query([])
         .map_err(|error| package_invalid(format!("could not query Codex threads: {error}")))?;
-    let mut exported = Vec::new();
+    let mut bytes = vec![b'[', b'\n'];
+    let mut count = 0_u64;
     while let Some(row) = rows
         .next()
         .map_err(|error| package_invalid(format!("could not read Codex thread row: {error}")))?
     {
         let id = row
-            .get_ref(id_column)
+            .get_ref(0)
             .ok()
             .and_then(|value| value.as_str().ok())
             .map(str::to_owned);
@@ -505,25 +636,69 @@ fn export_selected_threads(
             let value = row.get_ref(index).map_err(|error| {
                 package_invalid(format!("could not read Codex thread field: {error}"))
             })?;
-            object.insert(column.clone(), sqlite_json_value(value));
+            object.insert((*column).to_owned(), sqlite_json_value(value)?);
         }
-        exported.push(Value::Object(object));
+        let encoded = serde_json::to_vec(&Value::Object(object))
+            .map_err(|error| package_invalid(format!("could not encode Codex thread: {error}")))?;
+        let separator_bytes = usize::from(count > 0) * 2;
+        let projected_size = bytes
+            .len()
+            .checked_add(separator_bytes)
+            .and_then(|size| size.checked_add(encoded.len()))
+            .and_then(|size| size.checked_add(3))
+            .ok_or_else(|| {
+                package_invalid("Codex thread metadata exceeds the control-file limit")
+            })?;
+        ensure_control_size("codex/metadata/threads.json", projected_size as u64)?;
+        if count > 0 {
+            bytes.extend_from_slice(b",\n");
+        }
+        bytes.extend_from_slice(&encoded);
+        count += 1;
     }
-    let count = exported.len() as u64;
-    let mut bytes = serde_json::to_vec_pretty(&exported)
-        .map_err(|error| package_invalid(format!("could not encode Codex threads: {error}")))?;
-    bytes.push(b'\n');
+    bytes.extend_from_slice(b"\n]\n");
+    ensure_control_size("codex/metadata/threads.json", bytes.len() as u64)?;
     Ok((bytes, count))
 }
 
-fn sqlite_json_value(value: ValueRef<'_>) -> Value {
-    match value {
+fn thread_table_columns(connection: &Connection) -> Result<HashSet<String>, RehomeError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(threads)")
+        .map_err(|error| package_invalid(format!("could not inspect Codex threads: {error}")))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| package_invalid(format!("could not inspect Codex threads: {error}")))?;
+    let mut result = HashSet::new();
+    for column in columns {
+        result.insert(
+            column
+                .map_err(|error| {
+                    package_invalid(format!("could not inspect Codex thread column: {error}"))
+                })?
+                .to_ascii_lowercase(),
+        );
+    }
+    Ok(result)
+}
+
+fn sqlite_json_value(value: ValueRef<'_>) -> Result<Value, RehomeError> {
+    Ok(match value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(value) => Value::from(value),
         ValueRef::Real(value) => Value::from(value),
-        ValueRef::Text(value) => Value::String(String::from_utf8_lossy(value).into_owned()),
-        ValueRef::Blob(value) => Value::String(format!("hex:{}", hex_bytes(value))),
-    }
+        ValueRef::Text(value) => {
+            ensure_control_size("Codex thread text field", value.len() as u64)?;
+            Value::String(String::from_utf8_lossy(value).into_owned())
+        }
+        ValueRef::Blob(value) => {
+            if value.len() as u64 > (MAX_CONTROL_FILE_BYTES - 4) / 2 {
+                return Err(package_invalid(
+                    "Codex thread blob field exceeds the control-file limit",
+                ));
+            }
+            Value::String(format!("hex:{}", hex_bytes(value)))
+        }
+    })
 }
 
 fn stage_discovered_files(
@@ -531,7 +706,7 @@ fn stage_discovered_files(
     source_root: &Path,
     archive_root: &str,
     staging_root: &Path,
-    payloads: &mut BTreeMap<String, Payload>,
+    payloads: &mut PayloadCollection,
 ) -> Result<u64, RehomeError> {
     let mut count = 0_u64;
     for source in sources {
@@ -553,7 +728,7 @@ fn stage_discovered_trees(
     source_root: &Path,
     archive_root: &str,
     staging_root: &Path,
-    payloads: &mut BTreeMap<String, Payload>,
+    payloads: &mut PayloadCollection,
 ) -> Result<u64, RehomeError> {
     let mut roots = BTreeMap::new();
     for marker in marker_files {
@@ -604,23 +779,32 @@ fn stage_discovered_trees(
 fn stage_source(
     source: &Path,
     staging_root: &Path,
-    payloads: &mut BTreeMap<String, Payload>,
+    payloads: &mut PayloadCollection,
     archive_path: &str,
 ) -> Result<(), RehomeError> {
     let archive_path = normalize_entry(Path::new(archive_path))?;
-    if payloads.contains_key(&archive_path) {
+    let payload = copy_source_to_staging(source, staging_root, &archive_path)?;
+    payloads.insert(archive_path, payload)
+}
+
+fn copy_source_to_staging(
+    source: &Path,
+    staging_root: &Path,
+    archive_path: &str,
+) -> Result<Payload, RehomeError> {
+    let before = source_fingerprint(source)?;
+    if before.length > MAX_ARCHIVE_ENTRY_BYTES {
         return Err(package_invalid(
-            "multiple sources map to the same package entry",
+            "package source entry exceeds the size limit",
         ));
     }
-    let before = source_fingerprint(source)?;
     let destination = staging_root.join(Path::new(&archive_path));
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(io_package_error)?;
     }
     let mut reader = fs::File::open(source).map_err(io_package_error)?;
     let mut writer = fs::File::create(&destination).map_err(io_package_error)?;
-    io::copy(&mut reader, &mut writer).map_err(io_package_error)?;
+    let hash = copy_and_hash(&mut reader, &mut writer)?;
     writer.sync_all().map_err(io_package_error)?;
     drop(writer);
     if before != source_fingerprint(source)? {
@@ -628,27 +812,19 @@ fn stage_source(
             "source file changed in size or modification time while being copied",
         ));
     }
-    let bytes = fs::read(&destination).map_err(io_package_error)?;
-    payloads.insert(
-        archive_path,
-        Payload {
-            hash: sha256_hex(&bytes),
-            executable: source_is_executable(source),
-        },
-    );
-    Ok(())
+    Ok(Payload {
+        hash,
+        executable: source_is_executable(source),
+    })
 }
 
 fn stage_generated(
     staging_root: &Path,
-    payloads: &mut BTreeMap<String, Payload>,
+    payloads: &mut PayloadCollection,
     archive_path: &str,
     bytes: &[u8],
 ) -> Result<(), RehomeError> {
     let archive_path = normalize_entry(Path::new(archive_path))?;
-    if payloads.contains_key(&archive_path) {
-        return Err(package_invalid("duplicate generated package entry"));
-    }
     write_staged_bytes(staging_root, &archive_path, bytes)?;
     payloads.insert(
         archive_path,
@@ -656,8 +832,7 @@ fn stage_generated(
             hash: sha256_hex(bytes),
             executable: false,
         },
-    );
-    Ok(())
+    )
 }
 
 fn write_staged_bytes(root: &Path, archive_path: &str, bytes: &[u8]) -> Result<(), RehomeError> {
@@ -671,7 +846,7 @@ fn write_staged_bytes(root: &Path, archive_path: &str, bytes: &[u8]) -> Result<(
 fn write_archive_atomically(
     staging_root: &Path,
     output_path: &Path,
-    payloads: &BTreeMap<String, Payload>,
+    payloads: &PayloadCollection,
 ) -> Result<(), RehomeError> {
     let output_parent = usable_parent(output_path);
     let mut temporary = NamedTempFile::new_in(output_parent)
@@ -697,13 +872,58 @@ fn write_archive_atomically(
         writer.finish().map_err(zip_package_error)?;
     }
     temporary.as_file().sync_all().map_err(io_package_error)?;
-    temporary.persist_noclobber(output_path).map_err(|error| {
+    publish_archive_exclusively(temporary.path(), output_path).map_err(|error| {
         package_invalid(format!(
-            "could not atomically publish package: {}",
-            error.error
+            "could not atomically publish package without overwrite: {error}"
         ))
     })?;
+    drop(temporary);
     Ok(())
+}
+
+#[cfg(windows)]
+fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::hard_link(source, destination)
 }
 
 struct ArchiveEntry {
@@ -714,9 +934,10 @@ struct ArchiveEntry {
 
 fn staged_archive_entries(
     staging_root: &Path,
-    payloads: &BTreeMap<String, Payload>,
+    payloads: &PayloadCollection,
 ) -> Result<Vec<ArchiveEntry>, RehomeError> {
     let mut entries = Vec::new();
+    let mut total_bytes = 0_u64;
     for entry in WalkDir::new(staging_root).sort_by_file_name() {
         let entry = entry.map_err(|error| {
             package_invalid(format!("could not enumerate package staging: {error}"))
@@ -736,7 +957,25 @@ fn staged_archive_entries(
                 permissions: 0o755,
             });
         } else if entry.file_type().is_file() {
+            let size = entry
+                .metadata()
+                .map_err(|error| {
+                    package_invalid(format!("could not inspect package staging: {error}"))
+                })?
+                .len();
+            if size > MAX_ARCHIVE_ENTRY_BYTES {
+                return Err(package_invalid(
+                    "staged package entry exceeds the size limit",
+                ));
+            }
+            total_bytes = total_bytes
+                .checked_add(size)
+                .ok_or_else(|| package_invalid("staged package exceeds the size limit"))?;
+            if total_bytes > MAX_INSPECTION_BYTES {
+                return Err(package_invalid("staged package exceeds the size limit"));
+            }
             let executable = payloads
+                .entries
                 .get(&name)
                 .map(|payload| payload.executable)
                 .unwrap_or(false);
@@ -749,6 +988,11 @@ fn staged_archive_entries(
             return Err(package_invalid("staging contains a non-regular entry"));
         }
     }
+    if entries.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(package_invalid(
+            "staged package entry count exceeds the limit",
+        ));
+    }
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(entries)
 }
@@ -760,9 +1004,9 @@ fn stable_options(permissions: u32) -> SimpleFileOptions {
         .unix_permissions(permissions)
 }
 
-fn render_checksums(payloads: &BTreeMap<String, Payload>) -> String {
+fn render_checksums(payloads: &PayloadCollection) -> String {
     let mut checksums = String::new();
-    for (path, payload) in payloads {
+    for (path, payload) in &payloads.entries {
         checksums.push_str(&payload.hash);
         checksums.push_str("  ");
         checksums.push_str(path);
@@ -773,7 +1017,7 @@ fn render_checksums(payloads: &BTreeMap<String, Payload>) -> String {
 
 fn verify_checksums(
     checksum_bytes: &[u8],
-    files: &BTreeMap<String, Vec<u8>>,
+    payload_hashes: &BTreeMap<String, String>,
 ) -> Result<(), RehomeError> {
     if checksum_bytes.starts_with(&[0xef, 0xbb, 0xbf]) || checksum_bytes.contains(&b'\r') {
         return Err(package_invalid(
@@ -807,11 +1051,7 @@ fn verify_checksums(
         }
     }
 
-    let payload_paths: HashSet<&str> = files
-        .keys()
-        .filter(|path| !matches!(path.as_str(), "manifest.json" | "checksums.sha256"))
-        .map(String::as_str)
-        .collect();
+    let payload_paths: HashSet<&str> = payload_hashes.keys().map(String::as_str).collect();
     let checksum_paths: HashSet<&str> = expected.keys().map(String::as_str).collect();
     if payload_paths != checksum_paths {
         return Err(RehomeError::new(
@@ -820,13 +1060,13 @@ fn verify_checksums(
         ));
     }
     for (path, expected_hash) in expected {
-        let bytes = files.get(&path).ok_or_else(|| {
+        let actual_hash = payload_hashes.get(&path).ok_or_else(|| {
             RehomeError::new(
                 ErrorCode::ChecksumMismatch,
                 "checksummed payload is missing",
             )
         })?;
-        if sha256_hex(bytes) != expected_hash {
+        if actual_hash != &expected_hash {
             return Err(RehomeError::new(
                 ErrorCode::ChecksumMismatch,
                 format!("checksum mismatch for {path}"),
@@ -834,6 +1074,145 @@ fn verify_checksums(
         }
     }
     Ok(())
+}
+
+fn validate_manifest_archive_paths(
+    manifest: &PackageManifest,
+    file_paths: &HashSet<String>,
+    payload_hashes: &BTreeMap<String, String>,
+) -> Result<(), RehomeError> {
+    let mut referenced_conversations = PortablePathRegistry::default();
+    for conversation in &manifest.conversations {
+        let path = validate_manifest_archive_path(&conversation.archive_path)?;
+        if !path.starts_with("codex/sessions/") && !path.starts_with("codex/archived_sessions/") {
+            return Err(package_invalid(
+                "manifest conversation path is outside the expected Codex session prefixes",
+            ));
+        }
+        referenced_conversations.insert(&path, ArchivePathKind::File)?;
+        let actual_hash = payload_hashes.get(&path).ok_or_else(|| {
+            package_invalid("manifest conversation references a missing package payload")
+        })?;
+        if actual_hash != &conversation.content_hash.to_ascii_lowercase() {
+            return Err(package_invalid(
+                "manifest conversation content hash does not match its package payload",
+            ));
+        }
+    }
+
+    for project in &manifest.projects {
+        let expected_root = format!("projects/{}/files", project.project_id);
+        let path = validate_manifest_archive_path(&project.archive_path)?;
+        if path != expected_root {
+            return Err(package_invalid(
+                "manifest project path does not match its expected package prefix",
+            ));
+        }
+        let project_metadata = format!("projects/{}/project.json", project.project_id);
+        if !file_paths.contains(&project_metadata) {
+            return Err(package_invalid(
+                "manifest project references missing project metadata",
+            ));
+        }
+        if project.file_count > 0 {
+            let prefix = format!("{path}/");
+            if !payload_hashes
+                .keys()
+                .any(|entry| entry.starts_with(&prefix))
+            {
+                return Err(package_invalid(
+                    "manifest project references missing project payloads",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_manifest_archive_path(path: &str) -> Result<String, RehomeError> {
+    let normalized = validate_zip_entry_name(path, false)
+        .map_err(|error| package_invalid(format!("manifest archive path is invalid: {error}")))?;
+    if normalized != path {
+        return Err(package_invalid("manifest archive path is not normalized"));
+    }
+    Ok(normalized)
+}
+
+fn read_control_entry<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, RehomeError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CONTROL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| package_invalid(format!("could not read ZIP control file: {error}")))?;
+    ensure_control_size(name, bytes.len() as u64)?;
+    Ok(bytes)
+}
+
+fn ensure_control_size(name: &str, size: u64) -> Result<(), RehomeError> {
+    if size > MAX_CONTROL_FILE_BYTES {
+        return Err(package_invalid(format!(
+            "ZIP control file size exceeds the inspection limit: {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn hash_reader<R: Read>(reader: &mut R) -> Result<String, RehomeError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    let mut bytes_read = 0_u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| package_invalid(format!("could not stream ZIP payload: {error}")))?;
+        if count == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(count as u64)
+            .ok_or_else(|| package_invalid("ZIP entry size exceeds the inspection limit"))?;
+        if bytes_read > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(package_invalid(
+                "ZIP entry size exceeds the inspection limit",
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex_bytes(&hasher.finalize()))
+}
+
+fn copy_and_hash<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> Result<String, RehomeError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    loop {
+        let count = reader.read(&mut buffer).map_err(io_package_error)?;
+        if count == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..count])
+            .map_err(io_package_error)?;
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex_bytes(&hasher.finalize()))
+}
+
+fn portable_collision_key(path: &str) -> String {
+    path.split('/')
+        .map(|component| {
+            component
+                .nfc()
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+                .nfc()
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn portable_ancestors(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(|(index, _)| &path[..index])
 }
 
 fn validate_zip_entry_name(raw_name: &str, is_directory: bool) -> Result<String, RehomeError> {
@@ -901,23 +1280,50 @@ fn source_fingerprint(path: &Path) -> Result<SourceFingerprint, RehomeError> {
     })
 }
 
-fn read_stable_source(path: &Path) -> Result<Vec<u8>, RehomeError> {
-    let before = source_fingerprint(path)?;
-    let bytes = fs::read(path).map_err(io_package_error)?;
-    if before != source_fingerprint(path)? {
-        return Err(package_invalid(
-            "source file changed in size or modification time while being read",
-        ));
+fn session_identity_from_file(path: &Path) -> Result<Option<(Uuid, Value)>, RehomeError> {
+    let file = fs::File::open(path).map_err(io_package_error)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    while read_bounded_line(&mut reader, &mut line)? {
+        let Ok(line) = std::str::from_utf8(strip_line_ending(&line)) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(id) = json_uuid(&value, &["thread_id", "id", "conversation_id"]) {
+            return Ok(Some((id, value)));
+        }
     }
-    Ok(bytes)
+    Ok(None)
 }
 
-fn session_identity(bytes: &[u8]) -> Option<(Uuid, Value)> {
-    std::str::from_utf8(bytes).ok()?.lines().find_map(|line| {
-        let value: Value = serde_json::from_str(line).ok()?;
-        let id = json_uuid(&value, &["thread_id", "id", "conversation_id"])?;
-        Some((id, value))
-    })
+fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> Result<bool, RehomeError> {
+    line.clear();
+    loop {
+        let available = reader.fill_buf().map_err(io_package_error)?;
+        if available.is_empty() {
+            return Ok(!line.is_empty());
+        }
+        let length = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if line.len() + length > MAX_JSONL_LINE_BYTES {
+            return Err(package_invalid("JSONL line exceeds the control-file limit"));
+        }
+        line.extend_from_slice(&available[..length]);
+        let complete = available[length - 1] == b'\n';
+        reader.consume(length);
+        if complete {
+            return Ok(true);
+        }
+    }
+}
+
+fn strip_line_ending(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 fn json_uuid(value: &Value, keys: &[&str]) -> Option<Uuid> {
@@ -959,6 +1365,85 @@ fn source_is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn source_is_executable(_path: &Path) -> bool {
     false
+}
+
+fn private_app_temp_root() -> Result<PathBuf, RehomeError> {
+    let root = private_app_temp_path();
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(package_invalid(
+                "private application temp root is not a real directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(&root).map_err(io_package_error)?;
+        }
+        Err(error) => return Err(io_package_error(error)),
+    }
+    make_staging_private(&root)?;
+    root.canonicalize().map_err(io_package_error)
+}
+
+#[cfg(target_os = "windows")]
+fn private_app_temp_path() -> PathBuf {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join("CodexRehome")
+        .join("Temp")
+}
+
+#[cfg(target_os = "macos")]
+fn private_app_temp_path() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join("Library")
+        .join("Caches")
+        .join("CodexRehome")
+        .join("Temp")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn private_app_temp_path() -> PathBuf {
+    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(runtime).join("codex-rehome");
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join(".cache")
+        .join("codex-rehome")
+        .join("tmp")
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn private_app_temp_path() -> PathBuf {
+    env::temp_dir().join("codex-rehome")
+}
+
+fn validate_staging_location(
+    staging_root: &Path,
+    output_parent: &Path,
+    project_paths: &[PathBuf],
+    codex_home: &Path,
+) -> Result<(), RehomeError> {
+    let mut forbidden_roots = Vec::with_capacity(project_paths.len() + 2);
+    forbidden_roots.push(output_parent.canonicalize().map_err(io_package_error)?);
+    forbidden_roots.push(codex_home.canonicalize().map_err(io_package_error)?);
+    for project in project_paths {
+        forbidden_roots.push(project.canonicalize().map_err(io_package_error)?);
+    }
+    if forbidden_roots
+        .iter()
+        .any(|root| staging_root.starts_with(root))
+    {
+        return Err(package_invalid(
+            "private staging cannot be inside a source project or package output directory",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

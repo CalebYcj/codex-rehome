@@ -14,12 +14,19 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["backup", "bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tempfile = "3"
+unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
 walkdir = "2"
 zip = { version = "4.6", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

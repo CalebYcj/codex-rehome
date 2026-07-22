@@ -4,19 +4,24 @@ use common::{synthetic_codex_fixture, THREAD_ID};
 use rehome_desktop_lib::core::{
     error::ErrorCode,
     models::{
-        ContentCounts, CreatePackageRequest, ExclusionSummary, PackageManifest, PackageMode,
-        SourceOs,
+        ContentCounts, ConversationEntry, CreatePackageRequest, ExclusionSummary, PackageManifest,
+        PackageMode, SourceOs,
     },
     package::{create_package, inspect_package},
 };
 use rusqlite::{params, Connection};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     error::Error,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -94,7 +99,7 @@ fn packages_selected_fixture_content_without_mutating_sources() -> Result<(), Bo
     let preview = inspect_package(&report.package_path)?;
     assert_eq!(preview.manifest.format, "codex-rehome");
     assert_eq!(preview.manifest.schema_version, 1);
-    assert_eq!(preview.manifest.source_os, SourceOs::Windows);
+    assert_eq!(preview.manifest.source_os, current_source_os());
     assert_eq!(
         preview.manifest.source_device_id,
         Uuid::parse_str("33333333-3333-4333-8333-333333333333")?
@@ -155,6 +160,12 @@ fn packages_selected_fixture_content_without_mutating_sources() -> Result<(), Bo
         .filter(|entry| entry.ends_with(".jsonl"))
         .any(|entry| entry.contains("codex/sessions/")));
     assert_eq!(preview.entries, sorted(preview.entries.clone()));
+    let conversation = &preview.manifest.conversations[0];
+    let mut archived = Vec::new();
+    ZipArchive::new(fs::File::open(&report.package_path)?)?
+        .by_name(&conversation.archive_path)?
+        .read_to_end(&mut archived)?;
+    assert_eq!(conversation.content_hash, checksum(&archived));
     assert_eq!(snapshot_files(&fixture.root)?, source_before);
     Ok(())
 }
@@ -217,6 +228,110 @@ fn package_exports_threads_from_a_private_wal_snapshot() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn package_uses_a_transactional_sqlite_snapshot_during_concurrent_writes(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let state_database = fixture.codex_home.join("state_9.sqlite");
+    {
+        let connection = Connection::open(&state_database)?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+        connection.execute(
+            "CREATE TABLE threads (\
+                id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT, title TEXT, updated_at TEXT, \
+                archived INTEGER, has_user_event INTEGER, preview TEXT\
+            )",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO threads VALUES (?1, '', '', '0', '', 0, 1, '0')",
+            [THREAD_ID],
+        )?;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicBool::new(false));
+    let stop_writer = Arc::clone(&stop);
+    let started_writer = Arc::clone(&started);
+    let database_for_writer = state_database.clone();
+    let writer = thread::spawn(move || -> Result<(), String> {
+        let mut connection = Connection::open(database_for_writer).map_err(|e| e.to_string())?;
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(|e| e.to_string())?;
+        let mut version = 0_u64;
+        while !stop_writer.load(Ordering::Acquire) {
+            version += 1;
+            let transaction = connection.transaction().map_err(|e| e.to_string())?;
+            transaction
+                .execute(
+                    "UPDATE threads SET title = ?1, preview = ?1 WHERE id = ?2",
+                    params![version.to_string(), THREAD_ID],
+                )
+                .map_err(|e| e.to_string())?;
+            transaction.commit().map_err(|e| e.to_string())?;
+            started_writer.store(true, Ordering::Release);
+        }
+        Ok(())
+    });
+    let deadline = SystemTime::now() + Duration::from_secs(10);
+    while !started.load(Ordering::Acquire) {
+        if SystemTime::now() >= deadline {
+            stop.store(true, Ordering::Release);
+            return Err("timed out waiting for SQLite writer".into());
+        }
+        thread::yield_now();
+    }
+    let source_names_before = directory_entry_names(&fixture.codex_home)?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("concurrent-sqlite.rehome");
+
+    let result = create_package(package_request(&fixture, package.clone()));
+    let source_names_after = directory_entry_names(&fixture.codex_home)?;
+    stop.store(true, Ordering::Release);
+    writer
+        .join()
+        .map_err(|_| "SQLite writer panicked")?
+        .map_err(|error| format!("SQLite writer failed: {error}"))?;
+    result?;
+
+    assert_eq!(source_names_after, source_names_before);
+    let rows: Value =
+        serde_json::from_slice(&read_zip_entry(&package, "codex/metadata/threads.json")?)?;
+    assert_eq!(rows[0]["title"], rows[0]["preview"]);
+    Ok(())
+}
+
+#[test]
+fn thread_export_uses_a_versioned_allowlist_and_tolerates_missing_optional_columns(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    fs::remove_file(&fixture.state_db_path)?;
+    let connection = Connection::open(&fixture.state_db_path)?;
+    connection.execute(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, future_secret TEXT NOT NULL)",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO threads VALUES (?1, 'must-not-leave-source')",
+        [THREAD_ID],
+    )?;
+    drop(connection);
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("allowlisted-threads.rehome");
+
+    let report = create_package(package_request(&fixture, package.clone()))?;
+
+    assert_eq!(report.counts.sqlite_threads, 1);
+    let rows: Value =
+        serde_json::from_slice(&read_zip_entry(&package, "codex/metadata/threads.json")?)?;
+    assert_eq!(rows[0]["id"], THREAD_ID);
+    assert!(rows[0].get("future_secret").is_none());
+    assert_eq!(rows[0].as_object().expect("thread object").len(), 1);
+    Ok(())
+}
+
+#[test]
 fn rejects_corrupt_zip_bytes_with_a_stable_error_code() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let package = directory.path().join("corrupt.rehome");
@@ -274,6 +389,107 @@ fn rejects_unsafe_and_duplicate_zip_entry_names() -> Result<(), Box<dyn Error>> 
     )?;
     assert!(replace_all(&package, b"duplicate-b", b"duplicate-a")? >= 2);
     assert_error_code(inspect_package(&package), ErrorCode::PackageInvalid);
+    Ok(())
+}
+
+#[test]
+fn rejects_unicode_and_file_descendant_portable_path_collisions() -> Result<(), Box<dyn Error>> {
+    let collision_sets: &[&[(&str, &[u8])]] = &[
+        &[
+            ("codex/sessions/Thread.jsonl", b"upper"),
+            ("codex/sessions/thread.jsonl", b"lower"),
+        ],
+        &[
+            ("codex/sessions/caf\u{e9}.jsonl", b"composed"),
+            ("codex/sessions/cafe\u{301}.jsonl", b"decomposed"),
+        ],
+        &[
+            ("codex/sessions/thread", b"file"),
+            ("codex/sessions/thread/child", b"descendant"),
+        ],
+    ];
+
+    for (index, payloads) in collision_sets.iter().enumerate() {
+        let directory = tempfile::tempdir()?;
+        let package = directory.path().join(format!("collision-{index}.rehome"));
+        write_valid_test_package(&package, &test_manifest(1), payloads)?;
+
+        assert_error_message_contains(inspect_package(&package), "collision");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn creation_rejects_unicode_portable_path_collisions() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    fs::write(fixture.project_path.join("caf\u{e9}.txt"), b"composed")?;
+    fs::write(fixture.project_path.join("cafe\u{301}.txt"), b"decomposed")?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("creation-collision.rehome");
+
+    assert_error_message_contains(
+        create_package(package_request(&fixture, package)),
+        "collision",
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_invalid_or_missing_manifest_payload_references() -> Result<(), Box<dyn Error>> {
+    for (index, archive_path) in [
+        "../escape.jsonl",
+        "/absolute.jsonl",
+        "codex\\sessions\\thread.jsonl",
+        "projects/not-a-conversation.jsonl",
+        "codex/sessions/missing.jsonl",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = tempfile::tempdir()?;
+        let package = directory
+            .path()
+            .join(format!("manifest-path-{index}.rehome"));
+        let mut manifest = test_manifest(1);
+        manifest.conversations.push(ConversationEntry {
+            task_id: Uuid::new_v4(),
+            project_id: None,
+            title: "Synthetic".into(),
+            updated_at: "2026-07-22T00:00:00Z".into(),
+            content_hash: checksum(b"payload"),
+            archive_path: archive_path.into(),
+        });
+        write_valid_test_package(
+            &package,
+            &manifest,
+            &[("codex/sessions/thread.jsonl", b"payload")],
+        )?;
+
+        assert_error_message_contains(inspect_package(&package), "manifest");
+    }
+    Ok(())
+}
+
+#[test]
+fn inspection_rejects_oversized_controls_entries_and_entry_counts() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+
+    let oversized_control = directory.path().join("oversized-control.rehome");
+    write_test_zip(
+        &oversized_control,
+        &[("manifest.json", &vec![b' '; 4 * 1024 * 1024 + 1])],
+    )?;
+    assert_error_message_contains(inspect_package(&oversized_control), "control file size");
+
+    let oversized_entry = directory.path().join("oversized-entry.rehome");
+    write_test_zip(&oversized_entry, &[("payload.bin", b"x")])?;
+    patch_first_central_uncompressed_size(&oversized_entry, 300 * 1024 * 1024)?;
+    assert_error_message_contains(inspect_package(&oversized_entry), "entry size");
+
+    let excessive_count = directory.path().join("excessive-count.rehome");
+    write_many_directories_zip(&excessive_count, 10_001)?;
+    assert_error_message_contains(inspect_package(&excessive_count), "entry count");
     Ok(())
 }
 
@@ -376,6 +592,76 @@ fn create_package_never_clobbers_an_existing_output() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn published_package_is_complete_when_the_target_first_appears() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let large_source = fixture.project_path.join("large.bin");
+    fs::File::create(&large_source)?.set_len(64 * 1024 * 1024)?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("published.rehome");
+    let package_for_observer = package.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_observer = Arc::clone(&stop);
+    let observer = thread::spawn(move || -> Result<bool, String> {
+        while !stop_observer.load(Ordering::Acquire) {
+            if package_for_observer.exists() {
+                inspect_package(&package_for_observer).map_err(|error| error.to_string())?;
+                return Ok(true);
+            }
+            thread::yield_now();
+        }
+        Ok(false)
+    });
+
+    let result = create_package(package_request(&fixture, package.clone()));
+    if result.is_err() {
+        stop.store(true, Ordering::Release);
+    }
+    let observed = observer.join().map_err(|_| "observer panicked")??;
+    result?;
+    assert!(observed);
+    assert_eq!(fs::read_dir(directory.path())?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn sensitive_staging_never_appears_in_project_or_output_directories() -> Result<(), Box<dyn Error>>
+{
+    let fixture = synthetic_codex_fixture()?;
+    fs::File::create(fixture.project_path.join("large.bin"))?.set_len(128 * 1024 * 1024)?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("private-stage.rehome");
+    let watched_roots = [fixture.project_path.clone(), directory.path().to_path_buf()];
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_observer = Arc::clone(&stop);
+    let observer = thread::spawn(move || {
+        let mut found = false;
+        while !stop_observer.load(Ordering::Acquire) {
+            found |= watched_roots.iter().any(|root| {
+                WalkDir::new(root)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".rehome-stage-")
+                    })
+            });
+            if found {
+                break;
+            }
+            thread::yield_now();
+        }
+        found
+    });
+
+    create_package(package_request(&fixture, package))?;
+    stop.store(true, Ordering::Release);
+    assert!(!observer.join().map_err(|_| "observer panicked")?);
+    Ok(())
+}
+
+#[test]
 fn aborts_if_a_source_changes_while_it_is_copied() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let large_source = fixture.project_path.join("large.bin");
@@ -385,34 +671,24 @@ fn aborts_if_a_source_changes_while_it_is_copied() -> Result<(), Box<dyn Error>>
 
     let directory = tempfile::tempdir()?;
     let package = directory.path().join("racing.rehome");
-    let staging_parent = directory.path().to_path_buf();
     let source_for_thread = large_source.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_mutator = Arc::clone(&stop);
     let mutator = thread::spawn(move || -> Result<(), String> {
-        let deadline = SystemTime::now() + Duration::from_secs(10);
-        loop {
-            let copy_started = WalkDir::new(&staging_parent)
-                .into_iter()
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_name() == "large.bin");
-            if copy_started {
-                OpenOptions::new()
-                    .append(true)
-                    .open(&source_for_thread)
-                    .and_then(|mut file| file.write_all(b"changed"))
-                    .map_err(|error| error.to_string())?;
-                return Ok(());
-            }
-            if SystemTime::now() >= deadline {
-                return Err("timed out waiting for staged copy".to_owned());
-            }
+        while !stop_mutator.load(Ordering::Acquire) {
+            OpenOptions::new()
+                .append(true)
+                .open(&source_for_thread)
+                .and_then(|mut file| file.write_all(b"changed"))
+                .map_err(|error| error.to_string())?;
             thread::sleep(Duration::from_millis(1));
         }
+        Ok(())
     });
 
-    assert_error_code(
-        create_package(package_request(&fixture, package.clone())),
-        ErrorCode::PackageInvalid,
-    );
+    let result = create_package(package_request(&fixture, package.clone()));
+    stop.store(true, Ordering::Release);
+    assert_error_code(result, ErrorCode::PackageInvalid);
     mutator
         .join()
         .map_err(|_| "source mutator panicked")?
@@ -450,6 +726,21 @@ fn snapshot_files(root: &Path) -> Result<BTreeMap<PathBuf, FileSnapshot>, Box<dy
             ))
         })
         .collect()
+}
+
+fn directory_entry_names(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut names = fs::read_dir(root)?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    names.sort();
+    Ok(names)
+}
+
+fn read_zip_entry(path: &Path, name: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut archive = ZipArchive::new(fs::File::open(path)?)?;
+    let mut bytes = Vec::new();
+    archive.by_name(name)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn sorted(mut entries: Vec<String>) -> Vec<String> {
@@ -511,6 +802,48 @@ fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) -> Result<(), Box<dyn 
     Ok(())
 }
 
+fn write_valid_test_package(
+    path: &Path,
+    manifest: &PackageManifest,
+    payloads: &[(&str, &[u8])],
+) -> Result<(), Box<dyn Error>> {
+    let manifest = serde_json::to_vec(manifest)?;
+    let mut checksum_text = String::new();
+    for (name, bytes) in payloads {
+        checksum_text.push_str(&format!("{}  {name}\n", checksum(bytes)));
+    }
+    let mut entries: Vec<(&str, &[u8])> = payloads.to_vec();
+    entries.push(("checksums.sha256", checksum_text.as_bytes()));
+    entries.push(("manifest.json", &manifest));
+    write_test_zip(path, &entries)
+}
+
+fn write_many_directories_zip(path: &Path, count: usize) -> Result<(), Box<dyn Error>> {
+    let file = fs::File::create(path)?;
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
+        .unix_permissions(0o755);
+    for index in 0..count {
+        writer.add_directory(format!("entries/{index:05}/"), options)?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+fn patch_first_central_uncompressed_size(path: &Path, size: u32) -> Result<(), Box<dyn Error>> {
+    let mut bytes = fs::read(path)?;
+    let signature = [0x50, 0x4b, 0x01, 0x02];
+    let offset = bytes
+        .windows(signature.len())
+        .position(|window| window == signature)
+        .ok_or("central directory header missing")?;
+    bytes[offset + 24..offset + 28].copy_from_slice(&size.to_le_bytes());
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
 fn replace_all(path: &Path, from: &[u8], to: &[u8]) -> Result<usize, Box<dyn Error>> {
     assert_eq!(from.len(), to.len());
     let mut bytes = fs::read(path)?;
@@ -532,8 +865,30 @@ fn assert_error_code<T: std::fmt::Debug>(
     assert_eq!(result.expect_err("operation must fail").code, code);
 }
 
+fn assert_error_message_contains<T: std::fmt::Debug>(
+    result: Result<T, rehome_desktop_lib::core::error::RehomeError>,
+    expected: &str,
+) {
+    let error = result.expect_err("operation must fail");
+    assert_eq!(error.code, ErrorCode::PackageInvalid);
+    assert!(
+        error.message.contains(expected),
+        "expected error containing {expected:?}, got {:?}",
+        error.message
+    );
+}
+
 fn checksum(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn current_source_os() -> SourceOs {
+    #[cfg(target_os = "windows")]
+    return SourceOs::Windows;
+    #[cfg(target_os = "macos")]
+    return SourceOs::Macos;
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    return SourceOs::Linux;
 }
 
 fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
