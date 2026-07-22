@@ -391,6 +391,8 @@ fn sqlite_import_rejects_hard_linked_database_without_touching_either_name(
     )?;
     drop(connection);
     std::fs::hard_link(&database, &alias)?;
+    let lock = temp.path().join(".state_5.sqlite.codex-rehome.lock");
+    std::fs::write(&lock, b"another restore")?;
     let before = std::fs::read(&database)?;
     let metadata = serde_json::to_vec(&serde_json::json!([{
         "id": SOURCE_ID,
@@ -412,6 +414,170 @@ fn sqlite_import_rejects_hard_linked_database_without_touching_either_name(
     assert!(error.message.contains("hard link"));
     assert_eq!(std::fs::read(&database)?, before);
     assert_eq!(std::fs::read(&alias)?, before);
+    assert_eq!(std::fs::read(&lock)?, b"another restore");
+    Ok(())
+}
+
+#[test]
+fn sqlite_import_honors_the_database_cas_lock_without_changing_rows() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, rollout_path TEXT);",
+    )?;
+    drop(connection);
+    let lock = temp.path().join(".state_5.sqlite.codex-rehome.lock");
+    std::fs::write(&lock, b"another restore")?;
+    let before = std::fs::read(&database)?;
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "title": "incoming",
+    }]))?;
+
+    let error = import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        rehome_desktop_lib::core::error::ErrorCode::RestoreFailed
+    );
+    assert!(error.message.contains("locked"));
+    assert_eq!(std::fs::read(&database)?, before);
+    assert_eq!(std::fs::read(&lock)?, b"another restore");
+    Ok(())
+}
+
+#[test]
+fn sqlite_import_updates_a_live_wal_database_in_place_and_survives_reopen(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE threads (
+             id TEXT PRIMARY KEY,
+             title TEXT,
+             cwd TEXT,
+             rollout_path TEXT,
+             target_only TEXT NOT NULL DEFAULT 'default'
+         );
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )?;
+    let identity = file_identity(&database)?;
+    connection.execute(
+        "INSERT INTO threads (id, title, target_only) VALUES (?1, 'wal title', 'keep me')",
+        [TARGET_ID],
+    )?;
+    assert!(sqlite_sidecar(&database, "-wal").exists());
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "title": "incoming",
+        "cwd": WINDOWS_PROJECT,
+    }]))?;
+
+    import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )?;
+
+    assert_eq!(file_identity(&database)?, identity);
+    let live_title: String = connection.query_row(
+        "SELECT title FROM threads WHERE id = ?1",
+        [TARGET_ID],
+        |row| row.get(0),
+    )?;
+    assert_eq!(live_title, planned_session().title);
+    drop(connection);
+
+    let reopened = Connection::open(&database)?;
+    let row = reopened.query_row(
+        "SELECT title, cwd, rollout_path, target_only FROM threads WHERE id = ?1",
+        [TARGET_ID],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    assert_eq!(
+        row,
+        (
+            planned_session().title,
+            MAC_PROJECT.into(),
+            MAC_SESSION.into(),
+            "keep me".into(),
+        )
+    );
+    assert_eq!(file_identity(&database)?, identity);
+    Ok(())
+}
+
+#[test]
+fn sqlite_import_merges_with_a_pinned_stale_wal_and_survives_reopen() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let writer = Connection::open(&database)?;
+    writer.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, rollout_path TEXT);
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )?;
+    let identity = file_identity(&database)?;
+    let reader = Connection::open(&database)?;
+    reader.execute_batch("BEGIN")?;
+    let _: i64 = reader.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
+    let wal_only_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    writer.execute(
+        "INSERT INTO threads (id, title) VALUES (?1, 'stale wal row')",
+        [wal_only_id],
+    )?;
+    drop(writer);
+    assert!(sqlite_sidecar(&database, "-wal").exists());
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "title": "incoming",
+    }]))?;
+
+    import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )?;
+
+    assert_eq!(file_identity(&database)?, identity);
+    reader.execute_batch("ROLLBACK")?;
+    drop(reader);
+    let reopened = Connection::open(&database)?;
+    let imported_title: String = reopened.query_row(
+        "SELECT title FROM threads WHERE id = ?1",
+        [TARGET_ID],
+        |row| row.get(0),
+    )?;
+    let stale_wal_title: String = reopened.query_row(
+        "SELECT title FROM threads WHERE id = ?1",
+        [wal_only_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(imported_title, planned_session().title);
+    assert_eq!(stale_wal_title, "stale wal row");
+    assert_eq!(file_identity(&database)?, identity);
     Ok(())
 }
 
@@ -428,8 +594,12 @@ fn sqlite_import_rolls_back_every_row_when_a_later_row_fails() -> Result<(), Box
             rollout_path TEXT
         );",
     )?;
-    drop(connection);
     let first_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333")?;
+    connection.execute(
+        "INSERT INTO threads (id, title) VALUES (?1, 'original')",
+        [first_id.to_string()],
+    )?;
+    drop(connection);
     let second_id = Uuid::parse_str("44444444-4444-4444-8444-444444444444")?;
     let sessions = vec![
         simple_session(first_id, "accepted"),
@@ -448,7 +618,13 @@ fn sqlite_import_rolls_back_every_row_when_a_later_row_fails() -> Result<(), Box
     );
     let connection = Connection::open(&database)?;
     let count: i64 = connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
-    assert_eq!(count, 0);
+    let title: String = connection.query_row(
+        "SELECT title FROM threads WHERE id = ?1",
+        [first_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count, 1);
+    assert_eq!(title, "original");
     Ok(())
 }
 
@@ -986,6 +1162,45 @@ fn jsonl(values: &[Value]) -> String {
         .join("\n");
     result.push('\n');
     result
+}
+
+fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
+    let mut path = database.as_os_str().to_owned();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path) -> std::io::Result<(u32, u32, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = std::fs::File::open(path)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok((
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn file_identity(path: &Path) -> std::io::Result<std::time::SystemTime> {
+    std::fs::metadata(path)?.created()
 }
 
 struct FakeRunner {

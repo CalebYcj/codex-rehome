@@ -9,8 +9,8 @@ use crate::core::{
 };
 use chrono::DateTime;
 use rusqlite::{
-    backup::Backup, params_from_iter, types::Value as SqlValue, Connection, OpenFlags,
-    OptionalExtension,
+    params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
+    TransactionBehavior,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -403,6 +403,8 @@ pub fn import_sqlite_threads(
     let parent = database
         .parent()
         .ok_or_else(|| restore_failed("target Codex state database has no parent directory"))?;
+    ensure_safe_codex_target(parent, database)?;
+    reject_hard_linked_sqlite(database)?;
     let operation = PlannedOperation {
         package_source: "codex/metadata/threads.json".into(),
         target: database.to_path_buf(),
@@ -420,81 +422,52 @@ fn import_sqlite_threads_for_operation(
     sessions: &[PlannedSession],
     rewrites: &[ReferenceRewrite],
 ) -> Result<usize, RehomeError> {
-    let rows = package_thread_rows(package_bytes, sessions, rewrites)?;
-    let guard = TargetReplacementGuard::acquire(root, operation)?;
+    ensure_safe_codex_target(root, &operation.target)?;
     reject_hard_linked_sqlite(&operation.target)?;
-    let parent = operation
-        .target
-        .parent()
-        .ok_or_else(|| restore_failed("target Codex state database has no parent directory"))?;
-    let temporary = NamedTempFile::new_in(parent).map_err(|error| {
-        restore_failed(format!(
-            "could not create private Codex database copy: {error}"
-        ))
-    })?;
-    backup_sqlite_database(&operation.target, temporary.path())?;
+    let identity = sqlite_file_identity(&operation.target)?;
+    let rows = package_thread_rows(package_bytes, sessions, rewrites)?;
+    let _guard = TargetReplacementGuard::acquire(root, operation)?;
+    reject_hard_linked_sqlite(&operation.target)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut connection =
+        Connection::open_with_flags(&operation.target, flags).map_err(|error| {
+            restore_failed(format!(
+                "could not open target Codex state database {}: {error}",
+                operation.target.display()
+            ))
+        })?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| restore_failed(format!("could not configure SQLite locking: {error}")))?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| {
+            restore_failed(format!(
+                "could not lock Codex state database for import: {error}"
+            ))
+        })?;
+    ensure_safe_codex_target(root, &operation.target)?;
+    reject_hard_linked_sqlite(&operation.target)?;
+    if sqlite_file_identity(&operation.target)? != identity {
+        return Err(restore_failed(format!(
+            "target Codex state database changed identity after planning: {}",
+            operation.target.display()
+        )));
+    }
     validate_operation_state(operation)?;
-    let mut connection = Connection::open(temporary.path()).map_err(|error| {
-        restore_failed(format!(
-            "could not open private Codex state database copy: {error}"
-        ))
-    })?;
-    let schema = thread_columns(&connection)?;
+    let schema = thread_columns(&transaction)?;
     if !schema.contains_key("id") {
         return Err(restore_failed(
             "target Codex threads table has no id column",
         ));
     }
-    let transaction = connection
-        .transaction()
-        .map_err(|error| restore_failed(format!("could not start Codex thread import: {error}")))?;
     for row in &rows {
         import_thread_row(&transaction, row, &schema)?;
     }
     transaction.commit().map_err(|error| {
         restore_failed(format!("could not commit Codex thread import: {error}"))
     })?;
-    connection
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .map_err(|error| {
-            restore_failed(format!(
-                "could not checkpoint private Codex database copy: {error}"
-            ))
-        })?;
-    drop(connection);
-    temporary.as_file().sync_all().map_err(|error| {
-        restore_failed(format!(
-            "could not sync private Codex database copy: {error}"
-        ))
-    })?;
-    guard.commit_temporary(operation, &temporary)?;
     Ok(rows.len())
-}
-
-fn backup_sqlite_database(source: &Path, destination: &Path) -> Result<(), RehomeError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let source = Connection::open_with_flags(source, flags).map_err(|error| {
-        restore_failed(format!(
-            "could not open target Codex state database for private backup: {error}"
-        ))
-    })?;
-    let mut destination = Connection::open(destination).map_err(|error| {
-        restore_failed(format!(
-            "could not open private Codex database destination: {error}"
-        ))
-    })?;
-    let backup = Backup::new(&source, &mut destination).map_err(|error| {
-        restore_failed(format!(
-            "could not start private Codex database backup: {error}"
-        ))
-    })?;
-    backup
-        .run_to_completion(128, Duration::from_millis(1), None)
-        .map_err(|error| {
-            restore_failed(format!(
-                "could not complete private Codex database backup: {error}"
-            ))
-        })
 }
 
 fn package_thread_rows(
@@ -787,6 +760,18 @@ fn validate_operation_state(operation: &PlannedOperation) -> Result<(), RehomeEr
 }
 
 fn reject_hard_linked_sqlite(path: &Path) -> Result<(), RehomeError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        restore_failed(format!(
+            "could not inspect target Codex state database {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(restore_failed(format!(
+            "target Codex state database is not a regular unlinked file: {}",
+            path.display()
+        )));
+    }
     let links = file_link_count(path).map_err(|error| {
         restore_failed(format!(
             "could not inspect target Codex state database links {}: {error}",
@@ -800,6 +785,67 @@ fn reject_hard_linked_sqlite(path: &Path) -> Result<(), RehomeError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+struct SqliteFileIdentity {
+    volume: u32,
+    index_high: u32,
+    index_low: u32,
+}
+
+#[cfg(windows)]
+fn sqlite_file_identity(path: &Path) -> Result<SqliteFileIdentity, RehomeError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = fs::File::open(path).map_err(|error| {
+        restore_failed(format!(
+            "could not open target Codex state database identity {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 {
+        return Err(restore_failed(format!(
+            "could not inspect target Codex state database identity {}: {}",
+            path.display(),
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(SqliteFileIdentity {
+        volume: information.dwVolumeSerialNumber,
+        index_high: information.nFileIndexHigh,
+        index_low: information.nFileIndexLow,
+    })
+}
+
+#[cfg(unix)]
+fn sqlite_file_identity(path: &Path) -> Result<(u64, u64), RehomeError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).map_err(|error| {
+        restore_failed(format!(
+            "could not inspect target Codex state database identity {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn sqlite_file_identity(path: &Path) -> Result<std::time::SystemTime, RehomeError> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.created())
+        .map_err(|error| {
+            restore_failed(format!(
+                "could not inspect target Codex state database identity {}: {error}",
+                path.display()
+            ))
+        })
 }
 
 #[cfg(windows)]
