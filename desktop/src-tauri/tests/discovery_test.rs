@@ -395,7 +395,7 @@ fn discovery_reports_fixture_without_modifying_it() -> Result<(), Box<dyn Error>
         "Synthetic migration thread"
     );
     assert_eq!(inventory.conversations[0].updated_at, FIXED_TIMESTAMP);
-    assert!(!inventory.conversations[0].content_hash.is_empty());
+    assert!(inventory.conversations[0].content_hash.is_empty());
     assert!(inventory.conversations[0]
         .archive_path
         .starts_with("codex/sessions/"));

@@ -648,21 +648,11 @@ fn stage_conversations(
     let mut conversations = Vec::new();
 
     for source in selection.paths {
-        let relative = source
-            .strip_prefix(selection.codex_home)
-            .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
-        let archive_path = format!("codex/{}", normalize_entry(relative)?);
-        let archive_path = normalize_entry(Path::new(&archive_path))?;
-        let staged_payload = copy_source_to_staging(source, staging_root, &archive_path)?;
-        let staged_path = staging_root.join(Path::new(&archive_path));
-        let Some(session) = session_identity_from_file(&staged_path)? else {
-            fs::remove_file(staged_path).map_err(io_package_error)?;
+        let Some(session) = session_identity_from_file(source)? else {
             continue;
         };
         let task_id = session.task_id;
-        let session_value = session.fields;
         if !selected.contains(&task_id) {
-            fs::remove_file(staged_path).map_err(io_package_error)?;
             continue;
         }
         if !found.insert(task_id) {
@@ -670,6 +660,14 @@ fn stage_conversations(
                 "selected conversation has multiple session files",
             ));
         }
+
+        let relative = source
+            .strip_prefix(selection.codex_home)
+            .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
+        let archive_path = format!("codex/{}", normalize_entry(relative)?);
+        let archive_path = normalize_entry(Path::new(&archive_path))?;
+        let staged_payload = copy_source_to_staging(source, staging_root, &archive_path)?;
+        let session_value = session.fields;
         let content_hash = staged_payload.hash.clone();
         payloads.insert(archive_path.clone(), staged_payload)?;
         let metadata = selection

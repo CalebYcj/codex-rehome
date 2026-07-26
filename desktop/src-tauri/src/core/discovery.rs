@@ -5,15 +5,15 @@ use crate::core::{
         OptionalContentEntry, ProjectEntry, SourceOs,
     },
     paths::normalize_entry,
-    session::{metadata_string, metadata_uuid, parse_session_metadata},
+    session::{metadata_string, metadata_uuid, parse_session_metadata, SessionMetadata},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
-    env, fs, io,
+    env, fs,
+    io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -235,8 +235,18 @@ fn discovered_conversations(
     let index = read_session_index_entries(session_index_path, warnings);
     let mut conversations = Vec::new();
     for path in paths {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
+        let session = match read_session_metadata_file(path) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                push_warning_unique(
+                    warnings,
+                    format!(
+                        "Could not identify discovered conversation {}",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
             Err(error) => {
                 push_warning_unique(
                     warnings,
@@ -247,16 +257,6 @@ fn discovered_conversations(
                 );
                 continue;
             }
-        };
-        let Some(session) = parse_session_metadata(&bytes) else {
-            push_warning_unique(
-                warnings,
-                format!(
-                    "Could not identify discovered conversation {}",
-                    path.display()
-                ),
-            );
-            continue;
         };
         let task_id = session.task_id;
         let metadata = index.get(&task_id).unwrap_or(&session.fields);
@@ -292,13 +292,31 @@ fn discovered_conversations(
             updated_at: metadata_string(metadata, &["updated_at", "timestamp"])
                 .or_else(|| metadata_string(&session.fields, &["updated_at", "timestamp"]))
                 .unwrap_or_default(),
-            content_hash: format!("{:x}", Sha256::digest(&bytes)),
+            // Discovery only needs identity and UI metadata. The authenticated
+            // content hash is calculated later, when a conversation is selected.
+            content_hash: String::new(),
             archive_path: format!("codex/{relative}"),
             classification,
         });
     }
     conversations.sort_by_key(|conversation| conversation.task_id);
     conversations
+}
+
+fn read_session_metadata_file(path: &Path) -> io::Result<Option<SessionMetadata>> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(None);
+        }
+        if let Some(metadata) = parse_session_metadata(&line) {
+            return Ok(Some(metadata));
+        }
+    }
 }
 
 pub(crate) fn conversation_classification(fields: &Value) -> Option<ConversationClassification> {
@@ -1074,10 +1092,10 @@ fn portable_project_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_child_paths, portable_project_name};
+    use super::{collect_child_paths, portable_project_name, read_session_metadata_file};
     use crate::core::session::{metadata_string, parse_session_metadata};
     use std::{
-        io,
+        fs, io,
         path::{Path, PathBuf},
     };
     use uuid::Uuid;
@@ -1134,6 +1152,26 @@ mod tests {
             Uuid::new_v4()
         );
         assert!(parse_session_metadata(message.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn session_discovery_reads_metadata_without_loading_the_rollout_tail() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("session.jsonl");
+        let id = Uuid::new_v4();
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"title\":\"Fast\"}}}}\n{}",
+                "x".repeat(2 * 1024 * 1024)
+            ),
+        )
+        .expect("session fixture");
+
+        let metadata = read_session_metadata_file(&path)
+            .expect("read metadata")
+            .expect("metadata present");
+        assert_eq!(metadata.task_id, id);
     }
 
     #[test]
