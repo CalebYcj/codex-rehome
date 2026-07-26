@@ -633,12 +633,6 @@ pub(crate) fn resolve_create_package_request(
     selection: CreatePackageSelection,
     output_path: PathBuf,
 ) -> Result<CreatePackageRequest, RehomeError> {
-    if selection.project_ids.is_empty() {
-        return Err(selection_failed(
-            ErrorCode::ProjectConflict,
-            "at least one discovered project must be selected",
-        ));
-    }
     let selected_projects = selection
         .project_ids
         .iter()
@@ -684,21 +678,12 @@ pub(crate) fn resolve_create_package_request(
                 "conversation selection contains duplicates",
             ));
         }
-        let conversation = conversations_by_id.get(conversation_id).ok_or_else(|| {
+        conversations_by_id.get(conversation_id).ok_or_else(|| {
             selection_failed(
                 ErrorCode::ProjectConflict,
                 format!("selected conversation {conversation_id} is not in fresh discovery"),
             )
         })?;
-        if conversation
-            .project_id
-            .is_some_and(|project_id| !selected_projects.contains(&project_id))
-        {
-            return Err(selection_failed(
-                ErrorCode::ProjectConflict,
-                format!("selected conversation {conversation_id} belongs to an unselected project"),
-            ));
-        }
     }
 
     Ok(CreatePackageRequest {

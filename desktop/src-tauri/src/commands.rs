@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn package_selection_uses_fresh_inventory_paths_and_rejects_project_chat_mismatch() {
+    fn package_selection_uses_fresh_inventory_paths_and_allows_independent_chats() {
         let (inventory, selected_project, matching_chat, mismatched_chat, unassociated_chat) =
             inventory_fixture();
         let output = PathBuf::from("C:\\selected-by-native-dialog\\handoff.rehome");
@@ -151,16 +151,18 @@ mod tests {
             vec![matching_chat, unassociated_chat]
         );
 
-        let error = resolve_create_package_request(
+        let conversation_only = resolve_create_package_request(
             &inventory,
             CreatePackageSelection {
+                project_ids: vec![],
                 conversation_ids: vec![mismatched_chat],
                 ..selection
             },
             PathBuf::from("C:\\selected-by-native-dialog\\other.rehome"),
         )
-        .unwrap_err();
-        assert_eq!(error.code, crate::core::error::ErrorCode::ProjectConflict);
+        .unwrap();
+        assert!(conversation_only.project_paths.is_empty());
+        assert_eq!(conversation_only.conversation_ids, vec![mismatched_chat]);
 
         let unknown_project_error = resolve_create_package_request(
             &inventory,

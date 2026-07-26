@@ -240,7 +240,7 @@ describe("ReHome Desktop workflows", () => {
     expect(await screen.findByText(label)).toBeInTheDocument();
   });
 
-  it("requires a project and a conversation or content category before package creation", async () => {
+  it("allows project files and conversations to be selected independently", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
@@ -250,26 +250,34 @@ describe("ReHome Desktop workflows", () => {
     expect(createButton).toBeDisabled();
 
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
-    expect(createButton).toBeDisabled();
+    expect(createButton).toBeEnabled();
 
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    expect(createButton).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
     await user.click(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }));
     expect(createButton).toBeEnabled();
   });
 
-  it("shows only selected-project conversations plus explicitly selectable unassociated conversations", async () => {
+  it("groups conversations under project accordions and keeps unassociated chats separate", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
     await user.click(screen.getByRole("button", { name: "前往发送" }));
-    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    expect(screen.queryByRole("checkbox", { name: "选择对话 Desktop workflow" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
 
     expect(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" })).toBeVisible();
-    expect(screen.getByRole("checkbox", { name: "选择对话 General workflow" })).toBeVisible();
+    expect(screen.queryByRole("checkbox", { name: "选择对话 General workflow" })).toBeNull();
     expect(screen.queryByRole("checkbox", { name: "选择对话 Notes workflow" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "展开项目 未归属项目的对话" }));
+    expect(screen.getByRole("checkbox", { name: "选择对话 General workflow" })).toBeVisible();
   });
 
-  it("offers projects and conversations from the current discovery contract", async () => {
+  it("expands a project without selecting its files", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
@@ -280,10 +288,11 @@ describe("ReHome Desktop workflows", () => {
     expect(
       screen.queryByRole("checkbox", { name: "选择对话 Desktop workflow" }),
     ).toBeNull();
-    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
     expect(
       screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).not.toBeChecked();
   });
 
   it("shows package integrity, conflicts, and destination before restore enablement", async () => {

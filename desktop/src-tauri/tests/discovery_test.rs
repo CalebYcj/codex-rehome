@@ -265,7 +265,7 @@ fn discovery_combines_global_state_and_sqlite_roots_in_stable_order() -> Result<
     fs::write(
         fixture.codex_home.join(".codex-global-state.json"),
         serde_json::to_vec(&json!({
-            "electron-saved-workspace-roots": [first, second],
+            "electron-saved-workspace-roots": [first, second, "local-ae302ef6a5cf5ad3c6c80bf9dc388bb4", "058fe80e-b919-46c0-b2c0-c5e9a9fbe20f"],
             "project-order": [second],
             "active-workspace-roots": [first],
             "thread-workspace-root-hints": {

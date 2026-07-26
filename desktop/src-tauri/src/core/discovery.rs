@@ -657,9 +657,22 @@ fn push_unique_path(raw: &str, projects: &mut Vec<PathBuf>, seen: &mut HashSet<P
         return;
     }
     let path = PathBuf::from(raw);
+    if !path.is_absolute() && !looks_like_absolute_windows_path(raw) {
+        return;
+    }
     if seen.insert(ProjectPathKey::new(raw, &path)) {
         projects.push(path);
     }
+}
+
+fn looks_like_absolute_windows_path(raw: &str) -> bool {
+    let normalized = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    let bytes = normalized.as_bytes();
+    normalized.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
