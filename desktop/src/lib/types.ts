@@ -48,6 +48,12 @@ export interface ConversationEntry {
   updated_at: string;
   content_hash: string;
   archive_path: string;
+  classification: {
+    parent_task_id: string | null;
+    agent_path: string | null;
+    agent_nickname: string | null;
+    depth: number | null;
+  } | null;
 }
 
 export interface OptionalContentEntry {

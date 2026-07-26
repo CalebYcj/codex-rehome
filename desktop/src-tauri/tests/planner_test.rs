@@ -422,6 +422,7 @@ fn repeated_restore_skips_its_existing_rewritten_branch() -> Result<(), Box<dyn 
         updated_at: "2026-07-22T00:00:00Z".into(),
         content_hash: checksum(&rewritten),
         archive_path: format!("codex/{branch_relative}"),
+        classification: None,
     });
 
     let second = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
@@ -494,6 +495,7 @@ fn repeated_branch_uses_its_derived_session_path_in_ready_bridge_metadata(
         updated_at: "2026-07-22T00:00:00Z".into(),
         content_hash: checksum(&rewritten),
         archive_path: format!("codex/{branch_relative}"),
+        classification: None,
     });
     write_ready_bridge_metadata(
         &fixture,
@@ -765,6 +767,7 @@ fn derived_ids_avoid_target_and_planned_conversation_ids() -> Result<(), Box<dyn
             updated_at: "2026-07-22T00:00:00Z".into(),
             content_hash: checksum(b"occupied\n"),
             archive_path: format!("codex/sessions/2026/07/22/{first_derived}.jsonl"),
+            classification: None,
         },
     ];
     write_target_session(&fixture, b"original target\n")?;
@@ -1085,6 +1088,7 @@ fn derived_ids_are_reserved_against_future_planned_imports() -> Result<(), Box<d
             updated_at: "2026-07-22T00:00:00Z".into(),
             content_hash: checksum(&second_bytes),
             archive_path: second_source.into(),
+            classification: None,
         });
     fixture.preview.manifest.counts.conversations = 2;
     let manifest = fixture.preview.manifest.clone();
@@ -1244,6 +1248,7 @@ fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
         updated_at: "2026-07-22T00:00:00Z".into(),
         content_hash,
         archive_path: archive_path.into(),
+        classification: None,
     };
     let projects = vec![
         ProjectEntry {
@@ -1602,6 +1607,7 @@ fn conversation(content_hash: String) -> ConversationEntry {
         updated_at: "2026-07-22T00:00:00Z".into(),
         content_hash,
         archive_path: SESSION_SOURCE.into(),
+        classification: None,
     }
 }
 

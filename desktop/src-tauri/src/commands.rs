@@ -470,6 +470,7 @@ mod tests {
             updated_at: "2026-07-23T09:00:00Z".into(),
             content_hash: "hash".into(),
             archive_path: format!("codex/sessions/{task_id}.jsonl"),
+            classification: None,
         };
         (
             CodexInventory {

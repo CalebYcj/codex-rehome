@@ -291,6 +291,42 @@ fn generated_image_inventory_contains_a_small_embedded_thumbnail() -> Result<(),
     Ok(())
 }
 
+#[test]
+fn subagent_sessions_are_classified_and_named_from_their_task_path() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let sessions = codex_home.join("sessions");
+    let task_id = Uuid::new_v4();
+    let parent_id = Uuid::new_v4();
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join(format!("{task_id}.jsonl")),
+        format!(
+            "{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": task_id,
+                    "timestamp": "2026-07-20T10:00:00Z",
+                    "thread_source": "subagent",
+                    "parent_thread_id": parent_id,
+                    "agent_path": "/root/task9_visual_calibration/gate_review",
+                    "agent_nickname": "Reviewer",
+                    "source": { "subagent": { "thread_spawn": { "depth": 2 } } }
+                }
+            })
+        ),
+    )?;
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+    let conversation = &inventory.conversations[0];
+    assert_eq!(conversation.title, "task9 visual calibration / gate review");
+    let classification = conversation.classification.as_ref().expect("subagent");
+    assert_eq!(classification.parent_task_id, Some(parent_id));
+    assert_eq!(classification.depth, Some(2));
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_long_path_prefix_does_not_duplicate_registered_projects() -> Result<(), Box<dyn Error>> {

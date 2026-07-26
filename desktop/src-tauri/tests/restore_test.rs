@@ -1338,6 +1338,7 @@ fn ready_restore_plan(harness: &RestoreHarness) -> Result<RestorePlan, Box<dyn E
             updated_at: source.updated_at.clone(),
             content_hash: planned.expected_final_content_hash.clone(),
             archive_path: format!("codex/{relative}"),
+            classification: None,
         }],
     };
     let plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;

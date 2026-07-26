@@ -47,6 +47,15 @@ pub struct ConversationEntry {
     pub updated_at: String,
     pub content_hash: String,
     pub archive_path: String,
+    pub classification: Option<ConversationClassification>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationClassification {
+    pub parent_task_id: Option<Uuid>,
+    pub agent_path: Option<String>,
+    pub agent_nickname: Option<String>,
+    pub depth: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -75,6 +75,7 @@ fn populated_manifest_preserves_source_syntax_and_portable_archive_paths() {
             updated_at: "2026-07-22T00:00:00Z".into(),
             content_hash: "fixed-content-hash".into(),
             archive_path: "codex/sessions/2026/07/22/thread.jsonl".into(),
+            classification: None,
         }],
         exclusions: ExclusionSummary::default(),
     };

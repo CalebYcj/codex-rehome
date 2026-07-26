@@ -66,6 +66,7 @@ const inventory = {
       updated_at: "2026-07-23T08:00:00Z",
       content_hash: "abc",
       archive_path: "codex/sessions/desktop.jsonl",
+      classification: null,
     },
     {
       task_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -74,6 +75,12 @@ const inventory = {
       updated_at: "2026-07-23T07:00:00Z",
       content_hash: "def",
       archive_path: "codex/sessions/notes.jsonl",
+      classification: {
+        parent_task_id: "44444444-4444-4444-4444-444444444444",
+        agent_path: "/root/review_notes",
+        agent_nickname: "Reviewer",
+        depth: 1,
+      },
     },
     {
       task_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -82,6 +89,7 @@ const inventory = {
       updated_at: "2026-07-23T06:00:00Z",
       content_hash: "ghi",
       archive_path: "codex/sessions/general.jsonl",
+      classification: null,
     },
   ],
   conversation_paths: ["C:\\Users\\Me\\.codex\\sessions\\desktop.jsonl"],
@@ -346,6 +354,23 @@ describe("ReHome Desktop workflows", () => {
       plugin_ids: [],
       generated_image_ids: [],
     });
+  });
+
+  it("labels main and subagent conversations and selects only recommended main tasks", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "展开项目 notes" }));
+
+    expect(screen.getByText("子 Agent · L1")).toBeVisible();
+    expect(screen.getByText("辅助记录，通常可不迁移")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "选择建议项" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
+    await user.click(screen.getByRole("button", { name: "选择建议项" }));
+    expect(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "选择对话 Notes workflow" })).not.toBeChecked();
   });
 
   it("shows generated image thumbnails and reveals their source files", async () => {

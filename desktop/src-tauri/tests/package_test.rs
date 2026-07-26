@@ -503,6 +503,7 @@ fn rejects_invalid_or_missing_manifest_payload_references() -> Result<(), Box<dy
             updated_at: "2026-07-22T00:00:00Z".into(),
             content_hash: checksum(b"payload"),
             archive_path: archive_path.into(),
+            classification: None,
         });
         write_valid_test_package(
             &package,

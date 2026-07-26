@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode, type RefObject } from "react";
 import {
   CheckCircle2,
+  Bot,
   ChevronDown,
   ChevronRight,
   FileArchive,
@@ -63,6 +64,14 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
     setter(next);
   }
 
+  function selectRecommended(items: ConversationEntry[]) {
+    const next = new Set(conversations);
+    for (const item of items) {
+      if (!item.classification) next.add(item.task_id);
+    }
+    setConversations(next);
+  }
+
   async function handleCreate() {
     if (!inventory || !canCreate) return;
     setError(null);
@@ -110,6 +119,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
               onToggleProject={() => toggle(setProjects, projects, project.project_id)}
               onToggleExpanded={() => toggle(setExpanded, expanded, project.project_id)}
               onToggleConversation={(id) => toggle(setConversations, conversations, id)}
+              onSelectRecommended={() => selectRecommended(project.conversations)}
             />
           ))}
           {!projectGroups.length && <p className="empty-state">未检测到 Codex 已登记的本机项目</p>}
@@ -124,6 +134,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
               selectedConversations={conversations}
               onToggleExpanded={() => toggle(setExpanded, expanded, "unassociated")}
               onToggleConversation={(id) => toggle(setConversations, conversations, id)}
+              onSelectRecommended={() => selectRecommended(unassociatedConversations)}
             />
           )}
         </div>
@@ -200,9 +211,12 @@ interface ProjectChoiceProps {
   onToggleProject?: () => void;
   onToggleExpanded: () => void;
   onToggleConversation: (id: string) => void;
+  onSelectRecommended: () => void;
 }
 
-function ProjectChoice({ name, path, fileCount, conversations, projectSelected, expanded, selectedConversations, onToggleProject, onToggleExpanded, onToggleConversation }: ProjectChoiceProps) {
+function ProjectChoice({ name, path, fileCount, conversations, projectSelected, expanded, selectedConversations, onToggleProject, onToggleExpanded, onToggleConversation, onSelectRecommended }: ProjectChoiceProps) {
+  const subagents = conversations.filter((conversation) => conversation.classification).length;
+  const mainConversations = conversations.length - subagents;
   return (
     <div className="project-choice">
       <div className="project-choice-header">
@@ -221,11 +235,24 @@ function ProjectChoice({ name, path, fileCount, conversations, projectSelected, 
       </div>
       {expanded && (
         <div className="project-conversations" aria-label={`${name} 的对话`}>
+          {conversations.length > 0 && (
+            <div className="conversation-toolbar">
+              <span>主对话 {mainConversations} · 子 Agent {subagents}</span>
+              {mainConversations > 0 && <button type="button" onClick={onSelectRecommended}>选择建议项</button>}
+            </div>
+          )}
           {conversations.map((conversation) => (
             <label className="conversation-choice" key={conversation.task_id}>
               <input type="checkbox" checked={selectedConversations.has(conversation.task_id)} onChange={() => onToggleConversation(conversation.task_id)} aria-label={`选择对话 ${conversation.title}`} />
-              <MessageSquareText aria-hidden="true" />
-              <span><strong>{conversation.title}</strong><small>{formatDate(conversation.updated_at)}</small></span>
+              {conversation.classification ? <Bot aria-hidden="true" /> : <MessageSquareText aria-hidden="true" />}
+              <span>
+                <strong>{conversation.title}</strong>
+                <small className="conversation-details">
+                  <span className={conversation.classification ? "conversation-badge badge-subagent" : "conversation-badge badge-main"}>{conversation.classification ? `子 Agent${conversation.classification.depth ? ` · L${conversation.classification.depth}` : ""}` : "主对话"}</span>
+                  <span>{conversation.classification ? "辅助记录，通常可不迁移" : "建议迁移"}</span>
+                  <time>{formatDate(conversation.updated_at)}</time>
+                </small>
+              </span>
             </label>
           ))}
           {!conversations.length && <p className="project-empty">这个项目下暂无可迁移对话</p>}

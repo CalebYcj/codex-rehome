@@ -220,6 +220,7 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
                 .unwrap_or_default(),
             content_hash: payload.content_hash.clone(),
             archive_path: modern.clone(),
+            classification: None,
         });
         planning_payloads.insert(modern, bytes);
     }

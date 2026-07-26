@@ -1,8 +1,8 @@
 use crate::core::{
     error::{ErrorCode, RehomeError},
     models::{
-        CodexInventory, ContentCounts, ConversationEntry, OptionalContentEntry, ProjectEntry,
-        SourceOs,
+        CodexInventory, ContentCounts, ConversationClassification, ConversationEntry,
+        OptionalContentEntry, ProjectEntry, SourceOs,
     },
     paths::normalize_entry,
     session::{metadata_string, metadata_uuid, parse_session_metadata},
@@ -278,21 +278,66 @@ fn discovered_conversations(
                 continue;
             }
         };
+        let classification = conversation_classification(&session.fields);
+        let indexed_title = metadata_string(metadata, &["title", "thread_name"])
+            .or_else(|| metadata_string(&session.fields, &["title", "thread_name"]));
+        let title = indexed_title
+            .filter(|title| title != "Codex conversation")
+            .or_else(|| {
+                classification
+                    .as_ref()
+                    .and_then(|classification| classification.agent_path.as_deref())
+                    .map(humanize_agent_path)
+            })
+            .unwrap_or_else(|| "Codex conversation".to_owned());
         conversations.push(ConversationEntry {
             task_id,
             project_id: associated_project_id(metadata, &session.fields, projects),
-            title: metadata_string(metadata, &["title", "thread_name"])
-                .or_else(|| metadata_string(&session.fields, &["title", "thread_name"]))
-                .unwrap_or_else(|| "Codex conversation".to_owned()),
+            title,
             updated_at: metadata_string(metadata, &["updated_at", "timestamp"])
                 .or_else(|| metadata_string(&session.fields, &["updated_at", "timestamp"]))
                 .unwrap_or_default(),
             content_hash: format!("{:x}", Sha256::digest(&bytes)),
             archive_path: format!("codex/{relative}"),
+            classification,
         });
     }
     conversations.sort_by_key(|conversation| conversation.task_id);
     conversations
+}
+
+pub(crate) fn conversation_classification(fields: &Value) -> Option<ConversationClassification> {
+    if metadata_string(fields, &["thread_source"]).as_deref() != Some("subagent")
+        && fields.pointer("/source/subagent/thread_spawn").is_none()
+    {
+        return None;
+    }
+    Some(ConversationClassification {
+        parent_task_id: metadata_uuid(fields, &["parent_thread_id", "forked_from_id"]),
+        agent_path: metadata_string(fields, &["agent_path"]).or_else(|| {
+            fields
+                .pointer("/source/subagent/thread_spawn/agent_path")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        agent_nickname: metadata_string(fields, &["agent_nickname"]).or_else(|| {
+            fields
+                .pointer("/source/subagent/thread_spawn/agent_nickname")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        depth: fields
+            .pointer("/source/subagent/thread_spawn/depth")
+            .and_then(Value::as_u64),
+    })
+}
+
+fn humanize_agent_path(path: &str) -> String {
+    path.trim_start_matches("/root/")
+        .split('/')
+        .map(|part| part.replace('_', " "))
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 fn read_session_index_entries(

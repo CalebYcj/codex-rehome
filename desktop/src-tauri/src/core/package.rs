@@ -1,5 +1,7 @@
 use crate::core::{
-    discovery::{associated_project_id, discover_codex, StateDatabaseSnapshot},
+    discovery::{
+        associated_project_id, conversation_classification, discover_codex, StateDatabaseSnapshot,
+    },
     error::{ErrorCode, RehomeError},
     exclusions::is_forbidden,
     models::{
@@ -686,6 +688,7 @@ fn stage_conversations(
                 .unwrap_or_default(),
             content_hash,
             archive_path,
+            classification: conversation_classification(&session_value),
         });
     }
 

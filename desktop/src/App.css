@@ -118,6 +118,9 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 .project-expand:hover { color: #245f49; background: #edf4f0; }
 .project-expand svg { width: 16px; height: 16px; }
 .project-conversations { display: grid; padding: 5px 0 5px 42px; background: #f4f7f5; border-top: 1px solid #e1e7e3; }
+.conversation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; padding: 4px 13px; color: #6f7b75; font-size: 9px; border-bottom: 1px solid #dfe5e2; }
+.conversation-toolbar button { min-height: 26px; padding: 0 9px; color: #28664f; font-size: 9px; background: #fff; border: 1px solid #cbd8d1; border-radius: 5px; cursor: pointer; }
+.conversation-toolbar button:hover { background: #edf4f0; }
 .conversation-choice { display: grid; grid-template-columns: 20px 18px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 45px; padding: 6px 13px; border-bottom: 1px solid #e3e8e5; cursor: pointer; }
 .conversation-choice:last-child { border-bottom: 0; }
 .conversation-choice:hover { background: #edf3f0; }
@@ -125,6 +128,11 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 .conversation-choice > span { display: grid; gap: 3px; min-width: 0; }
 .conversation-choice strong { color: #34413a; font-size: 11px; }
 .conversation-choice small { color: #7a8680; font-size: 9px; }
+.conversation-details { display: flex !important; align-items: center; gap: 7px !important; min-width: 0; }
+.conversation-details time { margin-left: auto; white-space: nowrap; }
+.conversation-badge { flex: 0 0 auto; padding: 2px 5px; font-size: 8px; font-weight: 700; border-radius: 4px; }
+.badge-main { color: #236047; background: #e1f0e8; }
+.badge-subagent { color: #6d6250; background: #ece8df; }
 .project-empty { margin: 0; padding: 13px; color: #7a8680; font-size: 10px; }
 .optional-content-list { overflow: hidden; border: 1px solid #d8e0dc; border-radius: 6px; background: #fff; }
 .optional-content-group + .optional-content-group { border-top: 1px solid #e1e7e3; }
