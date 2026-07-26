@@ -207,6 +207,8 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
 pub(crate) struct VerifiedPayload {
     pub content_hash: String,
     pub size_bytes: u64,
+    pub archive_name: Option<String>,
+    pub inline_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -251,11 +253,16 @@ impl VerifiedPackage {
                 "package archive changed after restore planning",
             ));
         }
+        if let Some(bytes) = verified.inline_bytes.as_ref() {
+            authenticate_payload_bytes(bytes, verified)?;
+            return Ok(bytes.clone());
+        }
         file.seek(SeekFrom::Start(0))
             .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
         let mut archive = ZipArchive::new(file)
             .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
-        let mut entry = archive.by_name(source).map_err(|error| {
+        let archive_name = verified.archive_name.as_deref().unwrap_or(source);
+        let mut entry = archive.by_name(archive_name).map_err(|error| {
             package_invalid(format!(
                 "could not reopen verified payload {source}: {error}"
             ))
@@ -274,6 +281,9 @@ pub fn inspect_package(path: &Path) -> Result<PackagePreview, RehomeError> {
 }
 
 pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackage, RehomeError> {
+    if let Some(package) = crate::core::legacy::inspect_schema_v3(path)? {
+        return Ok(package);
+    }
     let mut file = fs::File::open(path)
         .map_err(|error| package_invalid(format!("could not open package: {error}")))?;
     let archive_hash = hash_archive_file(&mut file)?;
@@ -356,6 +366,8 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
                     VerifiedPayload {
                         content_hash,
                         size_bytes,
+                        archive_name: None,
+                        inline_bytes: None,
                     },
                 );
             }
@@ -1325,6 +1337,8 @@ mod authenticated_payload_tests {
         let verified = VerifiedPayload {
             content_hash: format!("{:x}", Sha256::digest(b"verified bytes")),
             size_bytes: b"verified bytes".len() as u64,
+            archive_name: None,
+            inline_bytes: None,
         };
 
         let error = authenticate_payload_bytes(b"tampered bytes", &verified).unwrap_err();
