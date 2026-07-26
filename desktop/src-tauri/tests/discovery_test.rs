@@ -272,6 +272,25 @@ fn plugin_inventory_uses_plugin_name_and_complete_version_root() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn generated_image_inventory_contains_a_small_embedded_thumbnail() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let images = codex_home.join("generated_images");
+    fs::create_dir_all(&images)?;
+    image::RgbImage::from_pixel(320, 200, image::Rgb([40, 120, 80]))
+        .save(images.join("preview.png"))?;
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+    let thumbnail = inventory.generated_images[0]
+        .thumbnail_data_url
+        .as_deref()
+        .expect("thumbnail");
+    assert!(thumbnail.starts_with("data:image/png;base64,"));
+    assert!(thumbnail.len() < 100_000);
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_long_path_prefix_does_not_duplicate_registered_projects() -> Result<(), Box<dyn Error>> {

@@ -56,6 +56,8 @@ export interface OptionalContentEntry {
   source_path: string;
   relative_path: string;
   size_bytes: number;
+  thumbnail_data_url: string | null;
+  reveal_id: string | null;
 }
 
 export interface CodexInventory {

@@ -7,6 +7,7 @@ use crate::core::{
     paths::normalize_entry,
     session::{metadata_string, metadata_uuid, parse_session_metadata},
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -789,6 +790,8 @@ fn optional_tree_entries(
                 source_path: marker.clone(),
                 relative_path,
                 size_bytes: directory_size(bundle),
+                thumbnail_data_url: None,
+                reveal_id: None,
             })
         })
         .collect::<Vec<_>>();
@@ -814,11 +817,34 @@ fn optional_file_entries(paths: &[PathBuf], root: &Path, kind: &str) -> Vec<Opti
                 source_path: path.clone(),
                 relative_path,
                 size_bytes: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+                thumbnail_data_url: image_thumbnail(path),
+                reveal_id: None,
             })
         })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     entries
+}
+
+fn image_thumbnail(path: &Path) -> Option<String> {
+    const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+    let metadata = path.metadata().ok()?;
+    if metadata.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
+    let (width, height) = image::image_dimensions(path).ok()?;
+    if width > 16_384 || height > 16_384 {
+        return None;
+    }
+    let thumbnail = image::open(path).ok()?.thumbnail(160, 100);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    thumbnail
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        BASE64.encode(bytes.into_inner())
+    ))
 }
 
 fn directory_size(root: &Path) -> u64 {

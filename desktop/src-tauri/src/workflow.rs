@@ -124,6 +124,7 @@ pub struct WorkflowState {
 #[derive(Default)]
 struct WorkflowGrants {
     packages: HashMap<Uuid, Timed<PackageGrant>>,
+    reveal_paths: HashMap<Uuid, Timed<PathBuf>>,
     restore_locations: HashMap<Uuid, Timed<RestoreLocationGrant>>,
     plans: HashMap<Uuid, Timed<RestorePlanGrant>>,
     rollbacks_in_flight: HashSet<Uuid>,
@@ -195,6 +196,32 @@ impl Drop for RollbackClaim {
 }
 
 impl WorkflowState {
+    fn grant_reveal_path(&self, path: PathBuf) -> Uuid {
+        let id = Uuid::new_v4();
+        self.grants().reveal_paths.insert(id, timed(path));
+        id
+    }
+
+    fn resolve_granted_path(&self, id: Uuid) -> Result<PathBuf, RehomeError> {
+        let mut grants = self.grants();
+        grants.prune();
+        if let Some(grant) = grants.packages.get(&id) {
+            validate_package_file_identity(&grant.value)?;
+            return Ok(grant.value.path.clone());
+        }
+        let granted = grants.reveal_paths.get(&id).ok_or_else(|| {
+            selection_failed(
+                ErrorCode::RestoreFailed,
+                "file location permission expired or was not found",
+            )
+        })?;
+        let canonical = canonical_existing_file(&granted.value)?;
+        if canonical != granted.value {
+            return Err(open_failed("granted file path changed"));
+        }
+        Ok(canonical)
+    }
+
     pub(crate) fn grant_inspected_package(
         &self,
         path: PathBuf,
@@ -383,6 +410,7 @@ impl WorkflowGrants {
     fn prune(&mut self) {
         let now = Instant::now();
         self.packages.retain(|_, grant| grant.expires_at > now);
+        self.reveal_paths.retain(|_, grant| grant.expires_at > now);
         self.restore_locations
             .retain(|_, grant| grant.expires_at > now);
         self.plans
@@ -398,8 +426,19 @@ fn timed<T>(value: T) -> Timed<T> {
 }
 
 #[tauri::command]
-pub async fn discover_codex() -> Result<CodexInventory, RehomeError> {
-    run_blocking(ErrorCode::CodexNotFound, || core_discover_codex(None)).await
+pub async fn discover_codex(
+    state: State<'_, WorkflowState>,
+) -> Result<CodexInventory, RehomeError> {
+    let state = state.inner().clone();
+    run_blocking(ErrorCode::CodexNotFound, move || {
+        let mut inventory = core_discover_codex(None)?;
+        for image in &mut inventory.generated_images {
+            let canonical = canonical_existing_file(&image.source_path)?;
+            image.reveal_id = Some(state.grant_reveal_path(canonical));
+        }
+        Ok(inventory)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -595,7 +634,7 @@ pub async fn open_path(
     run_blocking(ErrorCode::RestoreFailed, move || {
         let canonical = match selection {
             OpenPathSelection::Granted { object_id } => {
-                let granted = state.resolve_package(object_id)?;
+                let granted = state.resolve_granted_path(object_id)?;
                 let canonical = canonical_existing(&granted)?;
                 if canonical != granted {
                     return Err(open_failed("granted package path changed"));

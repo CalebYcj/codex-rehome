@@ -56,6 +56,8 @@ pub struct OptionalContentEntry {
     pub source_path: PathBuf,
     pub relative_path: String,
     pub size_bytes: u64,
+    pub thumbnail_data_url: Option<String>,
+    pub reveal_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

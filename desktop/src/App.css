@@ -135,6 +135,10 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 .optional-all-toggle small, .optional-item small { overflow: hidden; color: #7a8680; text-overflow: ellipsis; white-space: nowrap; }
 .optional-items { border-top: 1px solid #e1e7e3; background: #fafcfb; }
 .optional-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 52px; padding: 8px 16px 8px 46px; }
+.optional-item-image { grid-template-columns: auto 72px minmax(0, 1fr) auto auto; padding-left: 16px; }
+.image-thumbnail { width: 72px; height: 48px; object-fit: cover; border: 1px solid #d8e0dc; border-radius: 4px; background: #fff; }
+.image-reveal-button { width: 32px; height: 32px; color: #596760; }
+.image-reveal-button svg { width: 16px; height: 16px; }
 .optional-item + .optional-item { border-top: 1px solid #e8ecea; }
 .item-size { text-align: right; }
 
@@ -271,6 +275,8 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
   .optional-content-header { grid-template-columns: 1fr; }
   .optional-content-header .project-expand { min-height: 42px; border-top: 1px solid #e1e7e3; border-left: 0; }
   .optional-item { grid-template-columns: auto minmax(0, 1fr); padding-left: 16px; }
+  .optional-item-image { grid-template-columns: auto 64px minmax(0, 1fr) auto; }
+  .image-thumbnail { width: 64px; height: 44px; }
   .optional-item .item-size { display: none; }
 }
 

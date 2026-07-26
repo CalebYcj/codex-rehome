@@ -275,11 +275,17 @@ function OptionalContentGroup({ id, title, description, icon, items, selected, e
       {expanded && (
         <div className="optional-items" id={`optional-${id}`}>
           {items.map((item) => (
-            <label className="optional-item" key={item.content_id}>
-              <input type="checkbox" checked={selected.has(item.content_id)} onChange={() => toggleItem(item.content_id)} />
+            <div className={`optional-item${item.thumbnail_data_url ? " optional-item-image" : ""}`} key={item.content_id}>
+              <input type="checkbox" checked={selected.has(item.content_id)} onChange={() => toggleItem(item.content_id)} aria-label={`选择 ${item.name}`} />
+              {item.thumbnail_data_url && <img className="image-thumbnail" src={item.thumbnail_data_url} alt="" />}
               <span><strong>{item.name}</strong><small>{item.relative_path}</small></span>
               <small className="item-size">{formatBytes(item.size_bytes)}</small>
-            </label>
+              {item.reveal_id && (
+                <button className="icon-button image-reveal-button" type="button" title="在文件夹中显示" aria-label={`在文件夹中显示 ${item.name}`} onClick={() => void openPath(item.reveal_id!)}>
+                  <FolderOpen aria-hidden="true" />
+                </button>
+              )}
+            </div>
           ))}
           {!items.length && <p className="project-empty">没有检测到这类内容</p>}
         </div>

@@ -97,6 +97,8 @@ const inventory = {
       source_path: "C:\\Users\\Me\\.codex\\skills\\imagegen\\SKILL.md",
       relative_path: "imagegen",
       size_bytes: 2048,
+      thumbnail_data_url: null,
+      reveal_id: null,
     },
   ],
   plugins: [
@@ -106,6 +108,8 @@ const inventory = {
       source_path: "C:\\Users\\Me\\.codex\\plugins\\cache\\computer-use\\plugin.json",
       relative_path: "computer-use/1.0.0",
       size_bytes: 4096,
+      thumbnail_data_url: null,
+      reveal_id: null,
     },
   ],
   generated_images: [
@@ -115,6 +119,8 @@ const inventory = {
       source_path: "C:\\Users\\Me\\.codex\\generated_images\\result.png",
       relative_path: "result.png",
       size_bytes: 8192,
+      thumbnail_data_url: "data:image/png;base64,dGVzdA==",
+      reveal_id: "40404040-4040-4040-8040-404040404040",
     },
   ],
   warnings: [],
@@ -340,6 +346,18 @@ describe("ReHome Desktop workflows", () => {
       plugin_ids: [],
       generated_image_ids: [],
     });
+  });
+
+  it("shows generated image thumbnails and reveals their source files", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getAllByRole("button", { name: /已选 0 \/ 1/ })[2]);
+
+    expect(document.querySelector("img.image-thumbnail")).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "在文件夹中显示 result.png" }));
+    expect(api.openPath).toHaveBeenCalledWith(inventory.generated_images[0].reveal_id);
   });
 
   it("shows package integrity, conflicts, and destination before restore enablement", async () => {
