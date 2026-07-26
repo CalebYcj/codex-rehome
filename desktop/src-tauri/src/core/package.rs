@@ -136,6 +136,7 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
             "codex/skills",
             staging.path(),
             &mut payloads,
+            false,
         )?;
     }
     if !request.plugin_paths.is_empty() {
@@ -145,6 +146,7 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
             "codex/plugins/cache",
             staging.path(),
             &mut payloads,
+            true,
         )?;
     }
     if !request.generated_image_paths.is_empty() {
@@ -882,12 +884,22 @@ fn stage_discovered_trees(
     archive_root: &str,
     staging_root: &Path,
     payloads: &mut PayloadCollection,
+    expand_plugin_root: bool,
 ) -> Result<u64, RehomeError> {
     let mut roots = BTreeMap::new();
     for marker in marker_files {
-        let bundle_root = marker
+        let marker_parent = marker
             .parent()
             .ok_or_else(|| package_invalid("discovered bundle marker has no parent"))?;
+        let bundle_root = if expand_plugin_root
+            && marker_parent.file_name().and_then(|name| name.to_str()) == Some(".codex-plugin")
+        {
+            marker_parent
+                .parent()
+                .ok_or_else(|| package_invalid("plugin marker has no version root"))?
+        } else {
+            marker_parent
+        };
         let canonical = bundle_root.canonicalize().map_err(io_package_error)?;
         roots.insert(canonical, bundle_root.to_path_buf());
     }

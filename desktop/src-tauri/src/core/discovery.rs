@@ -158,11 +158,12 @@ pub fn discover_codex_with_context(
 
     dedupe_warnings(&mut warnings);
 
-    let skills = optional_tree_entries(&skill_paths, &codex_home.join("skills"), "skill");
+    let skills = optional_tree_entries(&skill_paths, &codex_home.join("skills"), "skill", false);
     let plugins = optional_tree_entries(
         &plugin_paths,
         &codex_home.join("plugins").join("cache"),
         "plugin",
+        true,
     );
     let generated_images = optional_file_entries(
         &generated_image_paths,
@@ -753,12 +754,20 @@ fn optional_tree_entries(
     markers: &[PathBuf],
     root: &Path,
     kind: &str,
+    expand_plugin_root: bool,
 ) -> Vec<OptionalContentEntry> {
     let mut seen = HashSet::new();
     let mut entries = markers
         .iter()
         .filter_map(|marker| {
-            let bundle = marker.parent()?;
+            let marker_parent = marker.parent()?;
+            let bundle = if expand_plugin_root
+                && marker_parent.file_name().and_then(|name| name.to_str()) == Some(".codex-plugin")
+            {
+                marker_parent.parent()?
+            } else {
+                marker_parent
+            };
             let relative = bundle.strip_prefix(root).ok()?;
             let relative_path = normalize_entry(relative).ok()?;
             if !seen.insert(relative_path.clone()) {
@@ -769,11 +778,14 @@ fn optional_tree_entries(
                     &Uuid::NAMESPACE_URL,
                     format!("{kind}:{relative_path}").as_bytes(),
                 ),
-                name: bundle
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(kind)
-                    .to_owned(),
+                name: if expand_plugin_root {
+                    bundle.parent().and_then(Path::file_name)
+                } else {
+                    bundle.file_name()
+                }
+                .and_then(|name| name.to_str())
+                .unwrap_or(kind)
+                .to_owned(),
                 source_path: marker.clone(),
                 relative_path,
                 size_bytes: directory_size(bundle),

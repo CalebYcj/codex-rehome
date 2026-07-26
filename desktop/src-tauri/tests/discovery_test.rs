@@ -240,6 +240,38 @@ fn current_local_projects_are_authoritative_over_historical_thread_roots(
     Ok(())
 }
 
+#[test]
+fn plugin_inventory_uses_plugin_name_and_complete_version_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let version_root = codex_home
+        .join("plugins")
+        .join("cache")
+        .join("openai-bundled")
+        .join("browser")
+        .join("1.2.3");
+    fs::create_dir_all(version_root.join(".codex-plugin"))?;
+    fs::create_dir_all(version_root.join("assets"))?;
+    fs::write(
+        version_root.join(".codex-plugin").join("plugin.json"),
+        b"{}",
+    )?;
+    fs::write(
+        version_root.join("assets").join("runtime.js"),
+        b"complete plugin",
+    )?;
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+    assert_eq!(inventory.plugins.len(), 1);
+    assert_eq!(inventory.plugins[0].name, "browser");
+    assert_eq!(
+        inventory.plugins[0].relative_path,
+        "openai-bundled/browser/1.2.3"
+    );
+    assert!(inventory.plugins[0].size_bytes >= b"complete plugin".len() as u64);
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_long_path_prefix_does_not_duplicate_registered_projects() -> Result<(), Box<dyn Error>> {
