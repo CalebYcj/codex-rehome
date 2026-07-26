@@ -128,6 +128,13 @@ Treat [codex-rehome/SKILL.md](codex-rehome/SKILL.md) as the execution source of 
 
 For same-computer Claude Code project and Session handoff, use [Claude Codex Handoff](https://github.com/CalebYcj/claude-codex-handoff).
 
+## ReHome Desktop
+
+Use the offline desktop edition when you do not want an agent to operate the repository. ReHome Core and Codex Bridge are bundled; there is nothing else to install.
+
+- [Installation guide](docs/desktop-install.en.md)
+- [Download the Windows EXE or macOS DMG](https://github.com/CalebYcj/codex-rehome/releases)
+
 ## License
 
 MIT

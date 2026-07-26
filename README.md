@@ -118,6 +118,13 @@ Agent 的完整执行规则位于 [codex-rehome/SKILL.md](codex-rehome/SKILL.md)
 
 Claude Code → Codex 的同电脑项目与 Session 接手已独立为 [Claude Codex Handoff](https://github.com/CalebYcj/claude-codex-handoff)。
 
+## ReHome Desktop
+
+不想把仓库交给 Agent 操作时，可以直接使用离线桌面版。ReHome Core 和 Codex Bridge 已内置，不需要额外安装。
+
+- [中文安装说明](docs/desktop-install.md)
+- [下载 Windows EXE / macOS DMG](https://github.com/CalebYcj/codex-rehome/releases)
+
 ## License
 
 MIT

@@ -45,4 +45,19 @@ foreach ($UnsafePlaceholder in @("<project>", "<restored-project-path>")) {
     }
 }
 
+foreach ($Readme in @($Chinese, $English)) {
+    if (-not $Readme.Contains("docs/desktop-install.md") -and -not $Readme.Contains("docs/desktop-install.en.md")) {
+        throw "README does not link to its ReHome Desktop installation guide"
+    }
+    if (-not $Readme.Contains("https://github.com/CalebYcj/codex-rehome/releases")) {
+        throw "README does not link to GitHub Releases"
+    }
+}
+
+foreach ($Phrase in @("ReHome Core", "Codex Bridge")) {
+    if (-not $Chinese.Contains($Phrase) -or -not $English.Contains($Phrase)) {
+        throw "Both READMEs must state the bundled component: $Phrase"
+    }
+}
+
 Write-Output "PASS bilingual README contract"
