@@ -688,9 +688,9 @@ fn bridge_applies_task_six_session_index_and_sqlite_plan() -> Result<(), Box<dyn
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("target");
@@ -778,9 +778,9 @@ fn bridge_revalidates_planned_hash_before_replacing_an_index() -> Result<(), Box
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("hash-target");
@@ -826,9 +826,9 @@ fn bridge_revalidates_a_skipped_session_before_accepting_the_plan() -> Result<()
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("changed-skipped-session-target");
@@ -879,9 +879,9 @@ fn bridge_rejects_changed_archive_with_same_package_id() -> Result<(), Box<dyn E
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("archive-hash-target");
@@ -929,9 +929,9 @@ fn concurrent_bridge_applies_use_compare_and_swap_so_only_one_plan_commits(
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("concurrent-target");
@@ -988,9 +988,9 @@ fn bridge_refuses_to_replace_a_target_with_an_active_cas_lock() -> Result<(), Bo
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("locked-target");
@@ -1044,9 +1044,9 @@ fn bridge_revalidates_ancestry_after_a_planned_directory_is_swapped_for_a_link(
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: package_path.clone(),
         source_device_id: Uuid::nil(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
     let preview = inspect_package(&package_path)?;
     let target_root = fixture.root.join("ancestor-swap-target");

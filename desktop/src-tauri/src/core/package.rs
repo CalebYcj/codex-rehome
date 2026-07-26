@@ -129,27 +129,27 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
         counts.sqlite_threads = selected_rows;
     }
 
-    if request.include_skills {
+    if !request.skill_paths.is_empty() {
         counts.skills = stage_discovered_trees(
-            &inventory.skill_paths,
+            &request.skill_paths,
             &request.codex_home.join("skills"),
             "codex/skills",
             staging.path(),
             &mut payloads,
         )?;
     }
-    if request.include_plugins {
+    if !request.plugin_paths.is_empty() {
         counts.plugins = stage_discovered_trees(
-            &inventory.plugin_paths,
+            &request.plugin_paths,
             &request.codex_home.join("plugins").join("cache"),
             "codex/plugins/cache",
             staging.path(),
             &mut payloads,
         )?;
     }
-    if request.include_generated_images {
+    if !request.generated_image_paths.is_empty() {
         counts.generated_images = stage_discovered_files(
-            &inventory.generated_image_paths,
+            &request.generated_image_paths,
             &request.codex_home.join("generated_images"),
             "codex/generated_images",
             staging.path(),

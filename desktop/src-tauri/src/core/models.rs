@@ -49,6 +49,15 @@ pub struct ConversationEntry {
     pub archive_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OptionalContentEntry {
+    pub content_id: Uuid,
+    pub name: String,
+    pub source_path: PathBuf,
+    pub relative_path: String,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExclusionSummary {
     pub excluded_files: u64,
@@ -89,6 +98,9 @@ pub struct CodexInventory {
     pub skill_paths: Vec<PathBuf>,
     pub plugin_paths: Vec<PathBuf>,
     pub generated_image_paths: Vec<PathBuf>,
+    pub skills: Vec<OptionalContentEntry>,
+    pub plugins: Vec<OptionalContentEntry>,
+    pub generated_images: Vec<OptionalContentEntry>,
     pub warnings: Vec<String>,
 }
 
@@ -109,9 +121,9 @@ pub struct CreatePackageRequest {
     pub conversation_ids: Vec<Uuid>,
     pub output_path: PathBuf,
     pub source_device_id: Uuid,
-    pub include_skills: bool,
-    pub include_plugins: bool,
-    pub include_generated_images: bool,
+    pub skill_paths: Vec<PathBuf>,
+    pub plugin_paths: Vec<PathBuf>,
+    pub generated_image_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

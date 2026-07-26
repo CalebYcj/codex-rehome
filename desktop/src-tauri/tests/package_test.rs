@@ -78,9 +78,9 @@ fn packages_selected_fixture_content_without_mutating_sources() -> Result<(), Bo
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: output.clone(),
         source_device_id: Uuid::parse_str("33333333-3333-4333-8333-333333333333")?,
-        include_skills: true,
-        include_plugins: true,
-        include_generated_images: true,
+        skill_paths: vec![fixture.skill_path.clone()],
+        plugin_paths: vec![fixture.plugin_manifest_path.clone()],
+        generated_image_paths: vec![fixture.generated_image_path.clone()],
     })?;
 
     assert_eq!(report.package_path, output);
@@ -259,9 +259,9 @@ fn package_exports_threads_from_a_private_wal_snapshot() -> Result<(), Box<dyn E
         conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
         output_path: output,
         source_device_id: Uuid::new_v4(),
-        include_skills: false,
-        include_plugins: false,
-        include_generated_images: false,
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
     })?;
 
     assert_eq!(report.counts.sqlite_threads, 1);
@@ -807,9 +807,9 @@ fn package_request(
         conversation_ids: vec![Uuid::parse_str(THREAD_ID).unwrap()],
         output_path,
         source_device_id: Uuid::nil(),
-        include_skills: true,
-        include_plugins: true,
-        include_generated_images: true,
+        skill_paths: vec![fixture.skill_path.clone()],
+        plugin_paths: vec![fixture.plugin_manifest_path.clone()],
+        generated_image_paths: vec![fixture.generated_image_path.clone()],
     }
 }
 

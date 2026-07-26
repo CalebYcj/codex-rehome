@@ -50,6 +50,14 @@ export interface ConversationEntry {
   archive_path: string;
 }
 
+export interface OptionalContentEntry {
+  content_id: string;
+  name: string;
+  source_path: string;
+  relative_path: string;
+  size_bytes: number;
+}
+
 export interface CodexInventory {
   codex_home: string;
   source_os: SourceOs;
@@ -65,15 +73,18 @@ export interface CodexInventory {
   skill_paths: string[];
   plugin_paths: string[];
   generated_image_paths: string[];
+  skills: OptionalContentEntry[];
+  plugins: OptionalContentEntry[];
+  generated_images: OptionalContentEntry[];
   warnings: string[];
 }
 
 export interface CreatePackageRequest {
   project_ids: string[];
   conversation_ids: string[];
-  include_skills: boolean;
-  include_plugins: boolean;
-  include_generated_images: boolean;
+  skill_ids: string[];
+  plugin_ids: string[];
+  generated_image_ids: string[];
 }
 
 export interface CreatePackageReport {

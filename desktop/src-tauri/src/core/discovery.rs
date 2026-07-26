@@ -1,6 +1,9 @@
 use crate::core::{
     error::{ErrorCode, RehomeError},
-    models::{CodexInventory, ContentCounts, ConversationEntry, ProjectEntry, SourceOs},
+    models::{
+        CodexInventory, ContentCounts, ConversationEntry, OptionalContentEntry, ProjectEntry,
+        SourceOs,
+    },
     paths::normalize_entry,
     session::{metadata_string, metadata_uuid, parse_session_metadata},
 };
@@ -122,7 +125,7 @@ pub fn discover_codex_with_context(
 
     let mut project_paths = Vec::new();
     let mut seen_projects = HashSet::new();
-    read_global_project_roots(
+    let has_registered_projects = read_global_project_roots(
         &codex_home.join(".codex-global-state.json"),
         &mut project_paths,
         &mut seen_projects,
@@ -132,7 +135,15 @@ pub fn discover_codex_with_context(
     let sqlite_threads = state_db_path
         .as_deref()
         .map(|path| {
-            read_state_database_roots(path, &mut project_paths, &mut seen_projects, &mut warnings)
+            read_state_database_roots(
+                path,
+                if has_registered_projects {
+                    None
+                } else {
+                    Some((&mut project_paths, &mut seen_projects))
+                },
+                &mut warnings,
+            )
         })
         .unwrap_or(0);
 
@@ -147,6 +158,18 @@ pub fn discover_codex_with_context(
 
     dedupe_warnings(&mut warnings);
 
+    let skills = optional_tree_entries(&skill_paths, &codex_home.join("skills"), "skill");
+    let plugins = optional_tree_entries(
+        &plugin_paths,
+        &codex_home.join("plugins").join("cache"),
+        "plugin",
+    );
+    let generated_images = optional_file_entries(
+        &generated_image_paths,
+        &codex_home.join("generated_images"),
+        "generated-image",
+    );
+
     Ok(CodexInventory {
         codex_home,
         source_os: current_source_os(),
@@ -156,9 +179,9 @@ pub fn discover_codex_with_context(
             projects: projects.len() as u64,
             project_files: 0,
             conversations: conversations.len() as u64,
-            skills: skill_paths.len() as u64,
-            plugins: plugin_paths.len() as u64,
-            generated_images: generated_image_paths.len() as u64,
+            skills: skills.len() as u64,
+            plugins: plugins.len() as u64,
+            generated_images: generated_images.len() as u64,
             sqlite_threads,
         },
         projects,
@@ -170,6 +193,9 @@ pub fn discover_codex_with_context(
         skill_paths,
         plugin_paths,
         generated_image_paths,
+        skills,
+        plugins,
+        generated_images,
         warnings,
     })
 }
@@ -309,7 +335,8 @@ pub(crate) fn associated_project_id(
         let key = ProjectPathKey::new(&canonical.to_string_lossy(), &canonical);
         if let Some(project) = projects.iter().find(|project| {
             let source = PathBuf::from(&project.source_path);
-            ProjectPathKey::new(&project.source_path, &source) == key
+            let source_key = ProjectPathKey::new(&project.source_path, &source);
+            source_key == key || project_path_contains(&source_key, &key)
         }) {
             return Some(project.project_id);
         }
@@ -529,20 +556,20 @@ fn read_global_project_roots(
     projects: &mut Vec<PathBuf>,
     seen: &mut HashSet<ProjectPathKey>,
     warnings: &mut Vec<String>,
-) {
+) -> bool {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
             warnings.push("Optional Codex global state metadata is not a regular file".to_owned());
-            return;
+            return false;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             warnings.push("Optional Codex global state metadata was not found".to_owned());
-            return;
+            return false;
         }
         Err(_) => {
             warnings.push("Could not inspect optional Codex global state metadata".to_owned());
-            return;
+            return false;
         }
     }
     let value = match fs::read(path)
@@ -552,9 +579,23 @@ fn read_global_project_roots(
         Some(Value::Object(value)) => value,
         _ => {
             warnings.push("Could not parse optional Codex global state metadata".to_owned());
-            return;
+            return false;
         }
     };
+
+    if let Some(local_projects) = value.get("local-projects").and_then(Value::as_object) {
+        for project in local_projects.values().filter_map(Value::as_object) {
+            let Some(roots) = project.get("rootPaths").and_then(Value::as_array) else {
+                continue;
+            };
+            for root in roots.iter().filter_map(Value::as_str) {
+                push_unique_path(root, projects, seen);
+            }
+        }
+        if !local_projects.is_empty() {
+            return true;
+        }
+    }
 
     for key in [
         "electron-saved-workspace-roots",
@@ -577,25 +618,12 @@ fn read_global_project_roots(
         }
     }
 
-    if let Some(raw_hints) = value.get("thread-workspace-root-hints") {
-        if let Some(hints) = raw_hints.as_object() {
-            for path in hints.values() {
-                if let Some(path) = path.as_str() {
-                    push_unique_path(path, projects, seen);
-                } else {
-                    warnings.push("Ignored a non-path thread workspace hint".to_owned());
-                }
-            }
-        } else {
-            warnings.push("Ignored invalid thread workspace root hints".to_owned());
-        }
-    }
+    false
 }
 
 fn read_state_database_roots(
     path: &Path,
-    projects: &mut Vec<PathBuf>,
-    seen: &mut HashSet<ProjectPathKey>,
+    mut fallback_projects: Option<(&mut Vec<PathBuf>, &mut HashSet<ProjectPathKey>)>,
     warnings: &mut Vec<String>,
 ) -> u64 {
     let snapshot = match StateDatabaseSnapshot::create(path) {
@@ -644,7 +672,11 @@ fn read_state_database_roots(
     };
     for row in rows {
         match row {
-            Ok(Some(path)) => push_unique_path(&path, projects, seen),
+            Ok(Some(path)) => {
+                if let Some((projects, seen)) = fallback_projects.as_mut() {
+                    push_unique_path(&path, projects, seen);
+                }
+            }
             Ok(None) => {}
             Err(_) => warnings.push("Ignored an unreadable thread project root".to_owned()),
         }
@@ -681,10 +713,25 @@ enum ProjectPathKey {
     Native(PathBuf),
 }
 
+fn project_path_contains(project: &ProjectPathKey, candidate: &ProjectPathKey) -> bool {
+    match (project, candidate) {
+        (ProjectPathKey::Windows(project), ProjectPathKey::Windows(candidate)) => {
+            candidate == project
+                || candidate
+                    .strip_prefix(project)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }
+        (ProjectPathKey::Native(project), ProjectPathKey::Native(candidate)) => {
+            candidate.starts_with(project)
+        }
+        _ => false,
+    }
+}
+
 impl ProjectPathKey {
     fn new(raw: &str, path: &Path) -> Self {
         if looks_like_windows_path(raw) {
-            let normalized = raw.replace('\\', "/");
+            let normalized = raw.strip_prefix(r"\\?\").unwrap_or(raw).replace('\\', "/");
             let prefix = if normalized.starts_with("//") {
                 "//"
             } else {
@@ -700,6 +747,77 @@ impl ProjectPathKey {
             Self::Native(path.to_path_buf())
         }
     }
+}
+
+fn optional_tree_entries(
+    markers: &[PathBuf],
+    root: &Path,
+    kind: &str,
+) -> Vec<OptionalContentEntry> {
+    let mut seen = HashSet::new();
+    let mut entries = markers
+        .iter()
+        .filter_map(|marker| {
+            let bundle = marker.parent()?;
+            let relative = bundle.strip_prefix(root).ok()?;
+            let relative_path = normalize_entry(relative).ok()?;
+            if !seen.insert(relative_path.clone()) {
+                return None;
+            }
+            Some(OptionalContentEntry {
+                content_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("{kind}:{relative_path}").as_bytes(),
+                ),
+                name: bundle
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(kind)
+                    .to_owned(),
+                source_path: marker.clone(),
+                relative_path,
+                size_bytes: directory_size(bundle),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.relative_path.cmp(&right.relative_path))
+    });
+    entries
+}
+
+fn optional_file_entries(paths: &[PathBuf], root: &Path, kind: &str) -> Vec<OptionalContentEntry> {
+    let mut entries = paths
+        .iter()
+        .filter_map(|path| {
+            let relative_path = normalize_entry(path.strip_prefix(root).ok()?).ok()?;
+            Some(OptionalContentEntry {
+                content_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("{kind}:{relative_path}").as_bytes(),
+                ),
+                name: path.file_name()?.to_string_lossy().into_owned(),
+                source_path: path.clone(),
+                relative_path,
+                size_bytes: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn directory_size(root: &Path) -> u64 {
+    walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 fn looks_like_windows_path(raw: &str) -> bool {

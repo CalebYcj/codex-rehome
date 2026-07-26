@@ -195,6 +195,73 @@ fn codex_home_resolution_has_explicit_precedence() {
 }
 
 #[test]
+fn current_local_projects_are_authoritative_over_historical_thread_roots(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let alpha = temp.path().join("alpha");
+    let beta = temp.path().join("beta");
+    let historical = temp.path().join("historical-subdirectory");
+    fs::create_dir_all(&codex_home)?;
+    fs::create_dir_all(&alpha)?;
+    fs::create_dir_all(&beta)?;
+    fs::write(
+        codex_home.join(".codex-global-state.json"),
+        serde_json::to_vec(&json!({
+            "local-projects": {
+                "local-alpha": { "rootPaths": [alpha] },
+                "local-beta": { "rootPaths": [beta] }
+            },
+            "thread-workspace-root-hints": { "old-thread": historical }
+        }))?,
+    )?;
+    let state = Connection::open(codex_home.join("state_1.sqlite"))?;
+    state.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT)", [])?;
+    state.execute(
+        "INSERT INTO threads (id, cwd) VALUES ('old-thread', ?1)",
+        params![historical.to_string_lossy()],
+    )?;
+    drop(state);
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+    assert_eq!(inventory.projects.len(), 2);
+    assert!(inventory
+        .projects
+        .iter()
+        .any(|project| project.name == "alpha"));
+    assert!(inventory
+        .projects
+        .iter()
+        .any(|project| project.name == "beta"));
+    assert!(!inventory
+        .projects
+        .iter()
+        .any(|project| project.name == "historical-subdirectory"));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_long_path_prefix_does_not_duplicate_registered_projects() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home)?;
+    fs::write(
+        codex_home.join(".codex-global-state.json"),
+        serde_json::to_vec(&json!({
+            "local-projects": {
+                "normal": { "rootPaths": [r"C:\Users\Example\Documents\visual"] },
+                "long": { "rootPaths": [r"\\?\C:\Users\Example\Documents\visual"] }
+            }
+        }))?,
+    )?;
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+    assert_eq!(inventory.projects.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn discovery_reports_fixture_without_modifying_it() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let before_session = fs::read(&fixture.session_path)?;

@@ -1,4 +1,4 @@
-import { useMemo, useState, type RefObject } from "react";
+import { useMemo, useState, type ReactNode, type RefObject } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -19,6 +19,7 @@ import {
   type CodexInventory,
   type ConversationEntry,
   type CreatePackageReport,
+  type OptionalContentEntry,
 } from "../../lib/types";
 
 interface SendPageProps {
@@ -30,9 +31,9 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
   const [projects, setProjects] = useState<Set<string>>(new Set());
   const [conversations, setConversations] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [skills, setSkills] = useState(false);
-  const [plugins, setPlugins] = useState(false);
-  const [images, setImages] = useState(false);
+  const [skills, setSkills] = useState<Set<string>>(new Set());
+  const [plugins, setPlugins] = useState<Set<string>>(new Set());
+  const [images, setImages] = useState<Set<string>>(new Set());
   const [report, setReport] = useState<CreatePackageReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +52,8 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
     [inventory],
   );
 
-  const hasContent = projects.size > 0 || conversations.size > 0 || skills || plugins || images;
+  const hasContent =
+    projects.size + conversations.size + skills.size + plugins.size + images.size > 0;
   const canCreate = Boolean(inventory && hasContent && !busy);
 
   function toggle(setter: (value: Set<string>) => void, current: Set<string>, value: string) {
@@ -69,12 +71,11 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
       const created = await createPackage({
         project_ids: [...projects],
         conversation_ids: [...conversations],
-        include_skills: skills,
-        include_plugins: plugins,
-        include_generated_images: images,
+        skill_ids: [...skills],
+        plugin_ids: [...plugins],
+        generated_image_ids: [...images],
       });
-      if (!created) return;
-      setReport(created);
+      if (created) setReport(created);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -87,7 +88,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
       <header className="page-header">
         <p className="eyebrow">SEND</p>
         <h1 ref={headingRef} tabIndex={-1}>发送交接</h1>
-        <p className="page-description">项目文件和对话可以分开选择，对话按所属项目整理。</p>
+        <p className="page-description">项目文件、对话和其他 Codex 内容都可以分开选择。</p>
       </header>
 
       <section className="workflow-section" aria-labelledby="send-projects-title">
@@ -100,7 +101,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
             <ProjectChoice
               key={project.project_id}
               name={project.name}
-              path={project.source_path}
+              path={formatDisplayPath(project.source_path)}
               fileCount={project.file_count}
               conversations={project.conversations}
               projectSelected={projects.has(project.project_id)}
@@ -111,11 +112,11 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
               onToggleConversation={(id) => toggle(setConversations, conversations, id)}
             />
           ))}
-          {!projectGroups.length && <p className="empty-state">未检测到真实的项目文件夹</p>}
+          {!projectGroups.length && <p className="empty-state">未检测到 Codex 已登记的本机项目</p>}
           {unassociatedConversations.length > 0 && (
             <ProjectChoice
               name="未归属项目的对话"
-              path="不包含项目文件"
+              path="只迁移对话，不包含项目文件"
               fileCount={null}
               conversations={unassociatedConversations}
               projectSelected={false}
@@ -131,19 +132,49 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
       <section className="workflow-section" aria-labelledby="send-content-title">
         <div className="section-title-row">
           <div><span className="step-number">2</span><h2 id="send-content-title">其他 Codex 内容</h2></div>
-          <span className="selection-count">按需选择</span>
+          <span className="selection-count">都不是必选项</span>
         </div>
-        <div className="choice-list compact-choices">
-          <label className="choice-row"><input type="checkbox" checked={skills} onChange={(event) => setSkills(event.target.checked)} /><Sparkles aria-hidden="true" /><span><strong>Skills</strong><small>{inventory?.counts.skills ?? 0} 项</small></span></label>
-          <label className="choice-row"><input type="checkbox" checked={plugins} onChange={(event) => setPlugins(event.target.checked)} /><Puzzle aria-hidden="true" /><span><strong>Plugins</strong><small>{inventory?.counts.plugins ?? 0} 项</small></span></label>
-          <label className="choice-row"><input type="checkbox" checked={images} onChange={(event) => setImages(event.target.checked)} /><Image aria-hidden="true" /><span><strong>生成图片</strong><small>{inventory?.counts.generated_images ?? 0} 项</small></span></label>
+        <div className="optional-content-list">
+          <OptionalContentGroup
+            id="skills"
+            title="Skills"
+            description="迁移你希望在新电脑继续使用的能力"
+            icon={<Sparkles aria-hidden="true" />}
+            items={inventory?.skills ?? []}
+            selected={skills}
+            expanded={expanded.has("skills")}
+            onToggleExpanded={() => toggle(setExpanded, expanded, "skills")}
+            onChange={setSkills}
+          />
+          <OptionalContentGroup
+            id="plugins"
+            title="Plugins"
+            description="通常可以在新电脑重装，也可以选择带走"
+            icon={<Puzzle aria-hidden="true" />}
+            items={inventory?.plugins ?? []}
+            selected={plugins}
+            expanded={expanded.has("plugins")}
+            onToggleExpanded={() => toggle(setExpanded, expanded, "plugins")}
+            onChange={setPlugins}
+          />
+          <OptionalContentGroup
+            id="images"
+            title="生成图片"
+            description="只在需要保留历史生成物时选择"
+            icon={<Image aria-hidden="true" />}
+            items={inventory?.generated_images ?? []}
+            selected={images}
+            expanded={expanded.has("images")}
+            onToggleExpanded={() => toggle(setExpanded, expanded, "images")}
+            onChange={setImages}
+          />
         </div>
       </section>
 
       <section className="workflow-section" aria-labelledby="send-output-title">
         <div className="section-title-row"><div><span className="step-number">3</span><h2 id="send-output-title">输出位置</h2></div></div>
         <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>ReHome 包</strong><small>创建时通过系统窗口选择 .rehome 保存位置</small></span></div></div>
-        <div className="command-row"><p>{hasContent ? "选择已完成，可以创建迁移包" : "请选择项目文件、对话或其他 Codex 内容"}</p><button className="command-button" type="button" disabled={!canCreate} onClick={() => void handleCreate()}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <PackagePlus aria-hidden="true" />}创建 ReHome 包</button></div>
+        <div className="command-row"><p>{hasContent ? "选择已完成，可以创建迁移包" : "请选择需要迁移的内容"}</p><button className="command-button" type="button" disabled={!canCreate} onClick={() => void handleCreate()}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <PackagePlus aria-hidden="true" />}创建 ReHome 包</button></div>
         {error && <p className="inline-state status-error" role="alert">{error}</p>}
       </section>
 
@@ -171,18 +202,7 @@ interface ProjectChoiceProps {
   onToggleConversation: (id: string) => void;
 }
 
-function ProjectChoice({
-  name,
-  path,
-  fileCount,
-  conversations,
-  projectSelected,
-  expanded,
-  selectedConversations,
-  onToggleProject,
-  onToggleExpanded,
-  onToggleConversation,
-}: ProjectChoiceProps) {
+function ProjectChoice({ name, path, fileCount, conversations, projectSelected, expanded, selectedConversations, onToggleProject, onToggleExpanded, onToggleConversation }: ProjectChoiceProps) {
   return (
     <div className="project-choice">
       <div className="project-choice-header">
@@ -194,13 +214,7 @@ function ProjectChoice({
         ) : (
           <span className="project-copy project-copy-unassociated"><strong>{name}</strong><small>{path}</small></span>
         )}
-        <button
-          className="project-expand"
-          type="button"
-          aria-expanded={expanded}
-          aria-label={`${expanded ? "收起" : "展开"}项目 ${name}`}
-          onClick={onToggleExpanded}
-        >
+        <button className="project-expand" type="button" aria-expanded={expanded} aria-label={`${expanded ? "收起" : "展开"}项目 ${name}`} onClick={onToggleExpanded}>
           <span>{conversations.length} 个对话{fileCount !== null && ` · ${fileCount || "已检测"} 个文件`}</span>
           {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         </button>
@@ -219,6 +233,63 @@ function ProjectChoice({
       )}
     </div>
   );
+}
+
+interface OptionalContentGroupProps {
+  id: string;
+  title: string;
+  description: string;
+  icon: ReactNode;
+  items: OptionalContentEntry[];
+  selected: Set<string>;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onChange: (value: Set<string>) => void;
+}
+
+function OptionalContentGroup({ id, title, description, icon, items, selected, expanded, onToggleExpanded, onChange }: OptionalContentGroupProps) {
+  const allSelected = items.length > 0 && items.every((item) => selected.has(item.content_id));
+  function toggleItem(contentId: string) {
+    const next = new Set(selected);
+    if (next.has(contentId)) next.delete(contentId);
+    else next.add(contentId);
+    onChange(next);
+  }
+  function toggleAll() {
+    onChange(allSelected ? new Set() : new Set(items.map((item) => item.content_id)));
+  }
+
+  return (
+    <div className="optional-content-group">
+      <div className="optional-content-header">
+        <label className="optional-all-toggle">
+          <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={!items.length} aria-label={`全选 ${title}`} />
+          {icon}
+          <span><strong>{title}</strong><small>{description}</small></span>
+        </label>
+        <button type="button" className="project-expand" aria-expanded={expanded} aria-controls={`optional-${id}`} onClick={onToggleExpanded}>
+          <span>已选 {selected.size} / {items.length}</span>
+          {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
+        </button>
+      </div>
+      {expanded && (
+        <div className="optional-items" id={`optional-${id}`}>
+          {items.map((item) => (
+            <label className="optional-item" key={item.content_id}>
+              <input type="checkbox" checked={selected.has(item.content_id)} onChange={() => toggleItem(item.content_id)} />
+              <span><strong>{item.name}</strong><small>{item.relative_path}</small></span>
+              <small className="item-size">{formatBytes(item.size_bytes)}</small>
+            </label>
+          ))}
+          {!items.length && <p className="project-empty">没有检测到这类内容</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatDisplayPath(value: string): string {
+  return value.startsWith("\\\\?\\") ? value.slice(4) : value;
 }
 
 function formatDate(value: string): string {

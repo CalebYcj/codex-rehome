@@ -1061,9 +1061,9 @@ impl RestoreHarness {
             conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
             output_path: package_path.clone(),
             source_device_id: Uuid::nil(),
-            include_skills: false,
-            include_plugins: false,
-            include_generated_images: false,
+            skill_paths: vec![],
+            plugin_paths: vec![],
+            generated_image_paths: vec![],
         })?;
         let target_root = fixture.root.join("target");
         let codex_home = target_root.join(".codex");

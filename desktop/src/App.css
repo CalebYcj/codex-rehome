@@ -126,6 +126,17 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 .conversation-choice strong { color: #34413a; font-size: 11px; }
 .conversation-choice small { color: #7a8680; font-size: 9px; }
 .project-empty { margin: 0; padding: 13px; color: #7a8680; font-size: 10px; }
+.optional-content-list { overflow: hidden; border: 1px solid #d8e0dc; border-radius: 6px; background: #fff; }
+.optional-content-group + .optional-content-group { border-top: 1px solid #e1e7e3; }
+.optional-content-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 64px; }
+.optional-all-toggle { display: flex; min-width: 0; align-items: center; gap: 12px; padding: 12px 16px; }
+.optional-all-toggle > svg { width: 18px; flex: 0 0 18px; color: #287356; }
+.optional-all-toggle span, .optional-item span { display: grid; min-width: 0; gap: 3px; }
+.optional-all-toggle small, .optional-item small { overflow: hidden; color: #7a8680; text-overflow: ellipsis; white-space: nowrap; }
+.optional-items { border-top: 1px solid #e1e7e3; background: #fafcfb; }
+.optional-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 52px; padding: 8px 16px 8px 46px; }
+.optional-item + .optional-item { border-top: 1px solid #e8ecea; }
+.item-size { text-align: right; }
 
 .form-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 58px; padding: 8px 0; border-bottom: 1px solid #e4e9e6; }
 .form-row:last-of-type { border-bottom: 0; }
@@ -257,6 +268,10 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
   .project-choice-header { grid-template-columns: 1fr; }
   .project-expand { justify-content: space-between; min-height: 34px; border-top: 1px solid #edf0ee; border-left: 0; }
   .project-conversations { padding-left: 18px; }
+  .optional-content-header { grid-template-columns: 1fr; }
+  .optional-content-header .project-expand { min-height: 42px; border-top: 1px solid #e1e7e3; border-left: 0; }
+  .optional-item { grid-template-columns: auto minmax(0, 1fr); padding-left: 16px; }
+  .optional-item .item-size { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

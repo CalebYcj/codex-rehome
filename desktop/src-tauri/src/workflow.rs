@@ -34,9 +34,9 @@ const GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 pub struct CreatePackageSelection {
     pub project_ids: Vec<Uuid>,
     pub conversation_ids: Vec<Uuid>,
-    pub include_skills: bool,
-    pub include_plugins: bool,
-    pub include_generated_images: bool,
+    pub skill_ids: Vec<Uuid>,
+    pub plugin_ids: Vec<Uuid>,
+    pub generated_image_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -692,10 +692,46 @@ pub(crate) fn resolve_create_package_request(
         conversation_ids: selection.conversation_ids,
         output_path,
         source_device_id: inventory.source_device_id,
-        include_skills: selection.include_skills,
-        include_plugins: selection.include_plugins,
-        include_generated_images: selection.include_generated_images,
+        skill_paths: resolve_optional_paths(&selection.skill_ids, &inventory.skills, "skill")?,
+        plugin_paths: resolve_optional_paths(&selection.plugin_ids, &inventory.plugins, "plugin")?,
+        generated_image_paths: resolve_optional_paths(
+            &selection.generated_image_ids,
+            &inventory.generated_images,
+            "generated image",
+        )?,
     })
+}
+
+fn resolve_optional_paths(
+    selected_ids: &[Uuid],
+    entries: &[crate::core::models::OptionalContentEntry],
+    kind: &str,
+) -> Result<Vec<PathBuf>, RehomeError> {
+    let available = entries
+        .iter()
+        .map(|entry| (entry.content_id, &entry.source_path))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    selected_ids
+        .iter()
+        .map(|id| {
+            if !seen.insert(*id) {
+                return Err(selection_failed(
+                    ErrorCode::ProjectConflict,
+                    format!("{kind} selection contains duplicates"),
+                ));
+            }
+            available
+                .get(id)
+                .map(|path| (*path).clone())
+                .ok_or_else(|| {
+                    selection_failed(
+                        ErrorCode::ProjectConflict,
+                        format!("selected {kind} {id} is not in fresh discovery"),
+                    )
+                })
+        })
+        .collect()
 }
 
 pub(crate) fn validate_rollback_action(

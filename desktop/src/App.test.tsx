@@ -90,6 +90,33 @@ const inventory = {
   skill_paths: [],
   plugin_paths: [],
   generated_image_paths: [],
+  skills: [
+    {
+      content_id: "10101010-1010-4010-8010-101010101010",
+      name: "imagegen",
+      source_path: "C:\\Users\\Me\\.codex\\skills\\imagegen\\SKILL.md",
+      relative_path: "imagegen",
+      size_bytes: 2048,
+    },
+  ],
+  plugins: [
+    {
+      content_id: "20202020-2020-4020-8020-202020202020",
+      name: "computer-use",
+      source_path: "C:\\Users\\Me\\.codex\\plugins\\cache\\computer-use\\plugin.json",
+      relative_path: "computer-use/1.0.0",
+      size_bytes: 4096,
+    },
+  ],
+  generated_images: [
+    {
+      content_id: "30303030-3030-4030-8030-303030303030",
+      name: "result.png",
+      source_path: "C:\\Users\\Me\\.codex\\generated_images\\result.png",
+      relative_path: "result.png",
+      size_bytes: 8192,
+    },
+  ],
   warnings: [],
 };
 
@@ -293,6 +320,26 @@ describe("ReHome Desktop workflows", () => {
       screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).not.toBeChecked();
+  });
+
+  it("lists optional content and packages only the selected entries", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+
+    await user.click(screen.getAllByRole("button", { name: /已选 0 \/ 1/ })[0]);
+    await user.click(screen.getByRole("checkbox", { name: "全选 Skills" }));
+    expect(screen.getAllByText("imagegen").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+    expect(api.createPackage).toHaveBeenCalledWith({
+      project_ids: [],
+      conversation_ids: [],
+      skill_ids: [inventory.skills[0].content_id],
+      plugin_ids: [],
+      generated_image_ids: [],
+    });
   });
 
   it("shows package integrity, conflicts, and destination before restore enablement", async () => {

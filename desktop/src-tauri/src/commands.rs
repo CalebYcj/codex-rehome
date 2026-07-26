@@ -133,9 +133,9 @@ mod tests {
         let selection = CreatePackageSelection {
             project_ids: vec![selected_project],
             conversation_ids: vec![matching_chat, unassociated_chat],
-            include_skills: false,
-            include_plugins: false,
-            include_generated_images: false,
+            skill_ids: vec![],
+            plugin_ids: vec![],
+            generated_image_ids: vec![],
         };
 
         let resolved =
@@ -169,9 +169,9 @@ mod tests {
             CreatePackageSelection {
                 project_ids: vec![Uuid::new_v4()],
                 conversation_ids: vec![unassociated_chat],
-                include_skills: false,
-                include_plugins: false,
-                include_generated_images: false,
+                skill_ids: vec![],
+                plugin_ids: vec![],
+                generated_image_ids: vec![],
             },
             PathBuf::from("C:\\selected-by-native-dialog\\unknown.rehome"),
         )
@@ -245,9 +245,9 @@ mod tests {
             CreatePackageSelection {
                 project_ids: vec![discovered_project.project_id],
                 conversation_ids: vec![discovered_conversation.task_id],
-                include_skills: false,
-                include_plugins: false,
-                include_generated_images: false,
+                skill_ids: vec![],
+                plugin_ids: vec![],
+                generated_image_ids: vec![],
             },
             root.path().join("handoff.rehome"),
         )
@@ -497,6 +497,9 @@ mod tests {
                 skill_paths: vec![],
                 plugin_paths: vec![],
                 generated_image_paths: vec![],
+                skills: vec![],
+                plugins: vec![],
+                generated_images: vec![],
                 warnings: vec![],
             },
             alpha,
