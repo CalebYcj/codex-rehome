@@ -78,7 +78,11 @@ fn schema_v3_payloads_enter_the_normal_restore_plan() -> Result<(), Box<dyn Erro
     drop(database);
     let target = TargetInventory {
         codex_home,
-        target_os: SourceOs::Windows,
+        target_os: if cfg!(target_os = "macos") {
+            SourceOs::Macos
+        } else {
+            SourceOs::Windows
+        },
         target_arch: "x86_64".into(),
         counts: ContentCounts::default(),
         projects: Vec::new(),

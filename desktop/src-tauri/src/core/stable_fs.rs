@@ -682,7 +682,7 @@ fn openat(
             parent.directory.as_raw_fd(),
             name.as_ptr(),
             flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            mode,
+            mode as libc::c_uint,
         )
     };
     if descriptor < 0 {

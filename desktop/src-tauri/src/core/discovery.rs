@@ -209,12 +209,7 @@ fn discovered_projects(paths: &[PathBuf]) -> Vec<ProjectEntry> {
             let source = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
             let source_path = source.to_string_lossy().into_owned();
             let project_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, source_path.as_bytes());
-            let name = source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.is_empty())
-                .unwrap_or("project")
-                .to_owned();
+            let name = portable_project_name(&source);
             ProjectEntry {
                 project_id,
                 name,
@@ -1068,15 +1063,36 @@ fn file_name_is(path: &Path, expected: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(expected))
 }
 
+fn portable_project_name(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|name| !name.is_empty())
+        .unwrap_or("project")
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::collect_child_paths;
+    use super::{collect_child_paths, portable_project_name};
     use crate::core::session::{metadata_string, parse_session_metadata};
     use std::{
         io,
         path::{Path, PathBuf},
     };
     use uuid::Uuid;
+
+    #[test]
+    fn project_name_accepts_windows_paths_on_macos_and_unix_paths_on_windows() {
+        assert_eq!(
+            portable_project_name(Path::new(r"C:\Users\Example\Documents\visual")),
+            "visual"
+        );
+        assert_eq!(
+            portable_project_name(Path::new("/Users/example/Documents/visual")),
+            "visual"
+        );
+    }
 
     #[test]
     fn session_parser_accepts_current_nested_metadata_and_safe_legacy_metadata() {
