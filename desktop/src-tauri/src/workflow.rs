@@ -23,6 +23,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Component, Path, PathBuf, Prefix},
+    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -583,6 +584,10 @@ pub async fn apply_restore(
     let state = state.inner().clone();
     run_blocking(ErrorCode::RestoreFailed, move || {
         let claim = state.claim_plan(selection.plan_id)?;
+        if let Err(error) = ensure_codex_desktop_is_closed() {
+            claim.restore_available();
+            return Err(error);
+        }
         let result = apply_restore_by_id(
             selection.plan_id,
             RestoreOptions {
@@ -614,6 +619,7 @@ pub async fn rollback_transaction(
 ) -> Result<RollbackReport, RehomeError> {
     let state = state.inner().clone();
     run_blocking(ErrorCode::RollbackFailed, move || {
+        ensure_codex_desktop_is_closed()?;
         let _claim = state.claim_rollback(selection.transaction_id)?;
         let transaction = rollback_transaction_by_id(selection.transaction_id)?;
         validate_rollback_action(transaction.status, selection.action)?;
@@ -1059,6 +1065,74 @@ fn open_failed(message: impl Into<String>) -> RehomeError {
     RehomeError::new(ErrorCode::RestoreFailed, message)
 }
 
+fn ensure_codex_desktop_is_closed() -> Result<(), RehomeError> {
+    if codex_desktop_is_running()? {
+        return Err(RehomeError::new(
+            ErrorCode::CodexRunning,
+            "Codex is still running. Fully quit Codex Desktop before restoring or rolling back.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn codex_desktop_is_running() -> Result<bool, RehomeError> {
+    Ok(tasklist_reports_process("codex.exe")?
+        || tasklist_reports_process("codex-code-mode-host.exe")?)
+}
+
+#[cfg(windows)]
+fn tasklist_reports_process(process_name: &str) -> Result<bool, RehomeError> {
+    let filter = format!("IMAGENAME eq {process_name}");
+    let output = Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+        .map_err(|error| {
+            RehomeError::new(
+                ErrorCode::CodexRunning,
+                format!("could not check whether Codex is running: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(RehomeError::new(
+            ErrorCode::CodexRunning,
+            "could not check whether Codex is running",
+        ));
+    }
+    Ok(tasklist_csv_has_process(
+        &String::from_utf8_lossy(&output.stdout),
+        process_name,
+    ))
+}
+
+#[cfg(windows)]
+fn tasklist_csv_has_process(output: &str, process_name: &str) -> bool {
+    let expected = format!("\"{}\"", process_name.to_ascii_lowercase());
+    output
+        .to_ascii_lowercase()
+        .lines()
+        .any(|line| line.trim_start().starts_with(&expected))
+}
+
+#[cfg(target_os = "macos")]
+fn codex_desktop_is_running() -> Result<bool, RehomeError> {
+    let output = Command::new("pgrep")
+        .args(["-f", "/Codex.app/"])
+        .output()
+        .map_err(|error| {
+            RehomeError::new(
+                ErrorCode::CodexRunning,
+                format!("could not check whether Codex is running: {error}"),
+            )
+        })?;
+    Ok(output.status.success())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn codex_desktop_is_running() -> Result<bool, RehomeError> {
+    Ok(false)
+}
+
 #[cfg(test)]
 mod grant_tests {
     use super::*;
@@ -1093,5 +1167,18 @@ mod grant_tests {
             &root.join("backups")
         )
         .is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tasklist_process_detection_uses_the_csv_image_name() {
+        assert!(tasklist_csv_has_process(
+            "\"codex.exe\",\"123\",\"Console\",\"1\",\"100 K\"\r\n",
+            "codex.exe"
+        ));
+        assert!(!tasklist_csv_has_process(
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            "codex.exe"
+        ));
     }
 }
