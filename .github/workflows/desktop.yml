@@ -36,12 +36,13 @@ jobs:
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       # macOS exposes its default temporary directory through /var, a symlink.
-      # The product correctly rejects symlinked restore ancestry, so tests use a
-      # physical temporary root rather than weakening that production safeguard.
+      # The product correctly rejects symlinked restore ancestry and excludes
+      # temporary folders from package sources, so tests use a physical directory
+      # inside the checked-out workspace rather than weakening either safeguard.
       - if: runner.os == 'macOS'
-        env:
-          TMPDIR: /private/tmp
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/rehome-ci-scratch"
+          TMPDIR="$GITHUB_WORKSPACE/rehome-ci-scratch" cargo test --manifest-path desktop/src-tauri/Cargo.toml
       - if: runner.os != 'macOS'
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
       - if: runner.os == 'Windows'
