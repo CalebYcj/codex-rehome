@@ -1,75 +1,24 @@
-# Feature Status
+# ReHome Desktop Beta Validation
 
-`codex-rehome` supports moving Codex Desktop workspaces across Mac and Windows computers.
+ReHome Desktop is in public beta. A migration is only complete after the package is verified, restored, and the restored project is reopened in Codex Desktop.
 
-## Supported Directions
+| Direction | Current coverage | Remaining beta boundary |
+|---|---|---|
+| Windows → Windows | Real-source isolated acceptance covers package creation, restore, checksums, conversations, indexes, SQLite threads, path mapping, project files, and exclusions. | A second physical Windows machine and its live sidebar registration still need final release acceptance. |
+| Mac → Mac | Real package, isolated restore, and Codex project registration have passed on Intel macOS. | Apple Silicon native run remains a release check. |
+| Windows → macOS | Package compatibility and target restore logic are covered. | Final current-build physical Windows-to-Mac App run remains required before stable release. |
+| macOS → Windows | Package compatibility and target restore logic are covered. | Final current-build physical Mac-to-Windows App run remains required before stable release. |
 
-| Direction | Status | Source script | Target restore |
-|---|---|---|---|
-| Mac to Windows | Supported | `create_mac_codex_migration_package.sh` | `Restore-Codex-To-Windows.ps1` |
-| Windows to Mac | Supported | `create_windows_codex_migration_package.ps1` | `Restore-Codex-To-Mac.sh` |
-| Windows to Windows | Supported | `create_windows_codex_migration_package.ps1` | `Restore-Codex-To-Windows.ps1` |
-| Mac to Mac | Supported | `create_mac_codex_migration_package.sh` | `Restore-Codex-To-Mac.sh` |
+## What the app verifies
 
-## What The Workflow Covers
+- Package checksums and required files
+- Selected conversation files and session indexes
+- SQLite thread records and target-path mapping
+- Selected project files and default exclusions
+- Best-effort project registration through Codex Desktop
 
-The standard workflow is designed to migrate:
+## What still needs a user check
 
-- Codex conversations and sessions
-- archived sessions
-- thread state SQLite files
-- memories and goals
-- user skills
-- plugin cache and manifests
-- generated images
-- selected Codex app support state
-- optional project folders
-- package manifests, checksums, and restore verification helpers
+Open Codex after a restore. Confirm the project is visible and reopen it if needed. Historical conversation text can be restored while an old task's original working-directory handle no longer works after a cross-platform move. Continue from the restored project in a new task when necessary.
 
-## Default Safety
-
-Standard mode excludes sensitive or machine-specific files by default:
-
-- `auth.json`
-- browser cookies and login databases
-- Local Storage and Session Storage
-- `.env` and `.env.*`
-- private keys
-- `.git`
-- `node_modules`
-- virtual environments
-- socket, IPC, and singleton runtime files
-
-The target computer should log in again manually when Codex, GitHub, browser integrations, Feishu, Gmail, or other external services request it.
-
-Restore scripts use merge restore by default. They add packaged sessions, archived sessions, skills, plugin cache, generated images, and `session_index.jsonl` entries while preserving target login/config identity files. Full `~/.codex` replacement requires `--replace-codex-home` on Mac or `-ReplaceCodexHome` on Windows. State database replacement requires `--replace-state` or `-ReplaceState`.
-
-## Target Verification
-
-After restoring, run the verifier for the target OS:
-
-```powershell
-.\Verify-Codex-Windows-Restore.ps1
-```
-
-or:
-
-```bash
-bash ./Verify-Codex-Mac-Restore.sh --json
-```
-
-Then open Codex and check recent threads and migrated project folders from their new target paths.
-
-For restores with `selected_chats/`, verifier readiness requires selected chat IDs to exist in restored `.codex/sessions`, `.codex/session_index.jsonl`, and target `state_*.sqlite.threads`. It also checks that rollout paths exist, thread cwd values point to restored target project paths, selected JSONL metadata has been path-mapped, old source paths are gone from selected JSONL files, and restored projects are present in `.codex-global-state.json`.
-
-The validation model has four layers: file layer, path mapping layer, index layer, and app registration layer. File/path/index readiness can make internal thread reads work, but it is not enough to make the Codex Desktop project sidebar show the restored workspace.
-
-Data-layer readiness is not the same as live desktop frontend readiness. Project folders must be registered through Codex Desktop's own open-workspace path, normally `codex app <restored-project-path>`. Hand-editing `.codex-global-state.json` alone can be overwritten by the running desktop app. Current schema v3 restore invokes `/Applications/Codex.app/Contents/Resources/codex app <restored-project-path>` on Mac and attempts `codex app <restored-project-path>` on Windows after project restore, then records the result in `codex-rehome-project-registration-report.json`. If Windows packaged-app permissions block CLI execution, manually reopen the restored project folder from Codex Desktop and rerun the verifier.
-
-## Platform Notes
-
-Intel Mac and Apple Silicon should not affect the core Codex data migration because architecture-specific dependency folders and binary-heavy runtime paths are excluded by default. Reinstall or rebuild project dependencies such as `node_modules`, virtual environments, compiled artifacts, or native tools on the target machine.
-
-Project folders are packaged under `projects/`. Mac restores can copy them automatically with `Restore-Codex-To-Mac.sh --restore-projects`, which defaults to `~/Documents/Codex-Restored-Projects`; pass `--projects-dir <dir>` to choose another location. Windows restores can copy them with `Restore-Codex-To-Windows.ps1 -RestoreProjects`, which defaults to `%USERPROFILE%\Documents\Codex-Restored-Projects`; pass `-ProjectsDir <dir>` to choose another location.
-
-Mac and Windows packages are generated with schema version 3 metadata exports for thread rows/path mapping/project UI registry, LF/no-BOM `SHA256SUMS.txt`, and both text and JSON manifests. Windows-generated zips use forward-slash entries so macOS can unzip them directly. Mac and Windows target verification check selected chats when present, `session_index.jsonl` readiness, SQLite thread readiness, path mapping readiness, restored project folders, global project registry readiness, app project registration readiness, and forbidden-file counts where available.
+Do not treat a successful file copy alone as a successful migration.
