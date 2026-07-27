@@ -38,7 +38,6 @@
 - ReHome 自建云盘、账号系统、域名或公网服务器。
 - 后台实时同步、自动监控文件变化或开机常驻服务。
 - 首版中的增量 `.rehome` 包和同一对话的追加合并。
-- Claude Code、ChatGPT Web 或其他 Agent 的历史导入。
 - Codex 登录凭证、浏览器 Cookie、`.env`、私钥或系统钥匙串迁移。
 - 原生依赖目录迁移，例如 `node_modules`、Python 虚拟环境和编译缓存。
 

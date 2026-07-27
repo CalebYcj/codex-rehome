@@ -35,7 +35,15 @@ jobs:
         run: npm run build
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
+      # macOS exposes its default temporary directory through /var, a symlink.
+      # The product correctly rejects symlinked restore ancestry, so tests use a
+      # physical temporary root rather than weakening that production safeguard.
+      - if: runner.os == 'macOS'
+        env:
+          TMPDIR: /private/tmp
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
+      - if: runner.os != 'macOS'
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
       - if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/readme_language_test.ps1
