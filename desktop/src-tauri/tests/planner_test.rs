@@ -290,10 +290,14 @@ fn project_bound_conversation_rewrites_a_stale_cross_platform_cwd() -> Result<()
     }
     apply_bridge_plan(&plan)?;
     let restored_session = fs::read_to_string(&plan.sessions[0].target)?;
-    assert!(restored_session.contains(target.to_string_lossy().as_ref()));
-    assert!(!restored_session.contains(stale_cwd));
+    let restored_session: serde_json::Value = serde_json::from_str(restored_session.trim())?;
+    assert_eq!(
+        restored_session["payload"]["cwd"],
+        target.to_string_lossy().as_ref()
+    );
     let index = fs::read_to_string(fixture.target.codex_home.join("session_index.jsonl"))?;
-    assert!(index.contains(target.to_string_lossy().as_ref()));
+    let index: serde_json::Value = serde_json::from_str(index.trim())?;
+    assert_eq!(index["cwd"], target.to_string_lossy().as_ref());
     let connection = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
     let imported_cwd: String =
         connection.query_row("SELECT cwd FROM threads WHERE id = ?1", [TASK_ID], |row| {
