@@ -8,7 +8,10 @@ use crate::core::{
         RegistrationStatus, RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs,
         TargetInventory, TransactionHistory, TransactionSummary,
     },
-    package::{create_package as core_create_package, inspect_package as core_inspect_package},
+    package::{
+        create_package_replacing as core_create_package_replacing,
+        inspect_package as core_inspect_package,
+    },
     planner::build_restore_plan as core_build_restore_plan,
     restore::{
         apply_restore_by_id, list_transaction_history as core_list_transaction_history,
@@ -463,7 +466,8 @@ pub async fn create_package(
         let output_path = canonical_save_path(selected)?;
         let inventory = core_discover_codex(None)?;
         let request = resolve_create_package_request(&inventory, selection, output_path)?;
-        let report = core_create_package(request)?;
+        // The native save dialog only returns an existing filename after the user confirms replace.
+        let report = core_create_package_replacing(request)?;
         let preview = core_inspect_package(&report.package_path)?;
         let canonical = canonical_existing_file(&report.package_path)?;
         let reveal_id = state.grant_inspected_package(canonical, preview.archive_hash.clone())?;

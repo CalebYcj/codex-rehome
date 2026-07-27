@@ -60,7 +60,22 @@ const EXCLUSION_RULES: &[&str] = &[
 ];
 
 pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageReport, RehomeError> {
-    validate_output_path(&request.output_path)?;
+    create_package_with_overwrite(request, false)
+}
+
+/// Creates a package after the desktop save dialog has explicitly confirmed replacement.
+/// Other callers keep the non-overwrite default above.
+pub fn create_package_replacing(
+    request: CreatePackageRequest,
+) -> Result<CreatePackageReport, RehomeError> {
+    create_package_with_overwrite(request, true)
+}
+
+fn create_package_with_overwrite(
+    request: CreatePackageRequest,
+    replace_existing: bool,
+) -> Result<CreatePackageReport, RehomeError> {
+    validate_output_path(&request.output_path, replace_existing)?;
     let inventory = discover_codex(Some(request.codex_home.clone()))?;
     let output_parent = usable_parent(&request.output_path);
     fs::create_dir_all(output_parent).map_err(|error| {
@@ -199,7 +214,12 @@ pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageRepo
     ensure_control_size("manifest.json", manifest_bytes.len() as u64)?;
     write_staged_bytes(staging.path(), "manifest.json", &manifest_bytes)?;
 
-    write_archive_atomically(staging.path(), &request.output_path, &payloads)?;
+    write_archive_atomically(
+        staging.path(),
+        &request.output_path,
+        &payloads,
+        replace_existing,
+    )?;
     let bytes_written = fs::metadata(&request.output_path)
         .map_err(|error| package_invalid(format!("could not inspect finished package: {error}")))?
         .len();
@@ -1018,6 +1038,7 @@ fn write_archive_atomically(
     staging_root: &Path,
     output_path: &Path,
     payloads: &PayloadCollection,
+    replace_existing: bool,
 ) -> Result<(), RehomeError> {
     let output_parent = usable_parent(output_path);
     let mut temporary = NamedTempFile::new_in(output_parent)
@@ -1043,19 +1064,19 @@ fn write_archive_atomically(
         writer.finish().map_err(zip_package_error)?;
     }
     temporary.as_file().sync_all().map_err(io_package_error)?;
-    publish_archive_exclusively(temporary.path(), output_path).map_err(|error| {
-        package_invalid(format!(
-            "could not atomically publish package without overwrite: {error}"
-        ))
+    publish_archive(temporary.path(), output_path, replace_existing).map_err(|error| {
+        package_invalid(format!("could not atomically publish package: {error}"))
     })?;
     drop(temporary);
     Ok(())
 }
 
 #[cfg(windows)]
-fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
+fn publish_archive(source: &Path, destination: &Path, replace_existing: bool) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
 
     let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination: Vec<u16> = destination
@@ -1063,13 +1084,13 @@ fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    };
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if replace_existing {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+    let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) };
     if moved == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -1077,15 +1098,18 @@ fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<
 }
 
 #[cfg(target_os = "macos")]
-fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
+fn publish_archive(source: &Path, destination: &Path, replace_existing: bool) -> io::Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
     let source = CString::new(source.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
     let destination = CString::new(destination.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
-    let result =
-        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    let result = if replace_existing {
+        unsafe { libc::rename(source.as_ptr(), destination.as_ptr()) }
+    } else {
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) }
+    };
     if result != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -1093,8 +1117,12 @@ fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn publish_archive_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::hard_link(source, destination)
+fn publish_archive(source: &Path, destination: &Path, replace_existing: bool) -> io::Result<()> {
+    if replace_existing {
+        fs::rename(source, destination)
+    } else {
+        fs::hard_link(source, destination)
+    }
 }
 
 struct ArchiveEntry {
@@ -1488,12 +1516,20 @@ fn package_entry_is_forbidden(entry: &str) -> bool {
     is_forbidden(Path::new(entry))
 }
 
-fn validate_output_path(path: &Path) -> Result<(), RehomeError> {
+fn validate_output_path(path: &Path, replace_existing: bool) -> Result<(), RehomeError> {
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         return Err(package_invalid("package output path is invalid"));
     }
-    if path.exists() {
+    if path.exists() && !replace_existing {
         return Err(package_invalid("package output path already exists"));
+    }
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path).map_err(io_package_error)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(package_invalid(
+                "existing package output is not a regular file and cannot be replaced",
+            ));
+        }
     }
     Ok(())
 }

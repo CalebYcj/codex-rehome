@@ -7,7 +7,7 @@ use rehome_desktop_lib::core::{
         ContentCounts, ConversationEntry, CreatePackageRequest, ExclusionSummary, PackageManifest,
         PackageMode, SourceOs,
     },
-    package::{create_package, inspect_package},
+    package::{create_package, create_package_replacing, inspect_package},
 };
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -678,6 +678,21 @@ fn create_package_never_clobbers_an_existing_output() -> Result<(), Box<dyn Erro
         ErrorCode::PackageInvalid,
     );
     assert_eq!(fs::read(package)?, b"keep me");
+    Ok(())
+}
+
+#[test]
+fn desktop_confirmed_replace_publishes_a_complete_package() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("existing.rehome");
+    fs::write(&package, b"old package")?;
+
+    let report = create_package_replacing(package_request(&fixture, package.clone()))?;
+
+    assert_eq!(report.package_path, package);
+    assert_ne!(fs::read(&package)?, b"old package");
+    assert!(inspect_package(&package)?.checksum_valid);
     Ok(())
 }
 
