@@ -195,7 +195,10 @@ fn failure_after_project_copy_rolls_every_target_back_exactly() -> Result<(), Bo
     let journal = fs::read_dir(harness.transactions_dir())?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .expect("rolled-back restore should retain a JSON transaction journal");
     let journal: Value = serde_json::from_slice(&fs::read(journal)?)?;
     let copied_project = journal["operations"]
