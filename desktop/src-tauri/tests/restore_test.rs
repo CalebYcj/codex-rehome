@@ -263,6 +263,44 @@ fn sqlite_wal_update_failure_rolls_back_without_leaving_sidecars() -> Result<(),
 }
 
 #[test]
+fn sqlite_wal_verification_failure_refreshes_sidecars_before_rollback() -> Result<(), Box<dyn Error>>
+{
+    let mut harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, _| {
+        replace_selected_session_payload(
+            package,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{THREAD_ID}\",\"title\":\"Synthetic migration thread\"}}}}\n"
+            )
+            .as_bytes(),
+        )
+    })?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    drop(connection);
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    harness.plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed, "{error:?}");
+    assert!(error.message.contains("path_mapping_valid: false"));
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!sqlite_sidecar(&database, suffix).exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn backup_root_must_not_overlap_projects_root() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let error = apply_restore(
@@ -1212,6 +1250,62 @@ fn add_forbidden_payload(
         entries.push((entry.name().to_owned(), contents));
     }
     entries.push((name.to_owned(), bytes.to_vec()));
+    let temporary = package_path.with_extension("rehome.tmp");
+    let mut writer = ZipWriter::new(fs::File::create(&temporary)?);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
+        .unix_permissions(0o644);
+    for (entry_name, contents) in &entries {
+        writer.start_file(entry_name, options)?;
+        writer.write_all(contents)?;
+    }
+    let checksums = entries
+        .iter()
+        .filter(|(entry_name, _)| entry_name != "manifest.json")
+        .map(|(entry_name, contents)| format!("{:x}  {entry_name}\n", Sha256::digest(contents)))
+        .collect::<String>();
+    writer.start_file("checksums.sha256", options)?;
+    writer.write_all(checksums.as_bytes())?;
+    writer.finish()?;
+    fs::rename(temporary, package_path)?;
+    Ok(())
+}
+
+fn replace_selected_session_payload(
+    package_path: &Path,
+    replacement: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let source = fs::File::open(package_path)?;
+    let mut archive = ZipArchive::new(source)?;
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.is_dir() || entry.name() == "checksums.sha256" {
+            continue;
+        }
+        let mut contents = Vec::new();
+        std::io::copy(&mut entry, &mut contents)?;
+        entries.push((entry.name().to_owned(), contents));
+    }
+    let manifest_index = entries
+        .iter()
+        .position(|(name, _)| name == "manifest.json")
+        .ok_or("package manifest is missing")?;
+    let mut manifest: Value = serde_json::from_slice(&entries[manifest_index].1)?;
+    let session_source = manifest["conversations"][0]["archive_path"]
+        .as_str()
+        .ok_or("package conversation source is missing")?
+        .to_owned();
+    let session_index = entries
+        .iter()
+        .position(|(name, _)| name == &session_source)
+        .ok_or("package conversation payload is missing")?;
+    entries[session_index].1 = replacement.to_vec();
+    manifest["conversations"][0]["content_hash"] =
+        Value::String(format!("{:x}", Sha256::digest(replacement)));
+    entries[manifest_index].1 = serde_json::to_vec(&manifest)?;
+
     let temporary = package_path.with_extension("rehome.tmp");
     let mut writer = ZipWriter::new(fs::File::create(&temporary)?);
     let options = SimpleFileOptions::default()

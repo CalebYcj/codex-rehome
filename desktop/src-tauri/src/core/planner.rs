@@ -11,7 +11,7 @@ use crate::core::{
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -751,6 +751,7 @@ fn conversation_rewrites(
     add_project_path_rewrites(
         &mut rewrites,
         payloads,
+        planning_payloads,
         conversation,
         projects,
         project_targets,
@@ -1276,6 +1277,7 @@ fn add_branch_rewrites(
 fn add_project_path_rewrites(
     rewrites: &mut RewriteMap,
     payloads: &BTreeMap<String, VerifiedPayload>,
+    planning_payloads: &BTreeMap<String, Vec<u8>>,
     conversation: &crate::core::models::ConversationEntry,
     projects: &[crate::core::models::ProjectEntry],
     project_targets: &HashMap<Uuid, PathBuf>,
@@ -1294,7 +1296,24 @@ fn add_project_path_rewrites(
         restore_failed("target project path cannot be represented in Codex JSON metadata")
     })?;
     for source in reference_sources(payloads, &conversation.archive_path) {
+        let mut source_paths = BTreeSet::new();
         for source_path in windows_source_path_variants(&project.source_path) {
+            source_paths.insert(source_path);
+        }
+        let bytes = planning_payloads.get(&source).ok_or_else(|| {
+            package_invalid(format!("verified payload bytes are missing for {source}"))
+        })?;
+        let metadata_paths = if source == conversation.archive_path {
+            session_project_paths(bytes, &source)?
+        } else {
+            metadata_project_paths(bytes, &source, conversation.task_id)?
+        };
+        for source_path in metadata_paths {
+            for source_path in windows_source_path_variants(&source_path) {
+                source_paths.insert(source_path);
+            }
+        }
+        for source_path in source_paths {
             insert_rewrite(
                 rewrites,
                 conversation.task_id,
@@ -1375,24 +1394,7 @@ fn metadata_rollout_paths(
     source: &str,
     source_task_id: Uuid,
 ) -> Result<Vec<String>, RehomeError> {
-    let values = if source == SESSION_INDEX_SOURCE {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| package_invalid("session index is not UTF-8"))?;
-        text.lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                serde_json::from_str(line).map_err(|error| {
-                    package_invalid(format!("session index JSONL is invalid: {error}"))
-                })
-            })
-            .collect::<Result<Vec<serde_json::Value>, RehomeError>>()?
-    } else {
-        serde_json::from_slice::<serde_json::Value>(bytes)
-            .map_err(|error| package_invalid(format!("bridge metadata JSON is invalid: {error}")))?
-            .as_array()
-            .cloned()
-            .ok_or_else(|| package_invalid("thread metadata must be a JSON array"))?
-    };
+    let values = metadata_rows(bytes, source)?;
     let source_task_id = source_task_id.to_string();
     Ok(values
         .iter()
@@ -1405,6 +1407,91 @@ fn metadata_rollout_paths(
                 .map(str::to_owned)
         })
         .collect())
+}
+
+fn metadata_project_paths(
+    bytes: &[u8],
+    source: &str,
+    source_task_id: Uuid,
+) -> Result<Vec<String>, RehomeError> {
+    let source_task_id = source_task_id.to_string();
+    let mut paths = BTreeSet::new();
+    for value in metadata_rows(bytes, source)?
+        .iter()
+        .filter(|value| metadata_id(value) == Some(source_task_id.as_str()))
+    {
+        collect_metadata_project_paths(value, &mut paths);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn session_project_paths(bytes: &[u8], source: &str) -> Result<Vec<String>, RehomeError> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| package_invalid("session payload is not UTF-8"))?;
+    let mut paths = BTreeSet::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            package_invalid(format!("session JSONL is invalid for {source}: {error}"))
+        })?;
+        collect_metadata_project_paths(&value, &mut paths);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn metadata_rows(bytes: &[u8], source: &str) -> Result<Vec<serde_json::Value>, RehomeError> {
+    if source == SESSION_INDEX_SOURCE {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| package_invalid("session index is not UTF-8"))?;
+        Ok(text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| {
+                    package_invalid(format!("session index JSONL is invalid: {error}"))
+                })
+            })
+            .collect::<Result<Vec<serde_json::Value>, RehomeError>>()?)
+    } else {
+        Ok(serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|error| package_invalid(format!("bridge metadata JSON is invalid: {error}")))?
+            .as_array()
+            .cloned()
+            .ok_or_else(|| package_invalid("thread metadata must be a JSON array"))?)
+    }
+}
+
+fn collect_metadata_project_paths(value: &serde_json::Value, paths: &mut BTreeSet<String>) {
+    let Some(object) = value.as_object() else {
+        if let Some(values) = value.as_array() {
+            for value in values {
+                collect_metadata_project_paths(value, paths);
+            }
+        }
+        return;
+    };
+
+    for (field, value) in object {
+        if matches!(field.as_str(), "cwd" | "project" | "project_path") {
+            if let Some(value) = value
+                .as_str()
+                .filter(|value| looks_like_absolute_path(value))
+            {
+                paths.insert(value.to_owned());
+            }
+        }
+        if !matches!(
+            field.as_str(),
+            "message" | "messages" | "content" | "text" | "input" | "output" | "instructions"
+        ) {
+            collect_metadata_project_paths(value, paths);
+        }
+    }
+}
+
+fn looks_like_absolute_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with(r"\\")
+        || is_windows_drive_path(&value.replace('/', "\\"))
 }
 
 fn reference_sources<'a>(

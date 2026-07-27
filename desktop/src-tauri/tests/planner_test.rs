@@ -1,4 +1,5 @@
 use rehome_desktop_lib::core::{
+    bridge::apply_bridge_plan,
     error::ErrorCode,
     models::{
         ChangeKind, ContentCounts, ConversationEntry, ExclusionSummary, PackageManifest,
@@ -232,6 +233,73 @@ fn windows_project_paths_generate_slash_backslash_and_verbatim_rewrites(
     assert!(variants.contains(r"C:\Users\OldUser\Documents\visual"));
     assert!(variants.contains("C:/Users/OldUser/Documents/visual"));
     assert!(variants.contains(r"\\?\C:\Users\OldUser\Documents\visual"));
+    Ok(())
+}
+
+#[test]
+fn project_bound_conversation_rewrites_a_stale_cross_platform_cwd() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    let stale_cwd = "/Users/caleb/Documents/visual";
+    let mut manifest = fixture.preview.manifest.clone();
+    manifest.projects[0].source_path = r"\\?\C:\Users\OldUser\Documents\visual".into();
+    let session = format!(
+        "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{TASK_ID}\",\"title\":\"Synthetic migration thread\",\"cwd\":\"{stale_cwd}\"}}}}\n"
+    )
+    .into_bytes();
+    manifest.conversations[0].content_hash = checksum(&session);
+    let threads = serde_json::to_vec(&serde_json::json!([{
+        "id": TASK_ID,
+        "title": "Synthetic migration thread",
+        "cwd": stale_cwd,
+        "rollout_path": SOURCE_ROLLOUT_PATH,
+    }]))?;
+    let index = serde_json::to_vec(&serde_json::json!({
+        "id": TASK_ID,
+        "title": "Synthetic migration thread",
+        "cwd": stale_cwd,
+        "rollout_path": SOURCE_ROLLOUT_PATH,
+    }))?;
+    let mut index_line = index;
+    index_line.push(b'\n');
+    write_package(
+        &fixture.preview.package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, threads.as_slice()),
+            (INDEX_SOURCE, index_line.as_slice()),
+            (SESSION_SOURCE, session.as_slice()),
+            ("codex/skills/example/SKILL.md", b"# Example\n"),
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    fixture.preview = inspect_package(&fixture.preview.package_path)?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    let target = fixture.projects_root.join("visual");
+    for source in [THREADS_SOURCE, INDEX_SOURCE, SESSION_SOURCE] {
+        assert!(plan.reference_rewrites.iter().any(|rewrite| {
+            rewrite.kind == ReferenceRewriteKind::ProjectPath
+                && rewrite.package_source == source
+                && rewrite.from == stale_cwd
+                && Path::new(&rewrite.to) == target
+        }));
+    }
+    apply_bridge_plan(&plan)?;
+    let restored_session = fs::read_to_string(&plan.sessions[0].target)?;
+    assert!(restored_session.contains(target.to_string_lossy().as_ref()));
+    assert!(!restored_session.contains(stale_cwd));
+    let index = fs::read_to_string(fixture.target.codex_home.join("session_index.jsonl"))?;
+    assert!(index.contains(target.to_string_lossy().as_ref()));
+    let connection = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
+    let imported_cwd: String =
+        connection.query_row("SELECT cwd FROM threads WHERE id = ?1", [TASK_ID], |row| {
+            row.get(0)
+        })?;
+    assert_eq!(Path::new(&imported_cwd), target);
     Ok(())
 }
 

@@ -150,6 +150,17 @@ fn apply_transaction(
     update_status(transaction, RecoveryStatus::Verifying)?;
     let mut verification = verify_restore(plan, verified)?;
     if !data_verification_passed(&verification) {
+        // Verification opens the restored SQLite database after the bridge has
+        // recorded its first applied state. In WAL mode that read can create
+        // fresh sidecars, so refresh the journal before rollback decides
+        // whether a sidecar belongs to this transaction.
+        if let Some(operation) = plan
+            .operations
+            .iter()
+            .find(|operation| operation.package_source == THREAD_METADATA_SOURCE)
+        {
+            record_applied_mutation(transaction, &operation.target)?;
+        }
         return Err(restore_failed(format!(
             "restore verification did not pass: {verification:?}"
         )));
