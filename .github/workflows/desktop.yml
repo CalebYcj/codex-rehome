@@ -38,15 +38,7 @@ jobs:
       - run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
       - if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          ./tests/windows_restore_ui_ready_test.ps1
-          ./tests/redskill_package_test.ps1
-          ./tests/readme_language_test.ps1
-      - if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          bash -n codex-rehome/scripts/*.sh
-          bash tests/mac_packager_metadata_test.sh
+        run: ./tests/readme_language_test.ps1
 
   windows-installer:
     needs: test

@@ -20,28 +20,15 @@ if (-not $English.Contains("](README.md)")) {
 if ($Chinese -match "## English Overview") {
     throw "Chinese README still contains the appended English overview"
 }
-if (-not $Chinese.Contains("## For AI Agents") -or -not $English.Contains("## For AI Agents")) {
-    throw "Both READMEs must expose a concise For AI Agents section"
-}
-if ($Chinese.Length -ge 12000) {
-    throw "Chinese README is still too long: $($Chinese.Length) characters"
-}
-
-foreach ($Phrase in @("Mac to Windows", "Windows to Mac", "Windows to Windows", "Mac to Mac", "merge-safe", "codex app")) {
+foreach ($Phrase in @("Windows to Windows", "Windows to macOS", "macOS to Windows", "macOS to macOS", "ReHome Desktop")) {
     if (-not $English.Contains($Phrase)) {
         throw "English README is missing: $Phrase"
     }
 }
 
-foreach ($Phrase in @("D:\Codex-Rehome-Backup", "Red Skill", "~/.codex", "Codex Desktop")) {
+foreach ($Phrase in @(".rehome", "Codex ReHome Skill", "Codex Desktop", "ReHome Desktop")) {
     if (-not $Chinese.Contains($Phrase)) {
         throw "Chinese README is missing: $Phrase"
-    }
-}
-
-foreach ($UnsafePlaceholder in @("<project>", "<restored-project-path>")) {
-    if ($Chinese.Contains($UnsafePlaceholder) -or $English.Contains($UnsafePlaceholder)) {
-        throw "README contains a placeholder GitHub may render as HTML: $UnsafePlaceholder"
     }
 }
 

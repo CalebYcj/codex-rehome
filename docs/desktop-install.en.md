@@ -31,7 +31,7 @@ Public builds are not signed with an Apple Developer ID, so macOS may show a fir
 
 - Old computer: choose Send, select projects and conversations, and create a `.rehome` file.
 - Transfer that file privately by external drive, local network, cloud drive, or private messaging.
-- New computer: install and sign in to Codex first, choose Receive, review the restore plan, and confirm.
+- New computer: install and sign in to Codex once, fully quit Codex, choose Receive, review the restore plan, and confirm.
 - Restore is merge-safe by default. The app backs up destination state, maps Windows/macOS paths, merges conversation indexes, and registers restored projects through Codex's official project entry point.
 
 ## System impact

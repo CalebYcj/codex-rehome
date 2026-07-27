@@ -1,4 +1,0 @@
-interface:
-  display_name: "Codex 搬家"
-  short_description: "迁移 Codex 对话、项目记录和本地工作台"
-  default_prompt: "请先判断我是在原电脑、新电脑还是准备重装系统，再一步步帮我迁移 Codex。"
