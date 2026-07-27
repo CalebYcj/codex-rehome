@@ -1,4 +1,5 @@
 use crate::core::{
+    backup::managed_backup_root,
     bridge::register_project_with_detected_cli,
     discovery::discover_codex as core_discover_codex,
     error::{ErrorCode, RehomeError},
@@ -529,16 +530,8 @@ pub async fn build_restore_plan(
             else {
                 return Ok(None);
             };
-            let Some(backup) = app
-                .dialog()
-                .file()
-                .set_title("选择备份目录")
-                .blocking_pick_folder()
-            else {
-                return Ok(None);
-            };
             let projects_root = canonical_existing_directory(&selected_path(projects)?)?;
-            let backup_root = canonical_existing_directory(&selected_path(backup)?)?;
+            let backup_root = managed_backup_root()?;
             validate_restore_location_separation(&projects_root, &backup_root)?;
             let selection_id = state.grant_restore_locations(
                 package_selection_id,

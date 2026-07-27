@@ -273,6 +273,34 @@ fn plugin_inventory_uses_plugin_name_and_complete_version_root() -> Result<(), B
 }
 
 #[test]
+fn nested_skills_are_grouped_under_their_outer_skill_bundle() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let skills = codex_home.join("skills");
+    let suite = skills.join("cheat-on-content");
+    let child = suite.join("skills").join("cheat-score");
+    let standalone = skills.join("imagegen");
+    fs::create_dir_all(&child)?;
+    fs::create_dir_all(&standalone)?;
+    fs::write(suite.join("SKILL.md"), b"suite")?;
+    fs::write(child.join("SKILL.md"), b"child")?;
+    fs::write(standalone.join("SKILL.md"), b"standalone")?;
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+
+    assert_eq!(inventory.skills.len(), 2);
+    let grouped = inventory
+        .skills
+        .iter()
+        .find(|skill| skill.name == "cheat-on-content")
+        .expect("grouped skill");
+    assert_eq!(grouped.relative_path, "cheat-on-content");
+    assert_eq!(grouped.source_path, suite.join("SKILL.md"));
+    assert!(grouped.size_bytes >= b"suite".len() as u64 + b"child".len() as u64);
+    Ok(())
+}
+
+#[test]
 fn generated_image_inventory_contains_a_small_embedded_thumbnail() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let codex_home = temp.path().join(".codex");

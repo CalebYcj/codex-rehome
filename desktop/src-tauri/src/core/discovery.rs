@@ -824,6 +824,8 @@ fn optional_tree_entries(
                 && marker_parent.file_name().and_then(|name| name.to_str()) == Some(".codex-plugin")
             {
                 marker_parent.parent()?
+            } else if !expand_plugin_root {
+                outermost_skill_bundle(marker, root)?
             } else {
                 marker_parent
             };
@@ -845,7 +847,11 @@ fn optional_tree_entries(
                 .and_then(|name| name.to_str())
                 .unwrap_or(kind)
                 .to_owned(),
-                source_path: marker.clone(),
+                source_path: if expand_plugin_root {
+                    marker.clone()
+                } else {
+                    bundle.join("SKILL.md")
+                },
                 relative_path,
                 size_bytes: directory_size(bundle),
                 thumbnail_data_url: None,
@@ -859,6 +865,24 @@ fn optional_tree_entries(
             .then(left.relative_path.cmp(&right.relative_path))
     });
     entries
+}
+
+fn outermost_skill_bundle<'a>(marker: &'a Path, root: &Path) -> Option<&'a Path> {
+    let mut bundle = marker.parent()?;
+    let mut ancestor = bundle.parent();
+    while let Some(candidate) = ancestor {
+        if candidate == root {
+            break;
+        }
+        let candidate_marker = candidate.join("SKILL.md");
+        if fs::symlink_metadata(candidate_marker)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            bundle = candidate;
+        }
+        ancestor = candidate.parent();
+    }
+    Some(bundle)
 }
 
 fn optional_file_entries(paths: &[PathBuf], root: &Path, kind: &str) -> Vec<OptionalContentEntry> {

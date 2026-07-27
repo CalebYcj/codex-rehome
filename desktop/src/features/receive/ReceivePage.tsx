@@ -194,10 +194,9 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
 
       <section className="workflow-section" aria-labelledby="receive-target-title">
         <div className="section-title-row"><div><span className="step-number">2</span><h2 id="receive-target-title">选择目标位置</h2></div></div>
-        <PathPicker icon={HardDrive} label="Codex Home" value={locations?.target_codex_home ?? inventory?.codex_home ?? "未检测"} />
-        <PathPicker icon={FolderOpen} label="项目目录" value={locations?.projects_root ?? "尚未选择"} buttonLabel="选择恢复位置" onClick={chooseLocations} disabled={!preview || phase !== "idle"} />
-        <PathPicker icon={ShieldCheck} label="事务备份" value={locations?.backup_root ?? "尚未选择"} />
-        <div className="command-row"><p>恢复计划会重新校验包，并只保存受信任的 plan_id。</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}生成恢复计划</button></div>
+        <PathPicker icon={HardDrive} label="Codex 数据位置" value={locations?.target_codex_home ?? inventory?.codex_home ?? "未检测"} />
+        <PathPicker icon={FolderOpen} label="项目恢复位置" value={locations?.projects_root ?? "尚未选择"} buttonLabel="选择恢复位置" onClick={chooseLocations} disabled={!preview || phase !== "idle"} />
+        <div className="command-row"><p>安全备份由 ReHome 自动管理</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}生成恢复计划</button></div>
       </section>
 
       {plan && (

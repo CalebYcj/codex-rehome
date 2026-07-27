@@ -295,7 +295,6 @@ describe("ReHome Desktop workflows", () => {
 
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
     expect(createButton).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
     await user.click(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }));
     expect(createButton).toBeEnabled();
   });
@@ -336,6 +335,39 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).not.toBeChecked();
   });
 
+  it("selects every project conversation by default and allows individual removal", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    const conversation = screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" });
+    expect(conversation).toBeChecked();
+
+    await user.click(conversation);
+    expect(conversation).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).toBeChecked();
+  });
+
+  it("allows a conversation-only package without selecting project files", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }));
+    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+
+    expect(api.createPackage).toHaveBeenCalledWith({
+      project_ids: [],
+      conversation_ids: ["44444444-4444-4444-4444-444444444444"],
+      skill_ids: [],
+      plugin_ids: [],
+      generated_image_ids: [],
+    });
+  });
+
   it("lists optional content and packages only the selected entries", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -365,10 +397,10 @@ describe("ReHome Desktop workflows", () => {
 
     expect(screen.getByText("子 Agent · L1")).toBeVisible();
     expect(screen.getByText("辅助记录，通常可不迁移")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "选择建议项" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "只选主对话" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
-    await user.click(screen.getByRole("button", { name: "选择建议项" }));
+    await user.click(screen.getByRole("button", { name: "只选主对话" }));
     expect(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "选择对话 Notes workflow" })).not.toBeChecked();
   });
@@ -408,6 +440,8 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByText("校验通过")).toBeInTheDocument();
     expect(screen.getByText("禁用文件 0")).toBeInTheDocument();
     expect(screen.getByText("冲突 1")).toBeInTheDocument();
+    expect(screen.queryByText("事务备份")).toBeNull();
+    expect(screen.getByText("安全备份由 ReHome 自动管理")).toBeInTheDocument();
     expect(screen.getAllByText("C:\\Restored Projects").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "开始恢复" })).toBeDisabled();
   });

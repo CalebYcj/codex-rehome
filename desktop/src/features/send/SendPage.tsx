@@ -66,10 +66,26 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
 
   function selectRecommended(items: ConversationEntry[]) {
     const next = new Set(conversations);
+    for (const item of items) next.delete(item.task_id);
     for (const item of items) {
       if (!item.classification) next.add(item.task_id);
     }
     setConversations(next);
+  }
+
+  function toggleProject(projectId: string, items: ConversationEntry[]) {
+    const nextProjects = new Set(projects);
+    const nextConversations = new Set(conversations);
+    if (nextProjects.has(projectId)) {
+      nextProjects.delete(projectId);
+      for (const item of items) nextConversations.delete(item.task_id);
+    } else {
+      nextProjects.add(projectId);
+      for (const item of items) nextConversations.add(item.task_id);
+      setExpanded((current) => new Set(current).add(projectId));
+    }
+    setProjects(nextProjects);
+    setConversations(nextConversations);
   }
 
   async function handleCreate() {
@@ -116,7 +132,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
               projectSelected={projects.has(project.project_id)}
               expanded={expanded.has(project.project_id)}
               selectedConversations={conversations}
-              onToggleProject={() => toggle(setProjects, projects, project.project_id)}
+              onToggleProject={() => toggleProject(project.project_id, project.conversations)}
               onToggleExpanded={() => toggle(setExpanded, expanded, project.project_id)}
               onToggleConversation={(id) => toggle(setConversations, conversations, id)}
               onSelectRecommended={() => selectRecommended(project.conversations)}
@@ -237,8 +253,8 @@ function ProjectChoice({ name, path, fileCount, conversations, projectSelected, 
         <div className="project-conversations" aria-label={`${name} 的对话`}>
           {conversations.length > 0 && (
             <div className="conversation-toolbar">
-              <span>主对话 {mainConversations} · 子 Agent {subagents}</span>
-              {mainConversations > 0 && <button type="button" onClick={onSelectRecommended}>选择建议项</button>}
+              <span>主对话 {mainConversations} · 子 Agent {subagents} · 单独勾对话不含项目文件</span>
+              {mainConversations > 0 && <button type="button" onClick={onSelectRecommended}>只选主对话</button>}
             </div>
           )}
           {conversations.map((conversation) => (

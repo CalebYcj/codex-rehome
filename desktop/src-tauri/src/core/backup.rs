@@ -1608,6 +1608,13 @@ fn app_data_root() -> Result<PathBuf, RehomeError> {
     create_and_canonicalize_directory(&app_data_root_path()?, "application data directory")
 }
 
+pub(crate) fn managed_backup_root() -> Result<PathBuf, RehomeError> {
+    create_and_canonicalize_directory(
+        &app_data_root_path()?.join("backups"),
+        "managed backup directory",
+    )
+}
+
 fn app_data_root_path() -> Result<PathBuf, RehomeError> {
     let base = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
