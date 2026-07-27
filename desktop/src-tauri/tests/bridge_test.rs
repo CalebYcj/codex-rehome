@@ -341,6 +341,85 @@ fn sqlite_existing_row_update_preserves_required_target_only_column_without_defa
 }
 
 #[test]
+fn sqlite_missing_row_imports_portable_fields_required_by_current_codex(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            cwd TEXT NOT NULL,
+            rollout_path TEXT NOT NULL,
+            title TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            model_provider TEXT NOT NULL,
+            sandbox_policy TEXT NOT NULL,
+            approval_mode TEXT NOT NULL
+        );",
+    )?;
+    drop(connection);
+    let metadata = serde_json::to_vec(&serde_json::json!([{
+        "id": SOURCE_ID,
+        "cwd": WINDOWS_PROJECT,
+        "rollout_path": WINDOWS_SESSION,
+        "title": "incoming",
+        "created_at": 1_780_000_000_i64,
+        "updated_at": 1_780_000_100_i64,
+        "source": "vscode",
+        "model_provider": "openai",
+        "sandbox_policy": r#"{"type":"disabled"}"#,
+        "approval_mode": "never",
+    }]))?;
+
+    let imported = import_sqlite_threads(
+        &database,
+        &metadata,
+        &[planned_session()],
+        &rewrites("codex/metadata/threads.json"),
+    )?;
+
+    assert_eq!(imported, 1);
+    let connection = Connection::open(&database)?;
+    let row = connection.query_row(
+        "SELECT cwd, rollout_path, title, created_at, updated_at, source,
+                model_provider, sandbox_policy, approval_mode
+         FROM threads WHERE id = ?1",
+        [TARGET_ID],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        },
+    )?;
+    assert_eq!(
+        row,
+        (
+            MAC_PROJECT.into(),
+            MAC_SESSION.into(),
+            "Original 路 ReHome".into(),
+            1_780_000_000_i64,
+            1_780_000_100_i64,
+            "vscode".into(),
+            "openai".into(),
+            r#"{"type":"disabled"}"#.into(),
+            "never".into(),
+        )
+    );
+    Ok(())
+}
+
+#[test]
 fn sqlite_missing_row_required_target_only_column_fails_without_changing_database(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;

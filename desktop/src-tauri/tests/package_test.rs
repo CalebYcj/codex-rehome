@@ -376,6 +376,51 @@ fn thread_export_uses_a_versioned_allowlist_and_tolerates_missing_optional_colum
 }
 
 #[test]
+fn thread_export_includes_portable_fields_required_by_current_codex() -> Result<(), Box<dyn Error>>
+{
+    let fixture = synthetic_codex_fixture()?;
+    let connection = Connection::open(&fixture.state_db_path)?;
+    connection.execute_batch(
+        "ALTER TABLE threads ADD COLUMN created_at INTEGER;
+         ALTER TABLE threads ADD COLUMN source TEXT;
+         ALTER TABLE threads ADD COLUMN model_provider TEXT;
+         ALTER TABLE threads ADD COLUMN sandbox_policy TEXT;
+         ALTER TABLE threads ADD COLUMN approval_mode TEXT;",
+    )?;
+    connection.execute(
+        "UPDATE threads
+         SET created_at = ?1,
+             source = ?2,
+             model_provider = ?3,
+             sandbox_policy = ?4,
+             approval_mode = ?5
+         WHERE id = ?6",
+        params![
+            1_780_000_000_i64,
+            "vscode",
+            "openai",
+            r#"{"type":"disabled"}"#,
+            "never",
+            THREAD_ID,
+        ],
+    )?;
+    drop(connection);
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("portable-thread-fields.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let rows: Value =
+        serde_json::from_slice(&read_zip_entry(&package, "codex/metadata/threads.json")?)?;
+    assert_eq!(rows[0]["created_at"], 1_780_000_000_i64);
+    assert_eq!(rows[0]["source"], "vscode");
+    assert_eq!(rows[0]["model_provider"], "openai");
+    assert_eq!(rows[0]["sandbox_policy"], r#"{"type":"disabled"}"#);
+    assert_eq!(rows[0]["approval_mode"], "never");
+    Ok(())
+}
+
+#[test]
 fn rejects_corrupt_zip_bytes_with_a_stable_error_code() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let package = directory.path().join("corrupt.rehome");

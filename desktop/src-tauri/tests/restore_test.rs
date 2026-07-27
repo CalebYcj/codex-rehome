@@ -221,9 +221,63 @@ fn sqlite_update_failure_rolls_project_index_and_database_back_exactly(
     let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::RestoreFailed);
-    assert!(error.message.contains("SQLite") || error.message.contains("sqlite"));
+    assert!(
+        error.message.contains("SQLite") || error.message.contains("sqlite"),
+        "{error:?}"
+    );
     assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
     assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_update_failure_rolls_back_without_leaving_sidecars() -> Result<(), Box<dyn Error>> {
+    let mut harness = RestoreHarness::new(DatabaseSchema::RequiredColumnWithoutDefault)?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    drop(connection);
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    harness.plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed, "{error:?}");
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!sqlite_sidecar(&database, suffix).exists());
+    }
+    let restored = Connection::open(&database)?;
+    let thread_count: i64 =
+        restored.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
+    assert_eq!(thread_count, 0);
+    Ok(())
+}
+
+#[test]
+fn backup_root_must_not_overlap_projects_root() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let error = apply_restore(
+        harness.plan.clone(),
+        RestoreOptions {
+            codex_closed_confirmed: true,
+            backup_root: harness.plan.projects_root.clone(),
+            register_projects: false,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains("must not overlap"));
+    assert!(!harness.transactions_dir().exists());
     Ok(())
 }
 

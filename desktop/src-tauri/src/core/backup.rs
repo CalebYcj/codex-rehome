@@ -105,6 +105,22 @@ pub(crate) fn prepare_transaction(
         return Err(restore_failed("backup root must be an absolute local path"));
     }
     let backup_root = create_and_canonicalize_directory(requested_backup_root, "backup root")?;
+    let projects_root = match fs::canonicalize(&plan.projects_root) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => plan.projects_root.clone(),
+        Err(error) => {
+            return Err(restore_failed(format!(
+                "could not canonicalize projects root: {error}"
+            )))
+        }
+    };
+    let codex_home = fs::canonicalize(&plan.target_codex_home)
+        .map_err(|error| restore_failed(format!("could not canonicalize Codex home: {error}")))?;
+    if paths_overlap(&backup_root, &projects_root) || paths_overlap(&backup_root, &codex_home) {
+        return Err(restore_failed(
+            "transaction backup directory must not overlap the project directory or Codex home",
+        ));
+    }
     let app_data = app_data_root()?;
     let transactions = create_and_canonicalize_directory(
         &app_data.join(TRANSACTIONS_DIRECTORY),
@@ -179,6 +195,10 @@ pub(crate) fn prepare_transaction(
         journal,
         journal_path,
     })
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 pub(crate) fn update_status(
@@ -266,11 +286,7 @@ fn inspect_applied_state(operation: &BackupOperation) -> Result<AppliedState, Re
             )))
         }
         Ok(_) => {
-            let hash = if operation.package_source == "codex/metadata/threads.json" {
-                hash_sqlite_database(&operation.target)?
-            } else {
-                hash_file(&operation.target)?
-            };
+            let hash = hash_file(&operation.target)?;
             Ok(AppliedState::File {
                 hash,
                 identity: file_identity(&operation.target)?,
@@ -733,7 +749,10 @@ fn backup_sqlite_database(
     let destination = objects.join(format!("{index:08}.bin"));
     let temporary = NamedTempFile::new_in(objects)
         .map_err(|error| restore_failed(format!("could not create SQLite backup: {error}")))?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    // A backup must not become a write to the live Codex database. Opening the
+    // source read-write can checkpoint WAL state and invalidate the restore
+    // plan before the bridge itself has applied anything.
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let source = Connection::open_with_flags(&target, flags).map_err(|error| {
         restore_failed(format!("could not open target SQLite database: {error}"))
     })?;
@@ -792,7 +811,7 @@ fn backup_sqlite_sidecar(
     package_source: String,
     target: PathBuf,
 ) -> Result<BackupOperation, RehomeError> {
-    let original_hash = match fs::symlink_metadata(&target) {
+    let applied_state = match fs::symlink_metadata(&target) {
         Ok(metadata)
             if metadata_is_link_or_reparse(&metadata)
                 || !metadata.is_file()
@@ -804,7 +823,10 @@ fn backup_sqlite_sidecar(
                 "SQLite sidecar is not a regular unlinked file",
             ));
         }
-        Ok(_) => Some(hash_file(&target)?),
+        Ok(_) => Some(AppliedState::File {
+            hash: hash_file(&target)?,
+            identity: file_identity(&target)?,
+        }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(restore_failed(format!(
@@ -812,14 +834,21 @@ fn backup_sqlite_sidecar(
             )))
         }
     };
+    let original_hash = applied_state.as_ref().and_then(|state| match state {
+        AppliedState::File { hash, .. } => Some(hash.clone()),
+        AppliedState::Absent => None,
+    });
     Ok(BackupOperation {
         package_source,
         target,
         backup_kind: BackupKind::Absent,
         backup_path: None,
-        original_hash,
-        applied_hash: None,
-        applied_state: None,
+        original_hash: original_hash.clone(),
+        applied_hash: original_hash.clone(),
+        // Existing WAL/SHM content is already folded into the coherent SQLite
+        // snapshot. Record its identity so rollback can quarantine that exact
+        // file and finish with a self-contained database and no stale sidecar.
+        applied_state,
         applied_database_hash: None,
         readonly: None,
         unix_mode: None,
@@ -1078,7 +1107,7 @@ fn quarantine_target(
 fn rollback_order(journal: &TransactionJournal) -> Vec<usize> {
     let mut indices = (0..journal.operations.len()).collect::<Vec<_>>();
     indices.sort_by_key(|index| {
-        !journal.operations[*index]
+        journal.operations[*index]
             .package_source
             .starts_with("codex/metadata/sqlite-sidecar")
     });
@@ -1150,12 +1179,10 @@ fn inspect_current_file(operation: &BackupOperation) -> Result<(String, String),
             operation.target.display()
         )));
     }
-    let hash = if operation.package_source == "codex/metadata/threads.json" {
-        hash_sqlite_database(&operation.target)
-    } else {
-        hash_file(&operation.target)
-    }
-    .map_err(|error| rollback_failed(error.message))?;
+    // SQLite backups are published as self-contained database files. Use the
+    // stable file hash during rollback; opening the restored WAL-mode database
+    // merely to verify it can recreate a sidecar after that sidecar was removed.
+    let hash = hash_file(&operation.target).map_err(|error| rollback_failed(error.message))?;
     let identity =
         file_identity(&operation.target).map_err(|error| rollback_failed(error.message))?;
     Ok((hash, identity))
@@ -1251,21 +1278,7 @@ fn quarantine_matches_applied(
     if actual_identity != *identity {
         return Ok(false);
     }
-    let actual_hash = if operation.package_source == "codex/metadata/threads.json" {
-        let path = parent.join(quarantine);
-        let hash = hash_sqlite_database(&path).map_err(|error| rollback_failed(error.message))?;
-        let reopened = pinned.open_file(quarantine_name).map_err(|error| {
-            rollback_failed(format!("could not reopen rollback quarantine: {error}"))
-        })?;
-        if file_identity_from_file(&reopened).map_err(|error| rollback_failed(error.message))?
-            != actual_identity
-        {
-            return Ok(false);
-        }
-        hash
-    } else {
-        hash_open_file(&mut file).map_err(|error| rollback_failed(error.message))?
-    };
+    let actual_hash = hash_open_file(&mut file).map_err(|error| rollback_failed(error.message))?;
     Ok(actual_hash.eq_ignore_ascii_case(hash))
 }
 
@@ -1729,40 +1742,6 @@ fn hash_open_file(file: &mut fs::File) -> Result<String, RehomeError> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn hash_sqlite_database(path: &Path) -> Result<String, RehomeError> {
-    let directory = tempfile::tempdir().map_err(|error| {
-        restore_failed(format!("could not create SQLite hash directory: {error}"))
-    })?;
-    let snapshot_path = directory.path().join("snapshot.sqlite");
-    let source = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| {
-        restore_failed(format!(
-            "could not open SQLite database for hashing: {error}"
-        ))
-    })?;
-    source
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| {
-            restore_failed(format!("could not configure SQLite hash lock: {error}"))
-        })?;
-    let mut destination = Connection::open(&snapshot_path).map_err(|error| {
-        restore_failed(format!("could not open SQLite hash destination: {error}"))
-    })?;
-    let backup = Backup::new(&source, &mut destination)
-        .map_err(|error| restore_failed(format!("could not start SQLite hash backup: {error}")))?;
-    backup
-        .run_to_completion(128, Duration::from_millis(1), None)
-        .map_err(|error| {
-            restore_failed(format!("could not complete SQLite hash backup: {error}"))
-        })?;
-    drop(backup);
-    drop(destination);
-    hash_file(&snapshot_path)
 }
 
 fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {

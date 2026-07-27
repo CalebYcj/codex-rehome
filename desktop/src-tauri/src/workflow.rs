@@ -539,6 +539,7 @@ pub async fn build_restore_plan(
             };
             let projects_root = canonical_existing_directory(&selected_path(projects)?)?;
             let backup_root = canonical_existing_directory(&selected_path(backup)?)?;
+            validate_restore_location_separation(&projects_root, &backup_root)?;
             let selection_id = state.grant_restore_locations(
                 package_selection_id,
                 projects_root.clone(),
@@ -932,6 +933,19 @@ fn canonical_existing_directory(path: &Path) -> Result<PathBuf, RehomeError> {
     Ok(canonical)
 }
 
+fn validate_restore_location_separation(
+    projects_root: &Path,
+    backup_root: &Path,
+) -> Result<(), RehomeError> {
+    if projects_root.starts_with(backup_root) || backup_root.starts_with(projects_root) {
+        return Err(selection_failed(
+            ErrorCode::RestoreFailed,
+            "项目目录和事务备份目录必须是两个互不包含的目录",
+        ));
+    }
+    Ok(())
+}
+
 fn canonical_existing(path: &Path) -> Result<PathBuf, RehomeError> {
     validate_local_dialog_path(path)?;
     let metadata = fs::symlink_metadata(path)
@@ -1070,5 +1084,17 @@ mod grant_tests {
         grants.prune();
 
         assert!(grants.plans.contains_key(&plan_id));
+    }
+
+    #[test]
+    fn restore_locations_must_not_overlap() {
+        let root = PathBuf::from("/restore");
+        assert!(validate_restore_location_separation(&root, &root).is_err());
+        assert!(validate_restore_location_separation(&root, &root.join("backups")).is_err());
+        assert!(validate_restore_location_separation(
+            &root.join("projects"),
+            &root.join("backups")
+        )
+        .is_ok());
     }
 }
