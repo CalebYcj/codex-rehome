@@ -451,7 +451,11 @@ fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, Reho
             session_values
                 .iter()
                 .any(|value| json_contains_string(value, expected))
-                && (!requires_index || index_cwd == Some(*expected))
+                // Some Codex versions use a minimal session_index row containing only
+                // id/title/timestamps/rollout_path. In that schema the authoritative
+                // project binding is the session metadata plus the SQLite thread row;
+                // do not require a cwd field that the index does not expose.
+                && (!requires_index || index_cwd.is_none_or(|cwd| cwd == *expected))
                 && (!requires_sqlite || sqlite_cwd == Some(*expected))
         });
         mapping_valid &= mapped;
