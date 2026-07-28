@@ -55,6 +55,24 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
 
   const hasContent =
     projects.size + conversations.size + skills.size + plugins.size + images.size > 0;
+  const hasSelectableContent = Boolean(
+    inventory &&
+      inventory.projects.length +
+        inventory.conversations.length +
+        inventory.skills.length +
+        inventory.plugins.length +
+        inventory.generated_images.length >
+        0,
+  );
+  const allContentSelected = Boolean(
+    inventory &&
+      hasSelectableContent &&
+      inventory.projects.every((project) => projects.has(project.project_id)) &&
+      inventory.conversations.every((conversation) => conversations.has(conversation.task_id)) &&
+      inventory.skills.every((skill) => skills.has(skill.content_id)) &&
+      inventory.plugins.every((plugin) => plugins.has(plugin.content_id)) &&
+      inventory.generated_images.every((image) => images.has(image.content_id)),
+  );
   const canCreate = Boolean(inventory && hasContent && !busy);
 
   function toggle(setter: (value: Set<string>) => void, current: Set<string>, value: string) {
@@ -88,6 +106,25 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
     setConversations(nextConversations);
   }
 
+  function toggleAllContent() {
+    if (!inventory) return;
+
+    if (allContentSelected) {
+      setProjects(new Set());
+      setConversations(new Set());
+      setSkills(new Set());
+      setPlugins(new Set());
+      setImages(new Set());
+      return;
+    }
+
+    setProjects(new Set(inventory.projects.map((project) => project.project_id)));
+    setConversations(new Set(inventory.conversations.map((conversation) => conversation.task_id)));
+    setSkills(new Set(inventory.skills.map((skill) => skill.content_id)));
+    setPlugins(new Set(inventory.plugins.map((plugin) => plugin.content_id)));
+    setImages(new Set(inventory.generated_images.map((image) => image.content_id)));
+  }
+
   async function handleCreate() {
     if (!inventory || !canCreate) return;
     setError(null);
@@ -110,10 +147,25 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
 
   return (
     <div className="page">
-      <header className="page-header">
-        <p className="eyebrow">SEND</p>
-        <h1 ref={headingRef} tabIndex={-1}>发送交接</h1>
-        <p className="page-description">项目文件、对话和其他 Codex 内容都可以分开选择。</p>
+      <header className="page-header page-header-with-action">
+        <div>
+          <p className="eyebrow">SEND</p>
+          <h1 ref={headingRef} tabIndex={-1}>发送交接</h1>
+          <p className="page-description">项目文件、对话和其他 Codex 内容都可以分开选择。</p>
+        </div>
+        <label className="global-select-toggle">
+          <input
+            type="checkbox"
+            checked={allContentSelected}
+            onChange={toggleAllContent}
+            disabled={!hasSelectableContent}
+            aria-label="全选迁移内容"
+          />
+          <span>
+            <strong>全选迁移内容</strong>
+            <small>项目、对话和 Codex 内容</small>
+          </span>
+        </label>
       </header>
 
       <section className="workflow-section" aria-labelledby="send-projects-title">
