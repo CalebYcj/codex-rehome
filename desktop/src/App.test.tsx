@@ -528,7 +528,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
-    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
     await user.click(screen.getByRole("button", { name: "开始恢复" }));
     expect(await screen.findByText("恢复事务已提交")).toBeInTheDocument();
 
@@ -543,7 +543,7 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.queryByText("恢复事务已提交")).toBeNull();
     expect(screen.queryByText("projects/rehome-app/README.md")).toBeNull();
     await user.click(screen.getByRole("button", { name: "生成恢复计划" }));
-    expect(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" })).not.toBeChecked();
   });
 
   it("uses the exact manual-open status when registration is incomplete", async () => {
@@ -578,7 +578,7 @@ describe("ReHome Desktop workflows", () => {
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
 
-    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
     await user.click(screen.getByRole("button", { name: "开始恢复" }));
 
     expect(
@@ -595,7 +595,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
-    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
     await user.click(screen.getByRole("button", { name: "开始恢复" }));
 
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
@@ -610,7 +610,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
-    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
     await user.click(screen.getByRole("button", { name: "开始恢复" }));
 
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
@@ -627,7 +627,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
-    await user.click(screen.getByRole("checkbox", { name: "确认 Codex 已关闭" }));
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
     await user.click(screen.getByRole("button", { name: "开始恢复" }));
 
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));

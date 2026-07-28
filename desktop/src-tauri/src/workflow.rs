@@ -584,10 +584,6 @@ pub async fn apply_restore(
     let state = state.inner().clone();
     run_blocking(ErrorCode::RestoreFailed, move || {
         let claim = state.claim_plan(selection.plan_id)?;
-        if let Err(error) = ensure_codex_desktop_is_closed() {
-            claim.restore_available();
-            return Err(error);
-        }
         let result = apply_restore_by_id(
             selection.plan_id,
             RestoreOptions {

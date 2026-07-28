@@ -210,7 +210,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
             </table>
           </div>
           {plan.conflict_count > 0 && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />请先处理冲突，再重新生成恢复计划。</p>}
-          <label className="confirmation-row"><input type="checkbox" checked={codexClosed} onChange={(event) => setCodexClosed(event.target.checked)} aria-label="确认 Codex 已关闭" /><span><strong>Codex 已完全退出</strong><small>恢复前会再次检查；仍在运行会阻止恢复。</small></span></label>
+          <label className="confirmation-row"><input type="checkbox" checked={codexClosed} onChange={(event) => setCodexClosed(event.target.checked)} aria-label="确认已保存当前 Codex 工作" /><span><strong>当前 Codex 工作已保存</strong><small>恢复完成后请退出并重新打开 Codex，以加载迁移内容。</small></span></label>
           <div className="command-row"><ProgressSteps active={phase === "restoring"} complete={Boolean(report)} /><button className="command-button danger-command" type="button" disabled={!canRestore} onClick={() => void handleRestore()}>{phase === "restoring" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Play aria-hidden="true" />}开始恢复</button></div>
         </section>
       )}

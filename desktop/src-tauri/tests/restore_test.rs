@@ -366,7 +366,8 @@ fn user_rollback_restores_exact_pre_restore_hashes_and_tombstones() -> Result<()
 }
 
 #[test]
-fn restore_requires_explicit_confirmation_that_codex_is_closed() -> Result<(), Box<dyn Error>> {
+fn restore_requires_explicit_confirmation_that_current_work_is_saved() -> Result<(), Box<dyn Error>>
+{
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let mut options = harness.options();
     options.codex_closed_confirmed = false;

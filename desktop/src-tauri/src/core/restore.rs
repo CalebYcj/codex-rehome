@@ -62,7 +62,7 @@ fn apply_server_plan(
     if !options.codex_closed_confirmed {
         return Err(RehomeError::new(
             ErrorCode::CodexRunning,
-            "restore requires explicit confirmation that Codex is closed",
+            "restore requires confirmation that current Codex work is saved",
         ));
     }
     validate_plan(&plan)?;
