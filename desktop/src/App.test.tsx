@@ -350,6 +350,24 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).toBeChecked();
   });
 
+  it("selects and clears every migration item with the global select control", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+
+    const selectAll = screen.getByRole("checkbox", { name: "全选迁移内容" });
+    await user.click(selectAll);
+
+    expect(selectAll).toBeChecked();
+    expect(screen.getByRole("button", { name: "创建 ReHome 包" })).toBeEnabled();
+
+    await user.click(selectAll);
+
+    expect(selectAll).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "创建 ReHome 包" })).toBeDisabled();
+  });
+
   it("allows a conversation-only package without selecting project files", async () => {
     const user = userEvent.setup();
     render(<App />);
