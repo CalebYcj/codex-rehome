@@ -64,10 +64,17 @@ jobs:
         run: npm ci
       - working-directory: desktop
         run: npm run tauri build -- --bundles nsis
+      - name: Package ZIP fallback
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem desktop/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          Compress-Archive -LiteralPath $installer.FullName -DestinationPath "$($installer.DirectoryName)/$($installer.BaseName).zip" -CompressionLevel Optimal
       - uses: actions/upload-artifact@v4
         with:
           name: ReHome-Desktop-Windows-x64
-          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/release/bundle/nsis/*.zip
 
   macos-installer:
     needs: test
