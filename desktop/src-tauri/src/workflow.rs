@@ -1069,7 +1069,7 @@ fn ensure_codex_desktop_is_closed() -> Result<(), RehomeError> {
     if codex_desktop_is_running()? {
         return Err(RehomeError::new(
             ErrorCode::CodexRunning,
-            "Codex is still running. Fully quit Codex Desktop before restoring or rolling back.",
+            "Codex 仍在运行。请完全退出 Codex Desktop 后，再开始恢复或回滚。",
         ));
     }
     Ok(())
