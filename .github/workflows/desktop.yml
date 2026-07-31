@@ -18,8 +18,8 @@ jobs:
         os: [windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -54,8 +54,8 @@ jobs:
     needs: test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -85,7 +85,7 @@ jobs:
           if (Test-Path -LiteralPath $signature) {
             Copy-Item -LiteralPath $signature -Destination release-assets
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ReHome-Desktop-Windows-x64
           path: release-assets/*
@@ -94,8 +94,8 @@ jobs:
     needs: test
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -132,7 +132,7 @@ jobs:
           fi
           cp "${updater_bundles[0]}" release-assets/
           cp "${updater_signatures[0]}" release-assets/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ReHome-Desktop-macOS-Universal
           path: release-assets/*
@@ -144,13 +144,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
       - name: Generate updater manifest
         run: node scripts/generate-updater-json.mjs release-assets "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: release-assets/*
