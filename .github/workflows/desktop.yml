@@ -33,6 +33,7 @@ jobs:
         run: npm test -- --run
       - working-directory: desktop
         run: npm run build
+      - run: node --test scripts/generate-updater-json.test.mjs
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       # macOS exposes its default temporary directory through /var, a symlink.
@@ -62,19 +63,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - working-directory: desktop
         run: npm ci
-      - working-directory: desktop
+      - name: Build Windows installer
+        if: ${{ !startsWith(github.ref, 'refs/tags/desktop-v') }}
+        working-directory: desktop
         run: npm run tauri build -- --bundles nsis
-      - name: Package ZIP fallback
+      - name: Build signed Windows updater
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles nsis --config src-tauri/tauri.release.conf.json
+      - name: Stage Windows release files
         shell: pwsh
         run: |
           $installer = Get-ChildItem desktop/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
-          Compress-Archive -LiteralPath $installer.FullName -DestinationPath "$($installer.DirectoryName)/$($installer.BaseName).zip" -CompressionLevel Optimal
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Copy-Item -LiteralPath $installer.FullName -Destination release-assets
+          Compress-Archive -LiteralPath $installer.FullName -DestinationPath "release-assets/$($installer.BaseName).zip" -CompressionLevel Optimal
+          $signature = "$($installer.FullName).sig"
+          if (Test-Path -LiteralPath $signature) {
+            Copy-Item -LiteralPath $signature -Destination release-assets
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ReHome-Desktop-Windows-x64
-          path: |
-            desktop/src-tauri/target/release/bundle/nsis/*.exe
-            desktop/src-tauri/target/release/bundle/nsis/*.zip
+          path: release-assets/*
 
   macos-installer:
     needs: test
@@ -91,22 +105,42 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - working-directory: desktop
         run: npm ci
-      - working-directory: desktop
+      - name: Build macOS installer
+        if: ${{ !startsWith(github.ref, 'refs/tags/desktop-v') }}
+        working-directory: desktop
         run: npm run tauri build -- --target universal-apple-darwin --bundles dmg
+      - name: Build signed macOS updater
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.release.conf.json
+      - name: Stage macOS release files
+        run: |
+          mkdir -p release-assets
+          cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-assets/
+          if compgen -G "desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz" > /dev/null; then
+            cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz release-assets/
+            cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig release-assets/
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ReHome-Desktop-macOS-Universal
-          path: desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: release-assets/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/desktop-v')
     needs: [windows-installer, macos-installer]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+      - name: Generate updater manifest
+        run: node scripts/generate-updater-json.mjs release-assets "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
       - uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*

@@ -26,9 +26,16 @@ import {
 interface SendPageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
   inventory: CodexInventory | null;
+  onOperationStart: () => void;
+  onOperationEnd: () => void;
 }
 
-export default function SendPage({ headingRef, inventory }: SendPageProps) {
+export default function SendPage({
+  headingRef,
+  inventory,
+  onOperationStart,
+  onOperationEnd,
+}: SendPageProps) {
   const [projects, setProjects] = useState<Set<string>>(new Set());
   const [conversations, setConversations] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -129,6 +136,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
     if (!inventory || !canCreate) return;
     setError(null);
     setBusy(true);
+    onOperationStart();
     try {
       const created = await createPackage({
         project_ids: [...projects],
@@ -142,6 +150,7 @@ export default function SendPage({ headingRef, inventory }: SendPageProps) {
       setError(errorMessage(caught));
     } finally {
       setBusy(false);
+      onOperationEnd();
     }
   }
 

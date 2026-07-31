@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "ReHome Desktop main window",
   "windows": ["main"],
-  "permissions": []
+  "permissions": [
+    "core:app:allow-version",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

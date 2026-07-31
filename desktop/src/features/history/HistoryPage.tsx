@@ -14,9 +14,15 @@ import { errorMessage, type RecoveryStatus, type RollbackAction, type Transactio
 
 interface HistoryPageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
+  onOperationStart: () => void;
+  onOperationEnd: () => void;
 }
 
-export default function HistoryPage({ headingRef }: HistoryPageProps) {
+export default function HistoryPage({
+  headingRef,
+  onOperationStart,
+  onOperationEnd,
+}: HistoryPageProps) {
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [rollingBack, setRollingBack] = useState<string | null>(null);
@@ -44,6 +50,7 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
   async function handleRollback(transaction: TransactionSummary, action: RollbackAction) {
     setRollingBack(transaction.transaction_id);
     setError(null);
+    onOperationStart();
     try {
       await rollbackTransaction(transaction.transaction_id, action);
       await refresh();
@@ -51,6 +58,7 @@ export default function HistoryPage({ headingRef }: HistoryPageProps) {
       setError(errorMessage(caught));
     } finally {
       setRollingBack(null);
+      onOperationEnd();
     }
   }
 

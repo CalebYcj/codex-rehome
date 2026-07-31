@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -14,6 +14,7 @@ import HomePage from "./features/home/HomePage";
 import HistoryPage from "./features/history/HistoryPage";
 import ReceivePage from "./features/receive/ReceivePage";
 import SendPage from "./features/send/SendPage";
+import UpdateControl from "./features/update/UpdateControl";
 import { discoverCodex } from "./lib/api";
 import { errorMessage, type CodexInventory } from "./lib/types";
 import "./App.css";
@@ -44,6 +45,7 @@ export default function App() {
   const [inventory, setInventory] = useState<CodexInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [activeOperations, setActiveOperations] = useState(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previousViewRef = useRef(view);
 
@@ -75,6 +77,14 @@ export default function App() {
     setView(next);
   }
 
+  const operationStarted = useCallback(() => {
+    setActiveOperations((current) => current + 1);
+  }, []);
+
+  const operationFinished = useCallback(() => {
+    setActiveOperations((current) => Math.max(0, current - 1));
+  }, []);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -101,6 +111,7 @@ export default function App() {
           ))}
         </nav>
 
+        <UpdateControl migrationBusy={activeOperations > 0} />
         <div className="sidebar-meta">
           <Laptop aria-hidden="true" />
           <span>离线本机迁移</span>
@@ -120,9 +131,9 @@ export default function App() {
         </header>
 
         {view === "home" && <HomePage headingRef={headingRef} inventory={inventory} loading={loading} error={discoveryError} onNavigate={navigate} />}
-        {view === "send" && <SendPage headingRef={headingRef} inventory={inventory} />}
-        {view === "receive" && <ReceivePage headingRef={headingRef} inventory={inventory} />}
-        {view === "history" && <HistoryPage headingRef={headingRef} />}
+        {view === "send" && <SendPage headingRef={headingRef} inventory={inventory} onOperationStart={operationStarted} onOperationEnd={operationFinished} />}
+        {view === "receive" && <ReceivePage headingRef={headingRef} inventory={inventory} onOperationStart={operationStarted} onOperationEnd={operationFinished} />}
+        {view === "history" && <HistoryPage headingRef={headingRef} onOperationStart={operationStarted} onOperationEnd={operationFinished} />}
       </main>
     </div>
   );

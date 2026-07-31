@@ -1,0 +1,38 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+
+test("generates one manifest for Windows and both Universal macOS architectures", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rehome-updater-manifest-"));
+  try {
+    const windows = "ReHome Desktop_0.1.4_x64-setup.exe";
+    const mac = "ReHome Desktop.app.tar.gz";
+    writeFileSync(join(directory, windows), "windows");
+    writeFileSync(join(directory, `${windows}.sig`), "windows-signature\n");
+    writeFileSync(join(directory, mac), "macos");
+    writeFileSync(join(directory, `${mac}.sig`), "mac-signature\n");
+
+    const script = resolve("scripts/generate-updater-json.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [script, directory, "desktop-v0.1.4", "CalebYcj/codex-rehome"],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+
+    const manifest = JSON.parse(readFileSync(join(directory, "latest.json"), "utf8"));
+    assert.equal(manifest.version, "0.1.4");
+    assert.equal(manifest.platforms["windows-x86_64"].signature, "windows-signature");
+    assert.equal(manifest.platforms["darwin-x86_64"].signature, "mac-signature");
+    assert.deepEqual(
+      manifest.platforms["darwin-aarch64"],
+      manifest.platforms["darwin-x86_64"],
+    );
+    assert.match(manifest.platforms["windows-x86_64"].url, /ReHome%20Desktop/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

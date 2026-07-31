@@ -39,7 +39,7 @@ ReHome Desktop 当前处于 Beta。各方向的实际验收与已知边界见 [�
 
 ## 隐私与系统影响
 
-ReHome Desktop 是离线工具：不需要额外账号，不自动上传数据，不安装系统服务，不设置开机启动，也不需要管理员权限。
+ReHome Desktop 的迁移过程保持离线：不需要额外账号，不上传迁移数据，不安装系统服务，不设置开机启动，也不需要管理员权限。应用启动时会连接 GitHub Releases 检查新版本；检查失败不会影响迁移，下载和安装更新也必须由用户确认。
 
 迁移包默认排除登录令牌、Cookies、`.env`、私钥、`.git`、`node_modules`、虚拟环境和运行时锁文件。不要把个人 `.rehome` 文件上传到 GitHub、公开帖子或任何公共下载链接。
 
@@ -54,6 +54,8 @@ ReHome Desktop 是离线工具：不需要额外账号，不自动上传数据�
 [Codex ReHome Skill](https://github.com/CalebYcj/codex-rehome-skill) 保留了原来的 Agent 工作流、脚本、Red Skill、批量自动化和故障处理能力。它适合熟悉 Codex/终端的用户；普通迁移请优先使用本仓库的 Desktop App。
 
 ## 安装与帮助
+
+从 `v0.1.4` 起，ReHome Desktop 支持应用内检查、验签和安装更新。`v0.1.3` 及更早版本需要最后手动安装一次新版，之后即可在应用内更新。这里的更新签名用于防止升级包被篡改，不等同于 Apple 或 Windows 的付费开发者签名，因此系统仍可能显示“未知开发者”提示。
 
 - [中文安装说明](docs/desktop-install.md)
 - [English installation guide](docs/desktop-install.en.md)
