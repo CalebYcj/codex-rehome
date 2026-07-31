@@ -31,7 +31,9 @@ test("generates one manifest for Windows and both Universal macOS architectures"
       manifest.platforms["darwin-aarch64"],
       manifest.platforms["darwin-x86_64"],
     );
-    assert.match(manifest.platforms["windows-x86_64"].url, /ReHome%20Desktop/);
+    assert.match(manifest.platforms["windows-x86_64"].url, /ReHome\.Desktop/);
+    assert.doesNotMatch(manifest.platforms["windows-x86_64"].url, /%20/);
+    assert.match(manifest.platforms["darwin-x86_64"].url, /ReHome\.Desktop\.app\.tar\.gz$/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

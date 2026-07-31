@@ -18,7 +18,7 @@ const macBundle = findOne(files, (name) => name.endsWith(".app.tar.gz"), "macOS 
 const windowsSignature = readSignature(assetsDirectory, `${windowsBundle}.sig`);
 const macSignature = readSignature(assetsDirectory, `${macBundle}.sig`);
 const releaseBase = `https://github.com/${repository}/releases/download/${encodeURIComponent(tag)}`;
-const assetUrl = (name) => `${releaseBase}/${encodeURIComponent(basename(name))}`;
+const assetUrl = (name) => `${releaseBase}/${encodeURIComponent(githubAssetName(name))}`;
 
 const manifest = {
   version,
@@ -54,4 +54,9 @@ function readSignature(directory, name) {
   const signature = readFileSync(join(directory, name), "utf8").trim();
   if (!signature) throw new Error(`Empty updater signature: ${name}`);
   return signature;
+}
+
+// GitHub normalizes spaces in uploaded release asset names to periods.
+function githubAssetName(name) {
+  return basename(name).replaceAll(" ", ".");
 }
