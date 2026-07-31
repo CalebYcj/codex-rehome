@@ -20,7 +20,7 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use tempfile::{Builder, NamedTempFile};
 use unicode_normalization::UnicodeNormalization;
@@ -37,6 +37,8 @@ const MAX_INSPECTION_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
+const MAX_SOURCE_COPY_ATTEMPTS: usize = 3;
+const SOURCE_COPY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const THREAD_EXPORT_COLUMNS_V1: &[&str] = &[
     "id",
     "cwd",
@@ -1028,6 +1030,42 @@ fn copy_source_to_staging(
     staging_root: &Path,
     archive_path: &str,
 ) -> Result<Payload, RehomeError> {
+    retry_stable_copy(source, || {
+        copy_source_to_staging_once(source, staging_root, archive_path)
+    })
+}
+
+fn retry_stable_copy<T>(
+    source: &Path,
+    mut attempt_copy: impl FnMut() -> Result<StableCopyAttempt<T>, RehomeError>,
+) -> Result<T, RehomeError> {
+    for attempt in 1..=MAX_SOURCE_COPY_ATTEMPTS {
+        match attempt_copy()? {
+            StableCopyAttempt::Complete(payload) => return Ok(payload),
+            StableCopyAttempt::Changed if attempt < MAX_SOURCE_COPY_ATTEMPTS => {
+                std::thread::sleep(SOURCE_COPY_RETRY_DELAY);
+            }
+            StableCopyAttempt::Changed => {
+                return Err(package_invalid(format!(
+                    "source file kept changing while being copied after {MAX_SOURCE_COPY_ATTEMPTS} attempts: {}",
+                    source.display()
+                )));
+            }
+        }
+    }
+    unreachable!("source copy attempts are nonzero")
+}
+
+enum StableCopyAttempt<T> {
+    Complete(T),
+    Changed,
+}
+
+fn copy_source_to_staging_once(
+    source: &Path,
+    staging_root: &Path,
+    archive_path: &str,
+) -> Result<StableCopyAttempt<Payload>, RehomeError> {
     let before = source_fingerprint(source)?;
     if before.length > MAX_ARCHIVE_ENTRY_BYTES {
         return Err(package_invalid(
@@ -1044,14 +1082,13 @@ fn copy_source_to_staging(
     writer.sync_all().map_err(io_package_error)?;
     drop(writer);
     if before != source_fingerprint(source)? {
-        return Err(package_invalid(
-            "source file changed in size or modification time while being copied",
-        ));
+        fs::remove_file(&destination).map_err(io_package_error)?;
+        return Ok(StableCopyAttempt::Changed);
     }
-    Ok(Payload {
+    Ok(StableCopyAttempt::Complete(Payload {
         hash,
         executable: source_is_executable(source),
-    })
+    }))
 }
 
 fn stage_generated(
@@ -1435,6 +1472,24 @@ mod authenticated_payload_tests {
         let error = authenticate_payload_bytes(b"tampered bytes", &verified).unwrap_err();
 
         assert_eq!(error.code, ErrorCode::ChecksumMismatch);
+    }
+
+    #[test]
+    fn stable_copy_retries_a_transient_source_change() {
+        let mut attempts = 0;
+
+        let copied = retry_stable_copy(Path::new("volatile-source"), || {
+            attempts += 1;
+            if attempts == 1 {
+                Ok(StableCopyAttempt::Changed)
+            } else {
+                Ok(StableCopyAttempt::Complete("stable"))
+            }
+        })
+        .unwrap();
+
+        assert_eq!(copied, "stable");
+        assert_eq!(attempts, 2);
     }
 }
 

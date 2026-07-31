@@ -397,6 +397,26 @@ describe("ReHome Desktop workflows", () => {
     });
   });
 
+  it("reveals a newly created package so the user can find it", async () => {
+    const user = userEvent.setup();
+    api.createPackage.mockResolvedValue({
+      package_path: "C:\\Transfers\\handoff.rehome",
+      package_id: "56565656-5656-4656-8656-565656565656",
+      bytes_written: 4096,
+      counts: preview.manifest.counts,
+      archive_hash: "created-package-hash",
+      reveal_id: "57575757-5757-4757-8757-575757575757",
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+
+    expect(api.openPath).toHaveBeenCalledWith("57575757-5757-4757-8757-575757575757");
+    expect(screen.getByText("C:\\Transfers\\handoff.rehome")).toBeInTheDocument();
+  });
+
   it("blocks update installation while a migration package is being created", async () => {
     const user = userEvent.setup();
     const pending = deferred<null>();
