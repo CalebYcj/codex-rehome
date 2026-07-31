@@ -262,7 +262,19 @@ export default function SendPage({
       <section className="workflow-section" aria-labelledby="send-output-title">
         <div className="section-title-row"><div><span className="step-number">3</span><h2 id="send-output-title">输出位置</h2></div></div>
         <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>ReHome 包</strong><small>创建时通过系统窗口选择 .rehome 保存位置</small></span></div></div>
-        <div className="command-row"><p>{hasContent ? "选择已完成，可以创建迁移包" : "请选择需要迁移的内容"}</p><button className="command-button" type="button" disabled={!canCreate} onClick={() => void handleCreate()}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <PackagePlus aria-hidden="true" />}创建 ReHome 包</button></div>
+        <div className="command-row">
+          <p role={busy ? "status" : undefined}>
+            {busy
+              ? "正在创建迁移包。内容较多时可能需要几分钟，请保持 ReHome 打开。"
+              : hasContent
+                ? "选择已完成，可以创建迁移包"
+                : "请选择需要迁移的内容"}
+          </p>
+          <button className="command-button" type="button" disabled={!canCreate} onClick={() => void handleCreate()}>
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <PackagePlus aria-hidden="true" />}
+            {busy ? "正在创建 ReHome 包" : "创建 ReHome 包"}
+          </button>
+        </div>
         {error && <p className="inline-state status-error" role="alert">{error}</p>}
       </section>
 

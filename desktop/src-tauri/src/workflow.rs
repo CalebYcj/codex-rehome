@@ -27,7 +27,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
@@ -449,6 +449,7 @@ pub async fn discover_codex(
 #[tauri::command]
 pub async fn create_package(
     app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkflowState>,
     selection: CreatePackageSelection,
 ) -> Result<Option<CreatedPackage>, RehomeError> {
@@ -457,6 +458,7 @@ pub async fn create_package(
         let Some(selected) = app
             .dialog()
             .file()
+            .set_parent(&window)
             .set_title("保存 ReHome 包")
             .set_file_name("handoff.rehome")
             .add_filter("ReHome 包", &["rehome"])
@@ -484,6 +486,7 @@ pub async fn create_package(
 #[tauri::command]
 pub async fn inspect_package(
     app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkflowState>,
 ) -> Result<Option<InspectedPackage>, RehomeError> {
     let state = state.inner().clone();
@@ -491,6 +494,7 @@ pub async fn inspect_package(
         let Some(selected) = app
             .dialog()
             .file()
+            .set_parent(&window)
             .set_title("选择 ReHome 包")
             .add_filter("ReHome 包", &["rehome"])
             .blocking_pick_file()
@@ -517,6 +521,7 @@ pub async fn inspect_package(
 #[tauri::command]
 pub async fn build_restore_plan(
     app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkflowState>,
     request: BuildRestorePlanRequest,
 ) -> Result<Option<BuildRestorePlanResponse>, RehomeError> {
@@ -530,6 +535,7 @@ pub async fn build_restore_plan(
             let Some(projects) = app
                 .dialog()
                 .file()
+                .set_parent(&window)
                 .set_title("选择项目目录")
                 .blocking_pick_folder()
             else {

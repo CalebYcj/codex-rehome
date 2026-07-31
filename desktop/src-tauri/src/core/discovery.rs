@@ -815,31 +815,53 @@ fn optional_tree_entries(
     kind: &str,
     expand_plugin_root: bool,
 ) -> Vec<OptionalContentEntry> {
-    let mut seen = HashSet::new();
-    let mut entries = markers
+    let mut bundles = markers
         .iter()
         .filter_map(|marker| {
             let marker_parent = marker.parent()?;
-            let bundle = if expand_plugin_root
-                && marker_parent.file_name().and_then(|name| name.to_str()) == Some(".codex-plugin")
-            {
+            let is_modern_plugin = expand_plugin_root
+                && marker_parent.file_name().and_then(|name| name.to_str())
+                    == Some(".codex-plugin");
+            let bundle = if is_modern_plugin {
                 marker_parent.parent()?
             } else if !expand_plugin_root {
                 outermost_skill_bundle(marker, root)?
             } else {
                 marker_parent
             };
+            Some((bundle.to_path_buf(), marker.clone(), is_modern_plugin))
+        })
+        .collect::<Vec<_>>();
+    bundles.sort_by(|left, right| {
+        left.0
+            .components()
+            .count()
+            .cmp(&right.0.components().count())
+            .then(left.0.cmp(&right.0))
+    });
+
+    let mut selected_bundles = Vec::new();
+    for candidate in bundles {
+        if selected_bundles
+            .iter()
+            .any(|(selected, _, _): &(PathBuf, PathBuf, bool)| candidate.0.starts_with(selected))
+        {
+            continue;
+        }
+        selected_bundles.push(candidate);
+    }
+
+    let mut entries = selected_bundles
+        .into_iter()
+        .filter_map(|(bundle, marker, is_modern_plugin)| {
             let relative = bundle.strip_prefix(root).ok()?;
             let relative_path = normalize_entry(relative).ok()?;
-            if !seen.insert(relative_path.clone()) {
-                return None;
-            }
             Some(OptionalContentEntry {
                 content_id: Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
                     format!("{kind}:{relative_path}").as_bytes(),
                 ),
-                name: if expand_plugin_root {
+                name: if is_modern_plugin {
                     bundle.parent().and_then(Path::file_name)
                 } else {
                     bundle.file_name()
@@ -848,12 +870,12 @@ fn optional_tree_entries(
                 .unwrap_or(kind)
                 .to_owned(),
                 source_path: if expand_plugin_root {
-                    marker.clone()
+                    marker
                 } else {
                     bundle.join("SKILL.md")
                 },
                 relative_path,
-                size_bytes: directory_size(bundle),
+                size_bytes: directory_size(&bundle),
                 thumbnail_data_url: None,
                 reveal_id: None,
             })

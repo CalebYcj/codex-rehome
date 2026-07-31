@@ -1,4 +1,5 @@
 use rehome_desktop_lib::core::{
+    discovery::discover_codex,
     models::{ContentCounts, CreatePackageRequest, RestoreOptions, SourceOs, TargetInventory},
     package::{create_package, inspect_package},
     planner::build_restore_plan,
@@ -13,9 +14,54 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tempfile::tempdir;
+
+#[test]
+#[ignore = "reads the local Codex profile and packages all optional content into a temporary file"]
+fn local_all_optional_content_package() -> Result<(), Box<dyn Error>> {
+    let inventory = discover_codex(None)?;
+    let skill_paths = inventory
+        .skills
+        .iter()
+        .map(|entry| entry.source_path.clone())
+        .collect();
+    let plugin_paths = inventory
+        .plugins
+        .iter()
+        .map(|entry| entry.source_path.clone())
+        .collect();
+    let generated_image_paths = inventory
+        .generated_images
+        .iter()
+        .map(|entry| entry.source_path.clone())
+        .collect();
+    let sandbox = tempdir()?;
+    let started = Instant::now();
+    let report = create_package(CreatePackageRequest {
+        codex_home: inventory.codex_home,
+        project_paths: vec![],
+        conversation_ids: vec![],
+        output_path: sandbox.path().join("all-optional-content.rehome"),
+        source_device_id: inventory.source_device_id,
+        skill_paths,
+        plugin_paths,
+        generated_image_paths,
+    })?;
+    let package = inspect_package(&report.package_path)?;
+    assert!(package.checksum_valid);
+    assert_eq!(package.forbidden_files_total, 0);
+    println!(
+        "Optional-content package passed in {:.2?}: {} skill(s), {} plugin(s), {} image(s), {} bytes.",
+        started.elapsed(),
+        report.counts.skills,
+        report.counts.plugins,
+        report.counts.generated_images,
+        report.bytes_written,
+    );
+    Ok(())
+}
 use uuid::Uuid;
 
 #[test]
