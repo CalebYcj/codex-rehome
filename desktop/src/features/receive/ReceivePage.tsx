@@ -34,6 +34,8 @@ import {
 interface ReceivePageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
   inventory: CodexInventory | null;
+  onOperationStart: () => void;
+  onOperationEnd: () => void;
 }
 
 const verificationLabels: Array<[keyof RestoreReport["verification"], string]> = [
@@ -49,7 +51,12 @@ const verificationLabels: Array<[keyof RestoreReport["verification"], string]> =
   ["app_visible_ready", "Codex 可见状态"],
 ];
 
-export default function ReceivePage({ headingRef, inventory }: ReceivePageProps) {
+export default function ReceivePage({
+  headingRef,
+  inventory,
+  onOperationStart,
+  onOperationEnd,
+}: ReceivePageProps) {
   const [preview, setPreview] = useState<PackagePreview | null>(null);
   const [locations, setLocations] = useState<RestoreLocationSelection | null>(null);
   const [plan, setPlan] = useState<RestorePlan | null>(null);
@@ -65,6 +72,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
     const generation = ++requestGeneration.current;
     setError(null);
     setPhase("inspecting");
+    onOperationStart();
     try {
       const inspected = await inspectPackage();
       if (generation !== requestGeneration.current) return;
@@ -79,6 +87,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
       setError(errorMessage(caught));
     } finally {
       if (generation === requestGeneration.current) setPhase("idle");
+      onOperationEnd();
     }
   }
 
@@ -87,6 +96,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
     const generation = ++requestGeneration.current;
     setError(null);
     setPhase("selecting");
+    onOperationStart();
     try {
       const selected = await selectRestoreDestinations(preview.selection_id);
       if (generation !== requestGeneration.current) return;
@@ -99,6 +109,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
       setError(errorMessage(caught));
     } finally {
       if (generation === requestGeneration.current) setPhase("idle");
+      onOperationEnd();
     }
   }
 
@@ -108,6 +119,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
     setError(null);
     setReport(null);
     setPhase("planning");
+    onOperationStart();
     try {
       const nextPlan = await buildRestorePlan(preview.selection_id, locations.selection_id);
       if (generation === requestGeneration.current) setPlan(nextPlan);
@@ -117,6 +129,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
       setError(errorMessage(caught));
     } finally {
       if (generation === requestGeneration.current) setPhase("idle");
+      onOperationEnd();
     }
   }
 
@@ -131,6 +144,7 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
     if (!plan || plan.conflict_count > 0 || !codexClosed) return;
     setError(null);
     setPhase("restoring");
+    onOperationStart();
     try {
       setReport(await applyRestore(plan.plan_id, {
         codex_closed_confirmed: true,
@@ -140,11 +154,13 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
       setError(errorMessage(caught));
     } finally {
       setPhase("idle");
+      onOperationEnd();
     }
   }
 
   async function handleOpenRestored(registration: ProjectRegistration) {
     setError(null);
+    onOperationStart();
     try {
       const status = await openRestoredThread(registration.project_path, report!.transaction_id);
       setRegistrationStatuses((current) => ({
@@ -153,6 +169,8 @@ export default function ReceivePage({ headingRef, inventory }: ReceivePageProps)
       }));
     } catch (caught) {
       setError(errorMessage(caught));
+    } finally {
+      onOperationEnd();
     }
   }
 

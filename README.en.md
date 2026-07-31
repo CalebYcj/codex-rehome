@@ -39,7 +39,7 @@ ReHome Desktop is currently in beta. See [validation status](docs/validation-sta
 
 ## Privacy and system impact
 
-ReHome Desktop is an offline tool. It does not require another account, automatically upload data, install a system service, add autostart, or request administrator access.
+ReHome Desktop keeps migration offline. It requires no additional account, uploads no migration data, installs no system service, adds no autostart entry, and requests no administrator access. At launch it contacts GitHub Releases to check for a newer version. A failed check never blocks migration, and downloading or installing an update requires user confirmation.
 
 Packages exclude login tokens, cookies, `.env` files, private keys, `.git`, `node_modules`, virtual environments, and runtime lock files by default. Never upload a personal `.rehome` file to GitHub, a public post, or a public download link.
 
@@ -54,6 +54,8 @@ Login sessions, browser state, running terminals, unsaved work, and native syste
 [Codex ReHome Skill](https://github.com/CalebYcj/codex-rehome-skill) keeps the original Agent workflow, scripts, Red Skill, batch automation, and troubleshooting tools. It is for advanced users; ReHome Desktop is the recommended entry point for routine migration.
 
 ## Install and help
+
+Starting with `v0.1.4`, ReHome Desktop can check, verify, and install signed updates inside the app. Users on `v0.1.3` or earlier must install one final release manually. The updater signature prevents tampered update packages; it is separate from paid Apple or Windows publisher signing, so the operating system may still show an unknown-developer warning.
 
 - [Chinese installation guide](docs/desktop-install.md)
 - [English installation guide](docs/desktop-install.en.md)

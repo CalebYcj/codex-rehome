@@ -27,6 +27,12 @@ An installer and a migration package are different files. The installer installs
 
 Public builds are not signed with an Apple Developer ID, so macOS may show a first-launch warning. Offline migration still works normally.
 
+## In-app updates
+
+Starting with `v0.1.4`, the app checks GitHub Releases at launch. When a new version is available, an update button appears at the bottom of the sidebar. Download, signature verification, installation, and restart begin only after the user clicks it. Updates are blocked while a migration, restore, or rollback is active. Users on `v0.1.3` or earlier must install one new release manually first.
+
+The updater signature verifies that the package came from this project and was not modified. It does not remove macOS unknown-developer warnings. A failed update check never blocks offline migration.
+
 ## Workflow
 
 - Old computer: choose Send, select projects and conversations, and create a `.rehome` file.
@@ -42,6 +48,6 @@ ReHome Desktop reads or writes only after confirmation, and only within:
 - user-selected project, package, and restore directories;
 - ReHome Desktop's own transaction backups and recovery records.
 
-It installs no system service, adds no autostart entry, requests no administrator rights, enables no automatic updater, and uploads no data automatically. Login tokens, cookies, `.env` files, private keys, `.git`, `node_modules`, virtual environments, and runtime lock files are excluded from packages by default.
+It installs no system service, adds no autostart entry, requests no administrator rights, and uploads no data automatically. Migration does not depend on the network except when checking or downloading a GitHub Release update. Login tokens, cookies, `.env` files, private keys, `.git`, `node_modules`, virtual environments, and runtime lock files are excluded from packages by default.
 
 Uninstalling ReHome Desktop does not automatically remove Codex data, migration packages, restored projects, or transaction backups. The user remains in control of those files.

@@ -17,7 +17,13 @@ const api = vi.hoisted(() => ({
   selectRestoreDestinations: vi.fn(),
 }));
 
+const updater = vi.hoisted(() => ({
+  checkForUpdates: vi.fn(),
+  installCheckedUpdate: vi.fn(),
+}));
+
 vi.mock("./lib/api", () => api);
+vi.mock("./lib/updater", () => updater);
 
 const inventory = {
   codex_home: "C:\\Users\\Me\\.codex",
@@ -243,6 +249,11 @@ beforeEach(() => {
       app_visible_ready: true,
     },
   });
+  updater.checkForUpdates.mockResolvedValue({
+    status: "current",
+    currentVersion: "0.1.4",
+  });
+  updater.installCheckedUpdate.mockResolvedValue(undefined);
 });
 
 async function openReceive(user: ReturnType<typeof userEvent.setup>) {
@@ -384,6 +395,30 @@ describe("ReHome Desktop workflows", () => {
       plugin_ids: [],
       generated_image_ids: [],
     });
+  });
+
+  it("blocks update installation while a migration package is being created", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<null>();
+    api.createPackage.mockReturnValue(pending.promise);
+    updater.checkForUpdates.mockResolvedValue({
+      status: "available",
+      currentVersion: "0.1.4",
+      version: "0.1.5",
+      notes: null,
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    const updateButton = await screen.findByRole("button", { name: "更新到 0.1.5" });
+
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+
+    expect(updateButton).toBeDisabled();
+    expect(screen.getByText("请先完成当前迁移")).toBeInTheDocument();
+
+    await act(async () => pending.resolve(null));
   });
 
   it("lists optional content and packages only the selected entries", async () => {
