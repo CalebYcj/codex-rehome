@@ -158,6 +158,34 @@ fn session_index_merge_preserves_target_rows_and_repairs_planned_metadata(
 }
 
 #[test]
+fn session_index_merge_repairs_an_old_package_with_a_missing_planned_row(
+) -> Result<(), Box<dyn Error>> {
+    let unrelated = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let package = jsonl(&[serde_json::json!({
+        "id": unrelated,
+        "title": "Unrelated",
+    })]);
+
+    let merged = merge_session_index(
+        b"",
+        package.as_bytes(),
+        &[planned_session()],
+        &rewrites(INDEX_SOURCE),
+    )?;
+    let rows = merged
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], TARGET_ID);
+    assert_eq!(rows[0]["title"], planned_session().title);
+    assert_eq!(rows[0]["rollout_path"], MAC_SESSION);
+    Ok(())
+}
+
+#[test]
 fn session_index_merge_preserves_newer_target_metadata_and_unrelated_duplicate_rows_exactly(
 ) -> Result<(), Box<dyn Error>> {
     let unrelated = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

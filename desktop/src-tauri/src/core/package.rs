@@ -129,12 +129,13 @@ fn create_package_with_overwrite(
         &mut counts,
     )?;
 
-    if !index_metadata.bytes.is_empty() {
+    let complete_index = complete_session_index(&index_metadata, &conversations)?;
+    if !complete_index.is_empty() {
         stage_generated(
             staging.path(),
             &mut payloads,
             "codex/session_index.jsonl",
-            &index_metadata.bytes,
+            &complete_index,
         )?;
     }
 
@@ -547,7 +548,6 @@ impl PayloadCollection {
 
 #[derive(Default)]
 struct SessionIndexMetadata {
-    bytes: Vec<u8>,
     by_id: BTreeMap<Uuid, Value>,
 }
 
@@ -557,6 +557,33 @@ struct ConversationSelection<'a> {
     selected_ids: &'a [Uuid],
     index: &'a SessionIndexMetadata,
     projects: &'a [ProjectEntry],
+}
+
+fn complete_session_index(
+    index: &SessionIndexMetadata,
+    conversations: &[ConversationEntry],
+) -> Result<Vec<u8>, RehomeError> {
+    let mut bytes = Vec::new();
+    for conversation in conversations {
+        let value = index
+            .by_id
+            .get(&conversation.task_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "id": conversation.task_id,
+                    "thread_name": conversation.title,
+                    "title": conversation.title,
+                    "updated_at": conversation.updated_at,
+                    "project_id": conversation.project_id,
+                })
+            });
+        serde_json::to_writer(&mut bytes, &value)
+            .map_err(|error| package_invalid(format!("could not encode session index: {error}")))?;
+        bytes.push(b'\n');
+        ensure_control_size("codex/session_index.jsonl", bytes.len() as u64)?;
+    }
+    Ok(bytes)
 }
 
 fn stage_projects(
@@ -762,13 +789,6 @@ fn read_selected_session_index(
         return Err(package_invalid(
             "source file changed in size or modification time while being read",
         ));
-    }
-    for value in result.by_id.values() {
-        let encoded = serde_json::to_vec(value)
-            .map_err(|error| package_invalid(format!("could not encode session index: {error}")))?;
-        result.bytes.extend_from_slice(&encoded);
-        result.bytes.push(b'\n');
-        ensure_control_size("codex/session_index.jsonl", result.bytes.len() as u64)?;
     }
     Ok(result)
 }

@@ -388,11 +388,18 @@ pub fn merge_session_index(
 
     let mut merged_rows = BTreeMap::new();
     for (id, session) in &planned {
-        let incoming = imported.get(id).ok_or_else(|| {
-            package_invalid(format!(
-                "session index is missing planned conversation {id}"
-            ))
-        })?;
+        let source_id = session.source_task_id.to_string();
+        let incoming = imported
+            .get(id)
+            .or_else(|| imported.get(&source_id))
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "id": source_id,
+                    "thread_name": session.title,
+                    "title": session.title,
+                })
+            });
         let mut row = target_bases
             .remove(id)
             .unwrap_or_else(|| Value::Object(Map::new()));

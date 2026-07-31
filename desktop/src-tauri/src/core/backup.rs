@@ -65,6 +65,8 @@ pub(crate) struct BackupOperation {
     pub backup_path: Option<PathBuf>,
     pub original_hash: Option<String>,
     #[serde(default)]
+    pub original_target_hash: Option<String>,
+    #[serde(default)]
     pub applied_hash: Option<String>,
     #[serde(default)]
     pub applied_state: Option<AppliedState>,
@@ -166,6 +168,29 @@ pub(crate) fn prepare_transaction(
             )?
         };
         operations.push(operation);
+    }
+
+    // An existing WAL or journal is folded into the self-contained database
+    // backup. If a later operation fails before SQLite is written, rollback
+    // must still restore that snapshot before removing the original sidecar.
+    let has_sqlite_sidecar = operations.iter().any(|operation| {
+        operation
+            .package_source
+            .starts_with("codex/metadata/sqlite-sidecar")
+            && operation.applied_state.is_some()
+    });
+    if has_sqlite_sidecar {
+        if let Some(index) = operations
+            .iter()
+            .position(|operation| operation.package_source == "codex/metadata/threads.json")
+        {
+            let applied_state = inspect_applied_state(&operations[index])?;
+            operations[index].applied_hash = match &applied_state {
+                AppliedState::File { hash, .. } => Some(hash.clone()),
+                AppliedState::Absent => None,
+            };
+            operations[index].applied_state = Some(applied_state);
+        }
     }
 
     let locks = operations
@@ -679,7 +704,8 @@ fn backup_target(
                 target,
                 backup_kind: BackupKind::File,
                 backup_path: Some(relative),
-                original_hash: Some(before_hash),
+                original_hash: Some(before_hash.clone()),
+                original_target_hash: Some(before_hash),
                 applied_hash: None,
                 applied_state: None,
                 applied_database_hash: None,
@@ -702,6 +728,7 @@ fn backup_target(
                 backup_kind: BackupKind::Absent,
                 backup_path: None,
                 original_hash: None,
+                original_target_hash: None,
                 applied_hash: None,
                 applied_state: None,
                 applied_database_hash: None,
@@ -797,6 +824,7 @@ fn backup_sqlite_database(
         backup_kind: BackupKind::File,
         backup_path: Some(relative),
         original_hash: Some(original_hash),
+        original_target_hash: Some(before_hash),
         applied_hash: None,
         applied_state: None,
         applied_database_hash: None,
@@ -844,6 +872,7 @@ fn backup_sqlite_sidecar(
         backup_kind: BackupKind::Absent,
         backup_path: None,
         original_hash: original_hash.clone(),
+        original_target_hash: original_hash.clone(),
         applied_hash: original_hash.clone(),
         // Existing WAL/SHM content is already folded into the coherent SQLite
         // snapshot. Record its identity so rollback can quarantine that exact
@@ -1121,10 +1150,15 @@ fn verify_original_operation_state(operation: &BackupOperation) -> Result<(), Re
             "rollback conflict: target is present after its recorded restoration",
         );
     }
-    let expected = operation
-        .original_hash
-        .as_deref()
-        .ok_or_else(|| rollback_failed("file backup has no original hash"))?;
+    let expected = if operation.applied_state.is_none() {
+        operation
+            .original_target_hash
+            .as_deref()
+            .or(operation.original_hash.as_deref())
+    } else {
+        operation.original_hash.as_deref()
+    }
+    .ok_or_else(|| rollback_failed("file backup has no original hash"))?;
     let (actual, _) = inspect_current_file(operation)?;
     if actual.eq_ignore_ascii_case(expected) {
         Ok(())

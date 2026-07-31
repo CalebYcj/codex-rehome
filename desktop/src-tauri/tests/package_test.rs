@@ -767,6 +767,27 @@ fn sensitive_staging_never_appears_in_project_or_output_directories() -> Result<
 }
 
 #[test]
+fn package_synthesizes_a_missing_selected_session_index_row() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    fs::remove_file(&fixture.session_index_path)?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("synthesized-index.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let index = String::from_utf8(read_zip_entry(&package, "codex/session_index.jsonl")?)?;
+    let rows = index
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], THREAD_ID);
+    assert_eq!(rows[0]["thread_name"], "Imported conversation");
+    assert_eq!(rows[0]["title"], "Imported conversation");
+    Ok(())
+}
+
+#[test]
 fn symbolic_links_in_selected_projects_are_safely_excluded() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let outside = fixture.root.join("outside-secret.txt");
