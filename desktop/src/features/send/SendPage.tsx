@@ -145,9 +145,21 @@ export default function SendPage({
         plugin_ids: [...plugins],
         generated_image_ids: [...images],
       });
-      if (created) setReport(created);
+      if (created) {
+        setReport(created);
+        try {
+          await openPath(created.reveal_id);
+        } catch {
+          setError(`迁移包已创建在：${created.package_path}\n但没能自动打开所在文件夹。`);
+        }
+      }
     } catch (caught) {
-      setError(errorMessage(caught));
+      const message = errorMessage(caught);
+      setError(
+        message.includes("source file kept changing while being copied")
+          ? `有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n${message}`
+          : message,
+      );
     } finally {
       setBusy(false);
       onOperationEnd();
