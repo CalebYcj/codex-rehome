@@ -46,6 +46,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [activeOperations, setActiveOperations] = useState(0);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previousViewRef = useRef(view);
 
@@ -111,14 +112,22 @@ export default function App() {
           ))}
         </nav>
 
-        <UpdateControl migrationBusy={activeOperations > 0} />
+        <UpdateControl
+          migrationBusy={activeOperations > 0}
+          onInstallingChange={setUpdateInstalling}
+        />
         <div className="sidebar-meta">
           <Laptop aria-hidden="true" />
           <span>离线本机迁移</span>
         </div>
       </aside>
 
-      <main className="workspace" data-view={view}>
+      <main
+        className="workspace"
+        data-view={view}
+        inert={updateInstalling ? true : undefined}
+        aria-busy={updateInstalling}
+      >
         <header className="topbar">
           <span className="topbar-title">{viewTitles[view]}</span>
           {loading ? (

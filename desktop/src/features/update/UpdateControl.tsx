@@ -9,6 +9,7 @@ import {
 
 interface UpdateControlProps {
   migrationBusy: boolean;
+  onInstallingChange: (installing: boolean) => void;
 }
 
 type UpdateState =
@@ -18,7 +19,7 @@ type UpdateState =
   | { phase: "installed" }
   | { phase: "error" };
 
-export default function UpdateControl({ migrationBusy }: UpdateControlProps) {
+export default function UpdateControl({ migrationBusy, onInstallingChange }: UpdateControlProps) {
   const [state, setState] = useState<UpdateState>({ phase: "checking" });
 
   const runCheck = useCallback(async () => {
@@ -36,6 +37,7 @@ export default function UpdateControl({ migrationBusy }: UpdateControlProps) {
 
   async function install(result: Extract<UpdateCheckResult, { status: "available" }>) {
     if (migrationBusy) return;
+    onInstallingChange(true);
     setState({ phase: "installing", result, percent: null });
     try {
       await installCheckedUpdate(({ percent }) => {
@@ -43,6 +45,7 @@ export default function UpdateControl({ migrationBusy }: UpdateControlProps) {
       });
       setState({ phase: "installed" });
     } catch {
+      onInstallingChange(false);
       setState({ phase: "error" });
     }
   }

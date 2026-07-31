@@ -11,6 +11,18 @@ if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error(`Unsupported release tag: ${tag}`);
 }
 
+const packageVersion = JSON.parse(
+  readFileSync(resolve("desktop/package.json"), "utf8"),
+).version;
+const tauriVersion = JSON.parse(
+  readFileSync(resolve("desktop/src-tauri/tauri.conf.json"), "utf8"),
+).version;
+if (packageVersion !== version || tauriVersion !== version) {
+  throw new Error(
+    `Release tag version ${version} does not match package version ${packageVersion} and Tauri version ${tauriVersion}`,
+  );
+}
+
 const assetsDirectory = resolve(assetsArgument);
 const files = readdirSync(assetsDirectory);
 const windowsBundle = findOne(files, (name) => name.endsWith("-setup.exe"), "Windows updater");

@@ -445,6 +445,31 @@ describe("ReHome Desktop workflows", () => {
     await act(async () => pending.resolve(null));
   });
 
+  it("blocks migration controls while an update is being installed", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<void>();
+    updater.checkForUpdates.mockResolvedValue({
+      status: "available",
+      currentVersion: "0.1.4",
+      version: "0.1.5",
+      notes: null,
+    });
+    updater.installCheckedUpdate.mockReturnValue(pending.promise);
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    const updateButton = await screen.findByRole("button", { name: /0\.1\.5/ });
+    await user.click(updateButton);
+
+    const workspace = document.querySelector("main.workspace");
+    expect(workspace).toHaveAttribute("inert");
+    expect(workspace).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => pending.reject(new Error("download failed")));
+    expect(workspace).not.toHaveAttribute("inert");
+    expect(workspace).toHaveAttribute("aria-busy", "false");
+  });
+
   it("lists optional content and packages only the selected entries", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -801,8 +826,10 @@ function restoreReportWithRegistration(status: "manual_open_required") {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }

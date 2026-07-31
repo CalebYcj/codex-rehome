@@ -25,7 +25,7 @@ describe("UpdateControl", () => {
 
   it("checks automatically and installs a signed update after confirmation", async () => {
     const user = userEvent.setup();
-    render(<UpdateControl migrationBusy={false} />);
+    render(<UpdateControl migrationBusy={false} onInstallingChange={vi.fn()} />);
 
     const install = await screen.findByRole("button", { name: "更新到 0.1.4" });
     expect(screen.getByText("当前 0.1.3")).toBeInTheDocument();
@@ -37,7 +37,7 @@ describe("UpdateControl", () => {
   });
 
   it("blocks installation while a migration operation is active", async () => {
-    render(<UpdateControl migrationBusy />);
+    render(<UpdateControl migrationBusy onInstallingChange={vi.fn()} />);
 
     const install = await screen.findByRole("button", { name: "更新到 0.1.4" });
     expect(install).toBeDisabled();
@@ -49,7 +49,7 @@ describe("UpdateControl", () => {
     updater.checkForUpdates
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValueOnce({ status: "current", currentVersion: "0.1.4" });
-    render(<UpdateControl migrationBusy={false} />);
+    render(<UpdateControl migrationBusy={false} onInstallingChange={vi.fn()} />);
 
     const retry = await screen.findByRole("button", { name: "重新检查更新" });
     expect(screen.getByText("检查失败，不影响离线迁移")).toBeInTheDocument();
