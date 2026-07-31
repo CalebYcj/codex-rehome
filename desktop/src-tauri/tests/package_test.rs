@@ -171,6 +171,51 @@ fn packages_selected_fixture_content_without_mutating_sources() -> Result<(), Bo
 }
 
 #[test]
+fn package_collapses_overlapping_plugin_roots() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let version_root = codex_home
+        .join("plugins")
+        .join("cache")
+        .join("openai-primary-runtime")
+        .join("presentations")
+        .join("1.0.0");
+    let plugin_marker = version_root.join(".codex-plugin").join("plugin.json");
+    let nested_manifest = version_root
+        .join("skills")
+        .join("layout-library")
+        .join("manifest.json");
+    fs::create_dir_all(plugin_marker.parent().unwrap())?;
+    fs::create_dir_all(nested_manifest.parent().unwrap())?;
+    fs::write(&plugin_marker, b"{}")?;
+    fs::write(&nested_manifest, b"asset manifest")?;
+    let output = temp.path().join("overlapping-plugin-roots.rehome");
+
+    let report = create_package(CreatePackageRequest {
+        codex_home,
+        project_paths: vec![],
+        conversation_ids: vec![],
+        output_path: output.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![plugin_marker, nested_manifest],
+        generated_image_paths: vec![],
+    })?;
+
+    assert_eq!(report.counts.plugins, 1);
+    let preview = inspect_package(&output)?;
+    assert_eq!(
+        preview
+            .entries
+            .iter()
+            .filter(|entry| entry.ends_with("/skills/layout-library/manifest.json"))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn package_deduplicates_selected_index_rows_with_a_stable_last_row_winner(
 ) -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;

@@ -120,6 +120,9 @@ jobs:
         run: |
           mkdir -p release-assets
           cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-assets/
+      - name: Stage signed macOS updater
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        run: |
           shopt -s nullglob
           updater_bundles=(desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz)
           updater_signatures=(desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig)

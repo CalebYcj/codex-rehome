@@ -260,6 +260,12 @@ fn plugin_inventory_uses_plugin_name_and_complete_version_root() -> Result<(), B
         version_root.join("assets").join("runtime.js"),
         b"complete plugin",
     )?;
+    let nested_manifest = version_root
+        .join("skills")
+        .join("layout-library")
+        .join("manifest.json");
+    fs::create_dir_all(nested_manifest.parent().unwrap())?;
+    fs::write(&nested_manifest, b"asset manifest")?;
 
     let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
     assert_eq!(inventory.plugins.len(), 1);
@@ -269,6 +275,10 @@ fn plugin_inventory_uses_plugin_name_and_complete_version_root() -> Result<(), B
         "openai-bundled/browser/1.2.3"
     );
     assert!(inventory.plugins[0].size_bytes >= b"complete plugin".len() as u64);
+    assert_eq!(
+        inventory.plugins[0].source_path,
+        version_root.join(".codex-plugin").join("plugin.json")
+    );
     Ok(())
 }
 

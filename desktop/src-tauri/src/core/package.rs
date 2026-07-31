@@ -496,8 +496,10 @@ struct PortablePathRegistry {
 impl PortablePathRegistry {
     fn insert(&mut self, path: &str, kind: ArchivePathKind) -> Result<(), RehomeError> {
         let key = portable_collision_key(path);
-        if self.entries.contains_key(&key) {
-            return Err(package_invalid("portable archive path collision"));
+        if let Some(existing) = self.entries.get(&key) {
+            return Err(package_invalid(format!(
+                "portable archive path collision at {path}: {kind:?} conflicts with {existing:?}"
+            )));
         }
         for ancestor in portable_ancestors(&key) {
             if self.entries.get(ancestor) == Some(&ArchivePathKind::File) {
@@ -954,7 +956,26 @@ fn stage_discovered_trees(
         roots.insert(canonical, bundle_root.to_path_buf());
     }
 
-    for bundle_root in roots.values() {
+    let mut roots = roots.into_iter().collect::<Vec<_>>();
+    roots.sort_by(|left, right| {
+        left.0
+            .components()
+            .count()
+            .cmp(&right.0.components().count())
+            .then(left.0.cmp(&right.0))
+    });
+    let mut selected_roots = Vec::new();
+    for candidate in roots {
+        if selected_roots
+            .iter()
+            .any(|(selected, _): &(PathBuf, PathBuf)| candidate.0.starts_with(selected))
+        {
+            continue;
+        }
+        selected_roots.push(candidate);
+    }
+
+    for (_, bundle_root) in &selected_roots {
         let bundle_relative = bundle_root
             .strip_prefix(source_root)
             .map_err(|_| package_invalid("discovered Codex bundle escapes its expected root"))?;
@@ -988,7 +1009,7 @@ fn stage_discovered_trees(
             stage_source(entry.path(), staging_root, payloads, &archive_path)?;
         }
     }
-    Ok(roots.len() as u64)
+    Ok(selected_roots.len() as u64)
 }
 
 fn stage_source(
