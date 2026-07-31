@@ -767,6 +767,35 @@ fn sensitive_staging_never_appears_in_project_or_output_directories() -> Result<
 }
 
 #[test]
+fn symbolic_links_in_selected_projects_are_safely_excluded() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let outside = fixture.root.join("outside-secret.txt");
+    fs::write(&outside, b"must not enter the package\n")?;
+    let linked = fixture.project_path.join("linked-secret.txt");
+    if let Err(error) = create_file_symlink(&outside, &linked) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            eprintln!("skipping project symlink test: Windows symlink privilege unavailable");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("symlink-safe.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let preview = inspect_package(&package)?;
+    assert_eq!(preview.manifest.counts.projects, 1);
+    assert_eq!(preview.manifest.counts.project_files, 1);
+    assert_eq!(preview.manifest.exclusions.excluded_files, 4);
+    assert!(!preview
+        .entries
+        .iter()
+        .any(|entry| entry.ends_with("/linked-secret.txt")));
+    Ok(())
+}
+
+#[test]
 fn aborts_if_a_source_changes_while_it_is_copied() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let large_source = fixture.project_path.join("large.bin");
@@ -839,6 +868,26 @@ fn directory_entry_names(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
         .collect::<Result<Vec<_>, io::Error>>()?;
     names.sort();
     Ok(names)
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(not(windows))]
+fn windows_symlink_privilege_is_unavailable(_error: &io::Error) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn windows_symlink_privilege_is_unavailable(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(1314)
 }
 
 fn read_zip_entry(path: &Path, name: &str) -> Result<Vec<u8>, Box<dyn Error>> {

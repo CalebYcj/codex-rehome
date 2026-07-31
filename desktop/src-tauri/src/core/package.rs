@@ -57,6 +57,7 @@ const EXCLUSION_RULES: &[&str] = &[
     "environment and private key files",
     "version-control metadata",
     "dependency, cache, build, and runtime data",
+    "symbolic links and filesystem redirects",
 ];
 
 pub fn create_package(request: CreatePackageRequest) -> Result<CreatePackageReport, RehomeError> {
@@ -597,9 +598,12 @@ fn stage_projects(
                 continue;
             }
             if entry.file_type().is_symlink() {
-                return Err(package_invalid(
-                    "symbolic links are not allowed in selected projects",
-                ));
+                let length = fs::symlink_metadata(entry.path())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                excluded_files += 1;
+                excluded_bytes += length;
+                continue;
             }
             if !entry.file_type().is_file() {
                 continue;
