@@ -305,6 +305,56 @@ fn sqlite_wal_verification_failure_refreshes_sidecars_before_rollback() -> Resul
 }
 
 #[test]
+fn index_failure_before_sqlite_write_restores_a_wal_snapshot_without_false_conflict(
+) -> Result<(), Box<dyn Error>> {
+    let mut harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let generator = harness._fixture.root.join("rollback-generator.sqlite");
+    fs::copy(&database, &generator)?;
+    let keeper = Connection::open(&generator)?;
+    keeper.pragma_update(None, "journal_mode", "WAL")?;
+    keeper.pragma_update(None, "wal_autocheckpoint", 0)?;
+    keeper.execute_batch(
+        "CREATE TABLE rollback_marker(value TEXT NOT NULL);\
+         INSERT INTO rollback_marker VALUES ('from-wal');",
+    )?;
+    fs::copy(&generator, &database)?;
+    for suffix in ["-wal", "-shm"] {
+        let source = sqlite_sidecar(&generator, suffix);
+        if source.exists() {
+            fs::copy(source, sqlite_sidecar(&database, suffix))?;
+        }
+    }
+    drop(keeper);
+    assert!(sqlite_sidecar(&database, "-wal").exists());
+    fs::write(
+        harness.plan.target_codex_home.join("session_index.jsonl"),
+        b"{}\n",
+    )?;
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    harness.plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed, "{error:?}");
+    assert!(!error.message.contains("automatic rollback failed"));
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    let restored = Connection::open(database)?;
+    let marker: String =
+        restored.query_row("SELECT value FROM rollback_marker", [], |row| row.get(0))?;
+    assert_eq!(marker, "from-wal");
+    Ok(())
+}
+
+#[test]
 fn backup_root_must_not_overlap_projects_root() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let error = apply_restore(
