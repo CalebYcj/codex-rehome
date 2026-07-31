@@ -115,15 +115,20 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.release.conf.json
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
       - name: Stage macOS release files
         run: |
           mkdir -p release-assets
           cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-assets/
-          if compgen -G "desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz" > /dev/null; then
-            cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz release-assets/
-            cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig release-assets/
+          shopt -s nullglob
+          updater_bundles=(desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz)
+          updater_signatures=(desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig)
+          if [[ ${#updater_bundles[@]} -ne 1 || ${#updater_signatures[@]} -ne 1 ]]; then
+            echo "Expected exactly one signed macOS updater bundle, found ${#updater_bundles[@]} bundle(s) and ${#updater_signatures[@]} signature(s)." >&2
+            exit 1
           fi
+          cp "${updater_bundles[0]}" release-assets/
+          cp "${updater_signatures[0]}" release-assets/
       - uses: actions/upload-artifact@v4
         with:
           name: ReHome-Desktop-macOS-Universal
