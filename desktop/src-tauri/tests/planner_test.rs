@@ -31,6 +31,10 @@ const SESSION_SOURCE: &str = "codex/sessions/2026/07/22/thread.jsonl";
 const SOURCE_ROLLOUT_PATH: &str = "C:/Users/OldUser/.codex/sessions/2026/07/22/thread.jsonl";
 const INDEX_SOURCE: &str = "codex/session_index.jsonl";
 const THREADS_SOURCE: &str = "codex/metadata/threads.json";
+const PLUGIN_MARKER_SOURCE: &str =
+    "codex/plugins/cache/openai-bundled/browser/1.2.3/.codex-plugin/plugin.json";
+const PLUGIN_RUNTIME_SOURCE: &str =
+    "codex/plugins/cache/openai-bundled/browser/1.2.3/assets/runtime.js";
 
 struct PlannerFixture {
     _temp: TempDir,
@@ -97,6 +101,92 @@ fn classifies_project_files_from_target_state() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn existing_plugin_version_is_preserved_as_a_complete_unit() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    add_plugin_payloads(&mut fixture)?;
+    let plugin_root = fixture
+        .target
+        .codex_home
+        .join("plugins/cache/openai-bundled/browser/1.2.3");
+    fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
+    fs::create_dir_all(plugin_root.join("assets"))?;
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        b"mac marker\n",
+    )?;
+    fs::write(plugin_root.join("assets/runtime.js"), b"mac runtime\n")?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    for source in [PLUGIN_MARKER_SOURCE, PLUGIN_RUNTIME_SOURCE] {
+        let operation = operation_for(&plan.operations, source);
+        assert_eq!(operation.action, ChangeKind::Preserve);
+        assert!(operation.expected_previous_hash.is_some());
+        assert!(!operation.rollback_required);
+    }
+    assert_eq!(plan.conflict_count, 0);
+    Ok(())
+}
+
+#[test]
+fn missing_plugin_version_is_added_normally() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    add_plugin_payloads(&mut fixture)?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    for source in [PLUGIN_MARKER_SOURCE, PLUGIN_RUNTIME_SOURCE] {
+        let operation = operation_for(&plan.operations, source);
+        assert_eq!(operation.action, ChangeKind::Add);
+        assert!(operation.rollback_required);
+    }
+    assert_eq!(plan.conflict_count, 0);
+    Ok(())
+}
+
+#[test]
+fn plugin_root_without_its_marker_remains_a_conflict() -> Result<(), Box<dyn Error>> {
+    let mut fixture = planner_fixture(None)?;
+    add_plugin_payloads(&mut fixture)?;
+    fs::create_dir_all(
+        fixture
+            .target
+            .codex_home
+            .join("plugins/cache/openai-bundled/browser/1.2.3"),
+    )?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(
+        operation_for(&plan.operations, PLUGIN_MARKER_SOURCE).action,
+        ChangeKind::Conflict
+    );
+    assert_eq!(
+        operation_for(&plan.operations, PLUGIN_RUNTIME_SOURCE).action,
+        ChangeKind::Conflict
+    );
+    assert_eq!(plan.conflict_count, 2);
+    Ok(())
+}
+
+#[test]
+fn existing_skill_with_different_content_remains_a_conflict() -> Result<(), Box<dyn Error>> {
+    let fixture = planner_fixture(None)?;
+    let target = fixture.target.codex_home.join("skills/example/SKILL.md");
+    fs::create_dir_all(target.parent().unwrap())?;
+    fs::write(&target, b"# Keep local skill\n")?;
+
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+
+    assert_eq!(
+        operation_for(&plan.operations, "codex/skills/example/SKILL.md").action,
+        ChangeKind::Conflict
+    );
+    assert_eq!(plan.conflict_count, 1);
     Ok(())
 }
 
@@ -995,8 +1085,9 @@ fn maps_project_targets_with_the_target_operating_system_syntax() -> Result<(), 
 #[test]
 fn package_projects_cannot_silently_share_a_target_directory() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let preview = project_preview(temp.path(), true)?;
-    let target_root = temp.path().join("target");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let preview = project_preview(&temp_root, true)?;
+    let target_root = temp_root.join("target");
     let target = TargetInventory {
         codex_home: target_root.join(".codex"),
         target_os: current_source_os(),
@@ -1204,10 +1295,38 @@ fn derived_ids_are_reserved_against_future_planned_imports() -> Result<(), Box<d
     Ok(())
 }
 
+fn add_plugin_payloads(fixture: &mut PlannerFixture) -> Result<(), Box<dyn Error>> {
+    let mut manifest = fixture.preview.manifest.clone();
+    manifest.counts.plugins = 1;
+    let session = incoming_session_bytes();
+    let threads = thread_metadata_bytes();
+    let index = index_bytes();
+    write_package(
+        &fixture.preview.package_path,
+        &manifest,
+        &[
+            (THREADS_SOURCE, threads.as_slice()),
+            (INDEX_SOURCE, index.as_slice()),
+            (SESSION_SOURCE, session.as_slice()),
+            ("codex/skills/example/SKILL.md", b"# Example\n"),
+            (PLUGIN_MARKER_SOURCE, b"windows marker\n"),
+            (PLUGIN_RUNTIME_SOURCE, b"windows runtime\n"),
+            (PROJECT_SOURCE, b"incoming project\n"),
+            (
+                "projects/22222222-2222-4222-8222-222222222222/project.json",
+                b"{}",
+            ),
+        ],
+    )?;
+    fixture.preview = inspect_package(&fixture.preview.package_path)?;
+    Ok(())
+}
+
 fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let package_path = temp.path().join("handoff.rehome");
-    let target_root = temp.path().join("target");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let package_path = temp_root.join("handoff.rehome");
+    let target_root = temp_root.join("target");
     let codex_home = target_root.join(".codex");
     let projects_root = target_root.join("projects");
     fs::create_dir_all(&codex_home)?;
@@ -1284,9 +1403,10 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
 
 fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let package_path = temp.path().join("shared-metadata.rehome");
-    let codex_home = temp.path().join("target").join(".codex");
-    let projects_root = temp.path().join("target").join("projects");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let package_path = temp_root.join("shared-metadata.rehome");
+    let codex_home = temp_root.join("target").join(".codex");
+    let projects_root = temp_root.join("target").join("projects");
     fs::create_dir_all(&codex_home)?;
     create_target_database(&codex_home.join("state_5.sqlite"))?;
 

@@ -143,6 +143,7 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
         (ChangeKind::Add, "add"),
         (ChangeKind::Update, "update"),
         (ChangeKind::Unchanged, "unchanged"),
+        (ChangeKind::Preserve, "preserve"),
         (ChangeKind::Conflict, "conflict"),
     ];
     let session_actions = [

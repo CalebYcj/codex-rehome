@@ -20,6 +20,7 @@ use std::{
     cell::RefCell,
     error::Error,
     ffi::OsString,
+    fs,
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Barrier},
@@ -244,9 +245,10 @@ fn session_index_merge_preserves_newer_target_metadata_and_unrelated_duplicate_r
 fn sqlite_import_uses_existing_allowlisted_columns_and_preserves_target_only_values(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
-    let memory = temp.path().join("memory.sqlite");
-    let goals = temp.path().join("goals.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
+    let memory = temp_root.join("memory.sqlite");
+    let goals = temp_root.join("goals.sqlite");
     std::fs::write(&memory, b"memory untouched")?;
     std::fs::write(&goals, b"goals untouched")?;
     let connection = Connection::open(&database)?;
@@ -314,7 +316,8 @@ fn sqlite_import_uses_existing_allowlisted_columns_and_preserves_target_only_val
 fn sqlite_existing_row_update_preserves_required_target_only_column_without_default(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TABLE threads (
@@ -372,7 +375,8 @@ fn sqlite_existing_row_update_preserves_required_target_only_column_without_defa
 fn sqlite_missing_row_imports_portable_fields_required_by_current_codex(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TABLE threads (
@@ -451,7 +455,8 @@ fn sqlite_missing_row_imports_portable_fields_required_by_current_codex(
 fn sqlite_missing_row_required_target_only_column_fails_without_changing_database(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TABLE threads (
@@ -490,15 +495,16 @@ fn sqlite_missing_row_required_target_only_column_fails_without_changing_databas
 fn sqlite_import_rejects_hard_linked_database_without_touching_either_name(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
-    let alias = temp.path().join("state_alias.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
+    let alias = temp_root.join("state_alias.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, rollout_path TEXT);",
     )?;
     drop(connection);
     std::fs::hard_link(&database, &alias)?;
-    let lock = temp.path().join(".state_5.sqlite.codex-rehome.lock");
+    let lock = temp_root.join(".state_5.sqlite.codex-rehome.lock");
     std::fs::write(&lock, b"another restore")?;
     let before = std::fs::read(&database)?;
     let metadata = serde_json::to_vec(&serde_json::json!([{
@@ -529,13 +535,14 @@ fn sqlite_import_rejects_hard_linked_database_without_touching_either_name(
 fn sqlite_import_honors_the_database_cas_lock_without_changing_rows() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, rollout_path TEXT);",
     )?;
     drop(connection);
-    let lock = temp.path().join(".state_5.sqlite.codex-rehome.lock");
+    let lock = temp_root.join(".state_5.sqlite.codex-rehome.lock");
     std::fs::write(&lock, b"another restore")?;
     let before = std::fs::read(&database)?;
     let metadata = serde_json::to_vec(&serde_json::json!([{
@@ -565,7 +572,8 @@ fn sqlite_import_honors_the_database_cas_lock_without_changing_rows() -> Result<
 fn sqlite_import_updates_a_live_wal_database_in_place_and_survives_reopen(
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -637,7 +645,8 @@ fn sqlite_import_updates_a_live_wal_database_in_place_and_survives_reopen(
 fn sqlite_import_merges_with_a_pinned_stale_wal_and_survives_reopen() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let writer = Connection::open(&database)?;
     writer.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -691,7 +700,8 @@ fn sqlite_import_merges_with_a_pinned_stale_wal_and_survives_reopen() -> Result<
 #[test]
 fn sqlite_import_rolls_back_every_row_when_a_later_row_fails() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("state_5.sqlite");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let database = temp_root.join("state_5.sqlite");
     let connection = Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TABLE threads (

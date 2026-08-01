@@ -222,6 +222,7 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 .change-add { color: #176849; background: #e1f1e9; }
 .change-update { color: #315f83; background: #e3edf5; }
 .change-unchanged { color: #66736c; background: #edf0ee; }
+.change-preserve { color: #4f6258; background: #e7eee9; }
 .change-conflict { color: #a04036; background: #f8e6e3; }
 .confirmation-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; padding: 12px 13px; background: #fff7e6; border: 1px solid #ead8ad; border-radius: 6px; cursor: pointer; }
 .confirmation-row span { display: grid; gap: 3px; }

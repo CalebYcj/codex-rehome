@@ -548,6 +548,34 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByRole("button", { name: "开始恢复" })).toBeDisabled();
   });
 
+  it("labels preserved local plugins without blocking restore", async () => {
+    const user = userEvent.setup();
+    api.buildRestorePlan.mockResolvedValue({
+      ...basePlan,
+      operations: [
+        basePlan.operations[0],
+        {
+          package_source: "codex/plugins/cache/openai-bundled/browser/1.2.3/.codex-plugin/plugin.json",
+          target: "C:\\Users\\Me\\.codex\\plugins\\cache\\openai-bundled\\browser\\1.2.3\\.codex-plugin\\plugin.json",
+          expected_previous_hash: "local-plugin-hash",
+          action: "preserve",
+          rollback_required: false,
+        },
+      ],
+      conflict_count: 0,
+      required_bytes: basePlan.required_bytes,
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    await openReceive(user);
+
+    expect(screen.getByText("保留本机")).toBeVisible();
+    expect(screen.getByText("冲突 0")).toBeVisible();
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
+    expect(screen.getByRole("button", { name: "开始恢复" })).toBeEnabled();
+  });
+
   it("disables every native picker while a location selection is pending", async () => {
     const user = userEvent.setup();
     const pending = deferred<Awaited<ReturnType<typeof api.selectRestoreDestinations>>>();

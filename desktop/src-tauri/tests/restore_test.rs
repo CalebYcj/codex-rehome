@@ -73,6 +73,54 @@ fn successful_restore_commits_with_layered_verification() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn preserved_plugin_version_is_not_written_or_backed_up() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let (plan, marker, runtime) = plan_existing_plugin_version(&harness)?;
+    let marker_before = fs::read(&marker)?;
+    let runtime_before = fs::read(&runtime)?;
+
+    assert!(plan
+        .operations
+        .iter()
+        .filter(|operation| operation.package_source.starts_with("codex/plugins/cache/"))
+        .all(|operation| operation.action == ChangeKind::Preserve));
+    assert_eq!(plan.conflict_count, 0);
+
+    let report = apply_restore(plan, harness.options())?;
+
+    assert!(report.verification.files_valid);
+    assert_eq!(fs::read(marker)?, marker_before);
+    assert_eq!(fs::read(runtime)?, runtime_before);
+    let journal = harness.read_journal(report.transaction_id)?;
+    assert!(journal["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|operation| {
+            !operation["package_source"]
+                .as_str()
+                .is_some_and(|source| source.starts_with("codex/plugins/cache/"))
+        }));
+    Ok(())
+}
+
+#[test]
+fn preserved_plugin_change_after_planning_stops_before_transaction() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let (plan, _, runtime) = plan_existing_plugin_version(&harness)?;
+    fs::write(&runtime, b"changed after planning\n")?;
+
+    let error = apply_restore(plan, harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error
+        .message
+        .contains("preserved target changed after planning"));
+    assert!(!harness.transactions_dir().exists());
+    Ok(())
+}
+
+#[test]
 fn transaction_history_lists_committed_and_rolled_back_journals_without_mutation(
 ) -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
@@ -1442,6 +1490,50 @@ fn align_fixture_project_metadata(fixture: &SyntheticCodexFixture) -> Result<(),
     Connection::open(&fixture.state_db_path)?
         .execute("UPDATE threads SET cwd = ?1", [&source_project])?;
     Ok(())
+}
+
+fn plan_existing_plugin_version(
+    harness: &RestoreHarness,
+) -> Result<(RestorePlan, PathBuf, PathBuf), Box<dyn Error>> {
+    let source_root = harness
+        ._fixture
+        .plugin_manifest_path
+        .parent()
+        .ok_or("plugin marker has no parent")?;
+    fs::write(source_root.join("runtime.js"), b"windows runtime\n")?;
+    let package_path = harness._fixture.root.join("plugin-handoff.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: harness._fixture.codex_home.clone(),
+        project_paths: vec![harness._fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package_path.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![harness._fixture.plugin_manifest_path.clone()],
+        generated_image_paths: vec![],
+    })?;
+
+    let target_root = harness
+        .plan
+        .target_codex_home
+        .join("plugins/cache/synthetic-plugin");
+    fs::create_dir_all(&target_root)?;
+    let marker = target_root.join("manifest.json");
+    let runtime = target_root.join("runtime.js");
+    fs::write(&marker, b"mac marker\n")?;
+    fs::write(&runtime, b"mac runtime\n")?;
+
+    let preview = inspect_package(&package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+    Ok((plan, marker, runtime))
 }
 
 fn snapshot_mutable_targets(

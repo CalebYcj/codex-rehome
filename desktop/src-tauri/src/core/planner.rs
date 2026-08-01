@@ -21,12 +21,26 @@ use uuid::Uuid;
 
 const SESSION_INDEX_SOURCE: &str = "codex/session_index.jsonl";
 const THREAD_METADATA_SOURCE: &str = "codex/metadata/threads.json";
+const PLUGIN_CACHE_PREFIX: &str = "codex/plugins/cache/";
+const MODERN_PLUGIN_MARKER_SUFFIX: &str = "/.codex-plugin/plugin.json";
 
 #[derive(Debug)]
 enum TargetState {
     Missing,
     File(String),
     Other,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PluginRootDisposition {
+    Preserve,
+    Conflict,
+}
+
+#[derive(Debug)]
+struct PluginRootDecision {
+    archive_root: String,
+    disposition: PluginRootDisposition,
 }
 
 type SessionDecision = (
@@ -58,6 +72,8 @@ pub fn build_restore_plan(
         ));
     }
     let payloads = &verified.payloads;
+    let plugin_root_decisions =
+        plugin_root_decisions(payloads, &target.codex_home, target.target_os)?;
 
     let mut operations = Vec::new();
     let mut sessions = Vec::new();
@@ -300,12 +316,13 @@ pub fn build_restore_plan(
             continue;
         }
         let target_path = codex_target_path(&target.codex_home, source, target.target_os)?;
-        operations.push(classify_file(
-            source,
-            target_path,
-            payload,
-            target.target_os,
-        )?);
+        let operation = match plugin_decision_for_source(source, &plugin_root_decisions) {
+            Some(disposition) => {
+                classify_plugin_file(source, target_path, disposition, target.target_os)?
+            }
+            None => classify_file(source, target_path, payload, target.target_os)?,
+        };
+        operations.push(operation);
     }
 
     operations.sort_by(|left, right| left.package_source.cmp(&right.package_source));
@@ -442,6 +459,123 @@ fn classify_file(
         expected_previous_hash,
         action,
         rollback_required: matches!(action, ChangeKind::Add | ChangeKind::Update),
+    })
+}
+
+fn plugin_root_decisions(
+    payloads: &BTreeMap<String, VerifiedPayload>,
+    codex_home: &Path,
+    target_os: SourceOs,
+) -> Result<Vec<PluginRootDecision>, RehomeError> {
+    let mut candidates = BTreeMap::new();
+    for source in payloads.keys() {
+        let root = if let Some(root) = source.strip_suffix(MODERN_PLUGIN_MARKER_SUFFIX) {
+            Some(root)
+        } else if source.starts_with(PLUGIN_CACHE_PREFIX) && source.ends_with("/manifest.json") {
+            source.rsplit_once('/').map(|(parent, _)| parent)
+        } else {
+            None
+        };
+        let Some(root) = root.filter(|root| {
+            root.strip_prefix(PLUGIN_CACHE_PREFIX)
+                .is_some_and(|relative| !relative.is_empty())
+        }) else {
+            continue;
+        };
+        candidates
+            .entry(root.to_owned())
+            .or_insert_with(|| source.clone());
+    }
+
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.0
+            .split('/')
+            .count()
+            .cmp(&right.0.split('/').count())
+            .then(left.0.cmp(&right.0))
+    });
+    let mut selected: Vec<(String, String)> = Vec::new();
+    for candidate in candidates {
+        if selected.iter().any(|(root, _)| {
+            candidate.0 == *root
+                || candidate
+                    .0
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            continue;
+        }
+        selected.push(candidate);
+    }
+
+    let mut decisions = Vec::new();
+    for (archive_root, marker_source) in selected {
+        let target_marker = codex_target_path(codex_home, &marker_source, target_os)?;
+        let disposition = match target_state(&target_marker, target_os)? {
+            TargetState::File(_) => PluginRootDisposition::Preserve,
+            TargetState::Other => PluginRootDisposition::Conflict,
+            TargetState::Missing => {
+                let target_root = codex_target_path(codex_home, &archive_root, target_os)?;
+                match fs::symlink_metadata(&target_root) {
+                    Ok(_) => PluginRootDisposition::Conflict,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(restore_failed(format!(
+                            "could not inspect target plugin root {}: {error}",
+                            target_root.display()
+                        )))
+                    }
+                }
+            }
+        };
+        decisions.push(PluginRootDecision {
+            archive_root,
+            disposition,
+        });
+    }
+    Ok(decisions)
+}
+
+fn plugin_decision_for_source(
+    source: &str,
+    decisions: &[PluginRootDecision],
+) -> Option<PluginRootDisposition> {
+    decisions
+        .iter()
+        .find(|decision| {
+            source
+                .strip_prefix(&decision.archive_root)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+        .map(|decision| decision.disposition)
+}
+
+fn classify_plugin_file(
+    source: &str,
+    target: PathBuf,
+    disposition: PluginRootDisposition,
+    target_os: SourceOs,
+) -> Result<PlannedOperation, RehomeError> {
+    let state = target_state(&target, target_os)?;
+    let (action, expected_previous_hash) = match (disposition, state) {
+        (PluginRootDisposition::Preserve, TargetState::File(hash)) => {
+            (ChangeKind::Preserve, Some(hash))
+        }
+        (PluginRootDisposition::Preserve, TargetState::Missing) => (ChangeKind::Preserve, None),
+        (PluginRootDisposition::Preserve, TargetState::Other)
+        | (PluginRootDisposition::Conflict, TargetState::Other)
+        | (PluginRootDisposition::Conflict, TargetState::Missing) => (ChangeKind::Conflict, None),
+        (PluginRootDisposition::Conflict, TargetState::File(hash)) => {
+            (ChangeKind::Conflict, Some(hash))
+        }
+    };
+    Ok(PlannedOperation {
+        package_source: source.to_owned(),
+        target,
+        expected_previous_hash,
+        action,
+        rollback_required: false,
     })
 }
 

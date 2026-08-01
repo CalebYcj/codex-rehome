@@ -161,6 +161,7 @@ pub enum ChangeKind {
     Add,
     Update,
     Unchanged,
+    Preserve,
     Conflict,
 }
 

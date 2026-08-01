@@ -7,7 +7,7 @@ export type RecoveryStatus =
   | "rolling_back"
   | "rolled_back"
   | "rollback_failed";
-export type ChangeKind = "add" | "update" | "unchanged" | "conflict";
+export type ChangeKind = "add" | "update" | "unchanged" | "preserve" | "conflict";
 export type RegistrationStatus =
   | "registered"
   | "command_unavailable"

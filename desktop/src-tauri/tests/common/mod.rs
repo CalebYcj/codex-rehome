@@ -30,7 +30,7 @@ pub struct SyntheticCodexFixture {
 
 pub fn synthetic_codex_fixture() -> Result<SyntheticCodexFixture, Box<dyn Error>> {
     let temp_dir = tempfile::tempdir()?;
-    let root = temp_dir.path().to_path_buf();
+    let root = fs::canonicalize(temp_dir.path())?;
     let codex_home = root.join(".codex");
     let session_path = codex_home
         .join("sessions")

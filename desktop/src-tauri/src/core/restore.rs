@@ -74,6 +74,7 @@ fn apply_server_plan(
             "restore package contains forbidden files",
         ));
     }
+    validate_preserved_targets(&plan)?;
     let mut transaction = prepare_transaction(&plan, &options.backup_root)?;
 
     let result = apply_transaction(&plan, &options, &verified, &mut transaction, &mut registrar);
@@ -350,6 +351,12 @@ fn verify_plain_files(plan: &RestorePlan, verified: &VerifiedPackage) -> Result<
         {
             continue;
         }
+        if operation.action == ChangeKind::Preserve {
+            if !preserved_target_matches(operation)? {
+                return Ok(false);
+            }
+            continue;
+        }
         let expected = &verified
             .payloads
             .get(&operation.package_source)
@@ -362,6 +369,47 @@ fn verify_plain_files(plan: &RestorePlan, verified: &VerifiedPackage) -> Result<
         }
     }
     Ok(true)
+}
+
+fn validate_preserved_targets(plan: &RestorePlan) -> Result<(), RehomeError> {
+    for operation in plan
+        .operations
+        .iter()
+        .filter(|operation| operation.action == ChangeKind::Preserve)
+    {
+        if !preserved_target_matches(operation)? {
+            return Err(restore_failed(format!(
+                "preserved target changed after planning: {}",
+                operation.target.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn preserved_target_matches(
+    operation: &crate::core::models::PlannedOperation,
+) -> Result<bool, RehomeError> {
+    let metadata = match fs::symlink_metadata(&operation.target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(operation.expected_previous_hash.is_none())
+        }
+        Err(error) => {
+            return Err(restore_failed(format!(
+                "could not inspect preserved target {}: {error}",
+                operation.target.display()
+            )))
+        }
+    };
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Ok(false);
+    }
+    let Some(expected) = operation.expected_previous_hash.as_deref() else {
+        return Ok(false);
+    };
+    Ok(hash_optional_file(&operation.target)?
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(expected)))
 }
 
 fn verify_project_files(
@@ -618,6 +666,20 @@ fn hash_optional_file(path: &Path) -> Result<Option<String>, RehomeError> {
         }
     };
     Ok(Some(format!("{:x}", Sha256::digest(bytes))))
+}
+
+#[cfg(windows)]
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn timestamp() -> String {

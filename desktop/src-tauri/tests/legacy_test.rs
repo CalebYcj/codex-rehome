@@ -6,7 +6,13 @@ use rehome_desktop_lib::core::{
 use rusqlite::Connection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, error::Error, fs::File, io::Write, path::Path};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fs::{self, File},
+    io::Write,
+    path::Path,
+};
 use uuid::Uuid;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -55,11 +61,12 @@ fn imports_schema_v3_as_the_normal_package_preview() -> Result<(), Box<dyn Error
 #[test]
 fn schema_v3_payloads_enter_the_normal_restore_plan() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let package = temp.path().join("legacy.zip");
+    let temp_root = fs::canonicalize(temp.path())?;
+    let package = temp_root.join("legacy.zip");
     write_legacy_package(&package)?;
     let preview = inspect_package(&package)?;
-    let codex_home = temp.path().join("target").join(".codex");
-    let projects_root = temp.path().join("restored-projects");
+    let codex_home = temp_root.join("target").join(".codex");
+    let projects_root = temp_root.join("restored-projects");
     std::fs::create_dir_all(&codex_home)?;
     std::fs::create_dir_all(&projects_root)?;
     let database = Connection::open(codex_home.join("state_5.sqlite"))?;

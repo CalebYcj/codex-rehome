@@ -268,7 +268,7 @@ function sourceOsLabel(os: "windows" | "macos"): string {
 }
 
 function changeLabel(change: RestorePlan["operations"][number]["action"]): string {
-  return { add: "新增", update: "更新", unchanged: "不变", conflict: "冲突" }[change];
+  return { add: "新增", update: "更新", unchanged: "不变", preserve: "保留本机", conflict: "冲突" }[change];
 }
 
 function formatBytes(bytes: number): string {
