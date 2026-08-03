@@ -33,7 +33,7 @@ const SCHEMA_VERSION: u32 = 1;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_INSPECTION_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_INSPECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
@@ -1068,9 +1068,11 @@ fn copy_source_to_staging_once(
 ) -> Result<StableCopyAttempt<Payload>, RehomeError> {
     let before = source_fingerprint(source)?;
     if before.length > MAX_ARCHIVE_ENTRY_BYTES {
-        return Err(package_invalid(
-            "package source entry exceeds the size limit",
-        ));
+        return Err(package_invalid(format!(
+            "package source entry {archive_path} is {} and exceeds the {} per-file limit; move this large file separately or deselect its project",
+            format_package_bytes(before.length),
+            format_package_bytes(MAX_ARCHIVE_ENTRY_BYTES),
+        )));
     }
     let destination = staging_root.join(Path::new(&archive_path));
     if let Some(parent) = destination.parent() {
@@ -1213,6 +1215,34 @@ struct ArchiveEntry {
     permissions: u32,
 }
 
+fn format_package_bytes(bytes: u64) -> String {
+    const MIB: f64 = (1024_u64 * 1024) as f64;
+    const GIB: f64 = (1024_u64 * 1024 * 1024) as f64;
+
+    if bytes >= 1024_u64 * 1024 * 1024 {
+        format!("{:.2} GiB ({bytes} bytes)", bytes as f64 / GIB)
+    } else {
+        format!("{:.2} MiB ({bytes} bytes)", bytes as f64 / MIB)
+    }
+}
+
+fn checked_staged_total_bytes(current: u64, next: u64) -> Result<u64, RehomeError> {
+    let total = current.checked_add(next).ok_or_else(|| {
+        package_invalid(format!(
+            "staged package size overflowed the {} limit; deselect large project files or generated images and try again",
+            format_package_bytes(MAX_INSPECTION_BYTES),
+        ))
+    })?;
+    if total > MAX_INSPECTION_BYTES {
+        return Err(package_invalid(format!(
+            "staged package size {} exceeds the {} limit; deselect large project files or generated images and try again",
+            format_package_bytes(total),
+            format_package_bytes(MAX_INSPECTION_BYTES),
+        )));
+    }
+    Ok(total)
+}
+
 fn staged_archive_entries(
     staging_root: &Path,
     payloads: &PayloadCollection,
@@ -1245,16 +1275,13 @@ fn staged_archive_entries(
                 })?
                 .len();
             if size > MAX_ARCHIVE_ENTRY_BYTES {
-                return Err(package_invalid(
-                    "staged package entry exceeds the size limit",
-                ));
+                return Err(package_invalid(format!(
+                    "staged package entry {name} is {} and exceeds the {} per-file limit; move this large file separately or deselect its project",
+                    format_package_bytes(size),
+                    format_package_bytes(MAX_ARCHIVE_ENTRY_BYTES),
+                )));
             }
-            total_bytes = total_bytes
-                .checked_add(size)
-                .ok_or_else(|| package_invalid("staged package exceeds the size limit"))?;
-            if total_bytes > MAX_INSPECTION_BYTES {
-                return Err(package_invalid("staged package exceeds the size limit"));
-            }
+            total_bytes = checked_staged_total_bytes(total_bytes, size)?;
             let executable = payloads
                 .entries
                 .get(&name)
@@ -1490,6 +1517,28 @@ mod authenticated_payload_tests {
 
         assert_eq!(copied, "stable");
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn staged_total_size_accepts_a_ten_gib_package() {
+        let nine_gib = 9_u64 * 1024 * 1024 * 1024;
+        let one_gib = 1024_u64 * 1024 * 1024;
+
+        let total = checked_staged_total_bytes(nine_gib, one_gib).unwrap();
+
+        assert_eq!(total, 10_u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn staged_total_size_error_reports_the_actual_size_and_limit() {
+        let actual = MAX_INSPECTION_BYTES + 1;
+
+        let error = checked_staged_total_bytes(MAX_INSPECTION_BYTES, 1).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PackageInvalid);
+        assert!(error.message.contains(&actual.to_string()));
+        assert!(error.message.contains(&MAX_INSPECTION_BYTES.to_string()));
+        assert!(error.message.contains("deselect large project files"));
     }
 }
 
