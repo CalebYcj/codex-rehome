@@ -33,6 +33,7 @@ export interface ProjectEntry {
   project_id: string;
   name: string;
   source_path: string;
+  source_available: boolean;
   archive_path: string;
   file_count: number;
   content_bytes: number;

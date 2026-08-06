@@ -129,6 +129,9 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 .project-list { display: grid; border: 1px solid #dce3df; border-radius: 6px; overflow: hidden; }
 .project-choice { background: #fff; border-bottom: 1px solid #e4e9e6; }
 .project-choice:last-child { border-bottom: 0; }
+.project-choice-missing { background: #fbfaf7; }
+.project-choice-missing .project-file-toggle { cursor: default; }
+.project-choice-missing .project-copy small { color: #9a6638; }
 .project-choice-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; min-height: 58px; }
 .project-choice-header:hover { background: #f4f8f6; }
 .project-file-toggle { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 10px; min-width: 0; padding: 9px 13px; cursor: pointer; }

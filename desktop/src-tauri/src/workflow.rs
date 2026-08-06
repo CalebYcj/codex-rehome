@@ -700,11 +700,17 @@ pub(crate) fn resolve_create_package_request(
         .map(|project_id| {
             projects_by_id
                 .get(project_id)
-                .map(|project| PathBuf::from(&project.source_path))
+                .and_then(|project| {
+                    project
+                        .source_available
+                        .then(|| PathBuf::from(&project.source_path))
+                })
                 .ok_or_else(|| {
                     selection_failed(
                         ErrorCode::ProjectConflict,
-                        format!("selected project {project_id} is not in fresh discovery"),
+                        format!(
+                            "selected project {project_id} is missing or is not available in fresh discovery; rescan and select its conversations instead"
+                        ),
                     )
                 })
         })

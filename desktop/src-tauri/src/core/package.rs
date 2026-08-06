@@ -671,6 +671,7 @@ fn stage_projects(
             project_id,
             name,
             source_path: canonical.to_string_lossy().into_owned(),
+            source_available: true,
             archive_path: archive_root,
             file_count,
             content_bytes,

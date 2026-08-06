@@ -360,6 +360,7 @@ fn build_projects(
             project_id,
             name: name.clone(),
             source_path,
+            source_available: true,
             archive_path: modern_root,
             file_count,
             content_bytes,
