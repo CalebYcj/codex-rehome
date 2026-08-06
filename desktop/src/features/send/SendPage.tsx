@@ -64,7 +64,7 @@ export default function SendPage({
     projects.size + conversations.size + skills.size + plugins.size + images.size > 0;
   const hasSelectableContent = Boolean(
     inventory &&
-      inventory.projects.length +
+      inventory.projects.filter((project) => project.source_available).length +
         inventory.conversations.length +
         inventory.skills.length +
         inventory.plugins.length +
@@ -74,7 +74,9 @@ export default function SendPage({
   const allContentSelected = Boolean(
     inventory &&
       hasSelectableContent &&
-      inventory.projects.every((project) => projects.has(project.project_id)) &&
+      inventory.projects
+        .filter((project) => project.source_available)
+        .every((project) => projects.has(project.project_id)) &&
       inventory.conversations.every((conversation) => conversations.has(conversation.task_id)) &&
       inventory.skills.every((skill) => skills.has(skill.content_id)) &&
       inventory.plugins.every((plugin) => plugins.has(plugin.content_id)) &&
@@ -125,7 +127,13 @@ export default function SendPage({
       return;
     }
 
-    setProjects(new Set(inventory.projects.map((project) => project.project_id)));
+    setProjects(
+      new Set(
+        inventory.projects
+          .filter((project) => project.source_available)
+          .map((project) => project.project_id),
+      ),
+    );
     setConversations(new Set(inventory.conversations.map((conversation) => conversation.task_id)));
     setSkills(new Set(inventory.skills.map((skill) => skill.content_id)));
     setPlugins(new Set(inventory.plugins.map((plugin) => plugin.content_id)));
@@ -201,6 +209,7 @@ export default function SendPage({
               name={project.name}
               path={formatDisplayPath(project.source_path)}
               fileCount={project.file_count}
+              sourceAvailable={project.source_available}
               conversations={project.conversations}
               projectSelected={projects.has(project.project_id)}
               expanded={expanded.has(project.project_id)}
@@ -305,6 +314,7 @@ interface ProjectChoiceProps {
   name: string;
   path: string;
   fileCount: number | null;
+  sourceAvailable?: boolean;
   conversations: ConversationEntry[];
   projectSelected: boolean;
   expanded: boolean;
@@ -315,22 +325,26 @@ interface ProjectChoiceProps {
   onSelectRecommended: () => void;
 }
 
-function ProjectChoice({ name, path, fileCount, conversations, projectSelected, expanded, selectedConversations, onToggleProject, onToggleExpanded, onToggleConversation, onSelectRecommended }: ProjectChoiceProps) {
+function ProjectChoice({ name, path, fileCount, sourceAvailable = true, conversations, projectSelected, expanded, selectedConversations, onToggleProject, onToggleExpanded, onToggleConversation, onSelectRecommended }: ProjectChoiceProps) {
   const subagents = conversations.filter((conversation) => conversation.classification).length;
   const mainConversations = conversations.length - subagents;
   return (
-    <div className="project-choice">
+    <div className={`project-choice${sourceAvailable ? "" : " project-choice-missing"}`}>
       <div className="project-choice-header">
         {onToggleProject ? (
           <label className="project-file-toggle">
-            <input type="checkbox" checked={projectSelected} onChange={onToggleProject} aria-label={`选择项目 ${name}`} />
-            <span className="project-copy"><strong>{name}</strong><code>{path}</code></span>
+            <input type="checkbox" checked={projectSelected} onChange={onToggleProject} disabled={!sourceAvailable} aria-label={`选择项目 ${name}`} />
+            <span className="project-copy">
+              <strong>{name}</strong>
+              <code>{path}</code>
+              {!sourceAvailable && <small>项目文件夹已不存在，仅可迁移下面的对话</small>}
+            </span>
           </label>
         ) : (
           <span className="project-copy project-copy-unassociated"><strong>{name}</strong><small>{path}</small></span>
         )}
         <button className="project-expand" type="button" aria-expanded={expanded} aria-label={`${expanded ? "收起" : "展开"}项目 ${name}`} onClick={onToggleExpanded}>
-          <span>{conversations.length} 个对话{fileCount !== null && ` · ${fileCount || "已检测"} 个文件`}</span>
+          <span>{conversations.length} 个对话{fileCount !== null && (sourceAvailable ? ` · ${fileCount || "已检测"} 个文件` : " · 项目文件缺失")}</span>
           {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         </button>
       </div>

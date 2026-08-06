@@ -44,6 +44,7 @@ const inventory = {
       project_id: "22222222-2222-2222-2222-222222222222",
       name: "rehome-app",
       source_path: "C:\\Work\\rehome-app",
+      source_available: true,
       archive_path: "projects/rehome-app",
       file_count: 12,
       content_bytes: 2048,
@@ -55,6 +56,7 @@ const inventory = {
       project_id: "33333333-3333-3333-3333-333333333333",
       name: "notes",
       source_path: "C:\\Work\\notes",
+      source_available: true,
       archive_path: "projects/notes",
       file_count: 6,
       content_bytes: 1024,
@@ -377,6 +379,32 @@ describe("ReHome Desktop workflows", () => {
 
     expect(selectAll).not.toBeChecked();
     expect(screen.getByRole("button", { name: "创建 ReHome 包" })).toBeDisabled();
+  });
+
+  it("keeps conversations selectable when a registered project folder was deleted", async () => {
+    const user = userEvent.setup();
+    api.discoverCodex.mockResolvedValue({
+      ...inventory,
+      projects: inventory.projects.map((project) =>
+        project.name === "notes" ? { ...project, source_available: false } : project,
+      ),
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往发送" }));
+
+    expect(screen.getByRole("checkbox", { name: "选择项目 notes" })).toBeDisabled();
+    expect(screen.getByText("项目文件夹已不存在，仅可迁移下面的对话")).toBeVisible();
+
+    await user.click(screen.getByRole("checkbox", { name: "全选迁移内容" }));
+    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+
+    expect(api.createPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_ids: [inventory.projects[0].project_id],
+        conversation_ids: inventory.conversations.map((conversation) => conversation.task_id),
+      }),
+    );
   });
 
   it("allows a conversation-only package without selecting project files", async () => {

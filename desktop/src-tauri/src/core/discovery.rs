@@ -214,6 +214,8 @@ fn discovered_projects(paths: &[PathBuf]) -> Vec<ProjectEntry> {
                 project_id,
                 name,
                 source_path,
+                source_available: fs::symlink_metadata(&source)
+                    .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink()),
                 archive_path: format!("projects/{project_id}/files"),
                 file_count: 0,
                 content_bytes: 0,

@@ -61,6 +61,7 @@ fn populated_manifest_preserves_source_syntax_and_portable_archive_paths() {
             project_id,
             name: "visual".into(),
             source_path: r"C:\Users\OldUser\Documents\visual".into(),
+            source_available: true,
             archive_path: "projects/22222222-2222-4222-8222-222222222222/files".into(),
             file_count: 1,
             content_bytes: 18,
@@ -98,6 +99,24 @@ fn populated_manifest_preserves_source_syntax_and_portable_archive_paths() {
         json["conversations"][0]["archive_path"],
         "codex/sessions/2026/07/22/thread.jsonl"
     );
+}
+
+#[test]
+fn older_project_entries_default_to_an_available_source() {
+    let project = serde_json::from_value::<ProjectEntry>(serde_json::json!({
+        "project_id": "22222222-2222-4222-8222-222222222222",
+        "name": "visual",
+        "source_path": "C:\\Users\\OldUser\\Documents\\visual",
+        "archive_path": "projects/22222222-2222-4222-8222-222222222222/files",
+        "file_count": 1,
+        "content_bytes": 18,
+        "git_remote": null,
+        "git_branch": null,
+        "git_head": null
+    }))
+    .unwrap();
+
+    assert!(project.source_available);
 }
 
 #[test]

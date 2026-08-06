@@ -241,6 +241,29 @@ fn current_local_projects_are_authoritative_over_historical_thread_roots(
 }
 
 #[test]
+fn deleted_registered_project_is_reported_as_unavailable() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let codex_home = temp.path().join(".codex");
+    let missing = temp.path().join("deleted-project");
+    fs::create_dir_all(&codex_home)?;
+    fs::write(
+        codex_home.join(".codex-global-state.json"),
+        serde_json::to_vec(&json!({
+            "local-projects": {
+                "deleted": { "rootPaths": [missing] }
+            }
+        }))?,
+    )?;
+
+    let inventory = discover_codex_with_context(Some(codex_home), &DiscoveryContext::default())?;
+
+    assert_eq!(inventory.projects.len(), 1);
+    assert_eq!(inventory.projects[0].name, "deleted-project");
+    assert!(!inventory.projects[0].source_available);
+    Ok(())
+}
+
+#[test]
 fn plugin_inventory_uses_plugin_name_and_complete_version_root() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let codex_home = temp.path().join(".codex");

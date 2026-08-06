@@ -31,12 +31,18 @@ pub struct ProjectEntry {
     pub project_id: Uuid,
     pub name: String,
     pub source_path: String,
+    #[serde(default = "project_source_available_by_default")]
+    pub source_available: bool,
     pub archive_path: String,
     pub file_count: u64,
     pub content_bytes: u64,
     pub git_remote: Option<String>,
     pub git_branch: Option<String>,
     pub git_head: Option<String>,
+}
+
+fn project_source_available_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

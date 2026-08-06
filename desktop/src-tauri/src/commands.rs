@@ -183,6 +183,28 @@ mod tests {
     }
 
     #[test]
+    fn package_selection_rejects_a_deleted_registered_project_but_not_its_chat() {
+        let (mut inventory, selected_project, matching_chat, _, _) = inventory_fixture();
+        inventory.projects[0].source_available = false;
+
+        let error = resolve_create_package_request(
+            &inventory,
+            CreatePackageSelection {
+                project_ids: vec![selected_project],
+                conversation_ids: vec![matching_chat],
+                skill_ids: vec![],
+                plugin_ids: vec![],
+                generated_image_ids: vec![],
+            },
+            PathBuf::from("C:\\selected-by-native-dialog\\missing.rehome"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, crate::core::error::ErrorCode::ProjectConflict);
+        assert!(error.message.contains("select its conversations instead"));
+    }
+
+    #[test]
     fn production_discovery_ids_resolve_to_server_owned_package_paths() {
         let root = tempdir().expect("temporary root");
         let codex_home = root.path().join(".codex");
@@ -456,6 +478,7 @@ mod tests {
             project_id,
             name: name.into(),
             source_path: path.into(),
+            source_available: true,
             archive_path: format!("projects/{project_id}/files"),
             file_count: 1,
             content_bytes: 1,
