@@ -187,14 +187,14 @@ export default function ReceivePage({
   return (
     <div className="page receive-page">
       <header className="page-header">
-        <p className="eyebrow">RECEIVE</p>
-        <h1 ref={headingRef} tabIndex={-1}>{t("接收交接")}</h1>
-        <p className="page-description">{t("先检查包内容和目标差异，再执行本机恢复。")}</p>
+        <p className="eyebrow">IMPORT</p>
+        <h1 ref={headingRef} tabIndex={-1}>{t("导入 ReHome 包")}</h1>
+        <p className="page-description">{t("在新电脑选择迁移包，检查内容后导入本机 Codex。")}</p>
       </header>
 
       <section className="workflow-section" aria-labelledby="receive-package-title">
-        <div className="section-title-row"><div><span className="step-number">1</span><h2 id="receive-package-title">{t("检查迁移包")}</h2></div></div>
-        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>{t("ReHome 包")}</strong><small>{preview?.package_path ?? t("尚未选择")}</small></span></div><button className="secondary-button" type="button" onClick={() => void choosePackage()} disabled={phase !== "idle"}>{phase === "inspecting" ? <LoaderCircle className="spin" aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}{t("选择 ReHome 包")}</button></div>
+        <div className="section-title-row"><div><span className="step-number">1</span><h2 id="receive-package-title">{t("选择迁移包")}</h2></div></div>
+        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>{t("ReHome 迁移包")}</strong><small>{preview?.package_path ?? t("尚未选择")}</small></span></div><button className="secondary-button" type="button" onClick={() => void choosePackage()} disabled={phase !== "idle"}>{phase === "inspecting" ? <LoaderCircle className="spin" aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}{t("选择迁移包")}</button></div>
         {preview && (
           <div className="preview-band">
             <div className="preview-facts">
@@ -213,15 +213,15 @@ export default function ReceivePage({
       </section>
 
       <section className="workflow-section" aria-labelledby="receive-target-title">
-        <div className="section-title-row"><div><span className="step-number">2</span><h2 id="receive-target-title">{t("选择目标位置")}</h2></div></div>
+        <div className="section-title-row"><div><span className="step-number">2</span><h2 id="receive-target-title">{t("选择保存位置")}</h2></div></div>
         <PathPicker icon={HardDrive} label={t("Codex 数据位置")} value={locations?.target_codex_home ?? inventory?.codex_home ?? t("未检测")} />
-        <PathPicker icon={FolderOpen} label={t("项目恢复位置")} value={locations?.projects_root ?? t("尚未选择")} buttonLabel={t("选择恢复位置")} onClick={chooseLocations} disabled={!preview || phase !== "idle"} />
-        <div className="command-row"><p>{t("安全备份由 ReHome 自动管理")}</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}{t("生成恢复计划")}</button></div>
+        <PathPicker icon={FolderOpen} label={t("项目保存位置")} value={locations?.projects_root ?? t("尚未选择")} buttonLabel={t("选择项目保存位置")} onClick={chooseLocations} disabled={!preview || phase !== "idle"} />
+        <div className="command-row"><p>{t("安全备份由 ReHome 自动管理")}</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}{t("预览导入内容")}</button></div>
       </section>
 
       {plan && (
         <section className="workflow-section" aria-labelledby="restore-plan-title">
-          <div className="section-title-row"><div><span className="step-number">3</span><h2 id="restore-plan-title">{t("确认变更")}</h2></div><div className="plan-badges"><span>{t("需要 {size}", { size: formatBytes(plan.required_bytes) })}</span><span className={plan.conflict_count ? "status status-error" : "status status-success"}>{plan.conflict_count ? <AlertTriangle aria-hidden="true" /> : <CheckCircle2 aria-hidden="true" />}{t("冲突 {count}", { count: plan.conflict_count })}</span></div></div>
+          <div className="section-title-row"><div><span className="step-number">3</span><h2 id="restore-plan-title">{t("确认导入内容")}</h2></div><div className="plan-badges"><span>{t("需要 {size}", { size: formatBytes(plan.required_bytes) })}</span><span className={plan.conflict_count ? "status status-error" : "status status-success"}>{plan.conflict_count ? <AlertTriangle aria-hidden="true" /> : <CheckCircle2 aria-hidden="true" />}{t("冲突 {count}", { count: plan.conflict_count })}</span></div></div>
           <div className="destination-line"><span>{t("目标项目目录")}</span><code>{plan.projects_root}</code></div>
           <div className="table-wrap">
             <table className="conflict-table">
@@ -229,9 +229,9 @@ export default function ReceivePage({
               <tbody>{plan.operations.map((operation) => <tr key={`${operation.package_source}-${operation.target}`}><td><code>{operation.package_source}</code></td><td><code>{operation.target}</code></td><td><span className={`change change-${operation.action}`}>{changeLabel(operation.action, t)}</span></td></tr>)}</tbody>
             </table>
           </div>
-          {plan.conflict_count > 0 && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{t("请先处理冲突，再重新生成恢复计划。")}</p>}
-          <label className="confirmation-row"><input type="checkbox" checked={codexClosed} onChange={(event) => setCodexClosed(event.target.checked)} aria-label={t("确认已保存当前 Codex 工作")} /><span><strong>{t("当前 Codex 工作已保存")}</strong><small>{t("恢复完成后请退出并重新打开 Codex，以加载迁移内容。")}</small></span></label>
-          <div className="command-row"><ProgressSteps active={phase === "restoring"} complete={Boolean(report)} /><button className="command-button danger-command" type="button" disabled={!canRestore} onClick={() => void handleRestore()}>{phase === "restoring" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Play aria-hidden="true" />}{t("开始恢复")}</button></div>
+          {plan.conflict_count > 0 && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{t("请先处理冲突，再重新预览导入内容。")}</p>}
+          <label className="confirmation-row"><input type="checkbox" checked={codexClosed} onChange={(event) => setCodexClosed(event.target.checked)} aria-label={t("确认已保存当前 Codex 工作")} /><span><strong>{t("当前 Codex 工作已保存")}</strong><small>{t("导入完成后请退出并重新打开 Codex，以加载迁移内容。")}</small></span></label>
+          <div className="command-row"><ProgressSteps active={phase === "restoring"} complete={Boolean(report)} /><button className="command-button danger-command" type="button" disabled={!canRestore} onClick={() => void handleRestore()}>{phase === "restoring" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Play aria-hidden="true" />}{t(phase === "restoring" ? "正在导入" : "导入到 Codex")}</button></div>
         </section>
       )}
 
@@ -239,14 +239,14 @@ export default function ReceivePage({
 
       {report && (
         <section className="result-panel" aria-labelledby="restore-result-title">
-          <div className="section-title-row"><div><CheckCircle2 aria-hidden="true" /><h2 id="restore-result-title">{t("恢复事务已提交")}</h2></div><span className="status status-success">{t("{count} 个文件", { count: report.restored_files })}</span></div>
+          <div className="section-title-row"><div><CheckCircle2 aria-hidden="true" /><h2 id="restore-result-title">{t("导入完成")}</h2></div><span className="status status-success">{t("{count} 个文件", { count: report.restored_files })}</span></div>
           <div className="verification-list">
             {verificationLabels.map(([key, label]) => {
               const passed = report.verification[key];
               return <span key={key} className={passed ? "verification-pass" : "verification-fail"}>{passed ? <CheckCircle2 aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}{t(label)}</span>;
             })}
           </div>
-          {manualRegistration && <p className="manual-status" role="status"><AlertTriangle aria-hidden="true" />{t("项目文件已恢复，需要在 Codex 中手动打开")}</p>}
+          {manualRegistration && <p className="manual-status" role="status"><AlertTriangle aria-hidden="true" />{t("项目文件已导入，需要在 Codex 中手动打开")}</p>}
           {report.registrations.map((registration) => (
             <div className="registration-row" key={registration.project_id}><code>{registration.project_path}</code><button className="secondary-button" type="button" onClick={() => void handleOpenRestored(registration)}><FolderOpen aria-hidden="true" />{t("在 Codex 中打开")}</button>{registrationStatuses[registration.project_id] && <span role="status">{registrationStatuses[registration.project_id]}</span>}</div>
           ))}
@@ -262,8 +262,8 @@ function PathPicker({ icon: Icon, label, value, buttonLabel, onClick, disabled }
 
 function ProgressSteps({ active, complete }: { active: boolean; complete: boolean }) {
   const { t } = useI18n();
-  const labels = ["检查", "备份", "写入", "验证"];
-  return <div className="progress-steps" aria-label={t("恢复进度")}>{labels.map((label, index) => <span key={label} className={complete ? "complete" : active && index < 2 ? "active" : ""}>{complete ? <CheckCircle2 aria-hidden="true" /> : <Circle aria-hidden="true" />}{t(label)}</span>)}</div>;
+  const labels = ["检查", "备份", "导入", "完成"];
+  return <div className="progress-steps" aria-label={t("导入进度")}>{labels.map((label, index) => <span key={label} className={complete ? "complete" : active && index < 2 ? "active" : ""}>{complete ? <CheckCircle2 aria-hidden="true" /> : <Circle aria-hidden="true" />}{t(label)}</span>)}</div>;
 }
 
 function sourceOsLabel(os: "windows" | "macos"): string {
@@ -283,5 +283,5 @@ function formatBytes(bytes: number): string {
 function registrationStatusMessage(status: RegistrationStatus, t: (key: string) => string): string {
   if (status === "registered") return t("已在 Codex 中登记");
   if (typeof status === "object") return status.invocation_failed.message;
-  return t("项目文件已恢复，需要在 Codex 中手动打开");
+  return t("项目文件已导入，需要在 Codex 中手动打开");
 }

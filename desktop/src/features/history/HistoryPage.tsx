@@ -76,14 +76,14 @@ export default function HistoryPage({
   return (
     <div className="page history-page">
       <header className="page-header page-header-with-action">
-        <div><p className="eyebrow">HISTORY</p><h1 ref={headingRef} tabIndex={-1}>{t("历史记录")}</h1><p className="page-description">{t("查看本机恢复事务和保留的备份。")}</p></div>
-        <button className="icon-button" type="button" aria-label={t("刷新历史记录")} title={t("刷新历史记录")} onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" /></button>
+        <div><p className="eyebrow">HISTORY</p><h1 ref={headingRef} tabIndex={-1}>{t("迁移记录")}</h1><p className="page-description">{t("查看本机导入记录和自动备份。")}</p></div>
+        <button className="icon-button" type="button" aria-label={t("刷新迁移记录")} title={t("刷新迁移记录")} onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" /></button>
       </header>
 
       {error && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{error}</p>}
       {warnings.map((warning) => <p className="inline-state status-warning" role="status" key={warning}><AlertTriangle aria-hidden="true" />{warning}</p>)}
-      {loading && !transactions.length && <p className="inline-state" role="status">{t("正在读取事务记录...")}</p>}
-      {!loading && !transactions.length && <div className="history-empty"><Clock3 aria-hidden="true" /><strong>{t("暂无恢复事务")}</strong><span>{t("完成一次接收后，事务会显示在这里。")}</span></div>}
+      {loading && !transactions.length && <p className="inline-state" role="status">{t("正在读取迁移记录...")}</p>}
+      {!loading && !transactions.length && <div className="history-empty"><Clock3 aria-hidden="true" /><strong>{t("暂无导入记录")}</strong><span>{t("完成一次导入后，记录会显示在这里。")}</span></div>}
 
       <div className="transaction-list">
         {transactions.map((transaction) => {
@@ -120,9 +120,9 @@ function isResumable(status: RecoveryStatus): boolean {
 function statusLabel(status: RecoveryStatus, t: (key: string) => string): string {
   return t({
     prepared: "已准备",
-    applying: "恢复中",
+    applying: "导入中",
     verifying: "验证中",
-    committed: "已提交",
+    committed: "已完成",
     rolling_back: "回滚中",
     rolled_back: "已回滚",
     rollback_failed: "回滚失败",

@@ -30,16 +30,16 @@ const views: Array<{
   icon: typeof Home;
 }> = [
   { id: "home", label: "首页", accessibleLabel: "前往首页", icon: Home },
-  { id: "send", label: "发送", accessibleLabel: "前往发送", icon: ArrowUpFromLine },
-  { id: "receive", label: "接收", accessibleLabel: "前往接收", icon: ArrowDownToLine },
-  { id: "history", label: "历史", accessibleLabel: "前往历史", icon: Clock3 },
+  { id: "send", label: "导出", accessibleLabel: "前往导出", icon: ArrowUpFromLine },
+  { id: "receive", label: "导入", accessibleLabel: "前往导入", icon: ArrowDownToLine },
+  { id: "history", label: "迁移记录", accessibleLabel: "前往迁移记录", icon: Clock3 },
 ];
 
 const viewTitles: Record<View, string> = {
   home: "迁移工作台",
-  send: "发送交接",
-  receive: "接收交接",
-  history: "历史记录",
+  send: "导出 Codex 数据",
+  receive: "导入 ReHome 包",
+  history: "迁移记录",
 };
 
 export default function App() {

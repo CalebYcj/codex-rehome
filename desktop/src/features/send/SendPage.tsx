@@ -180,9 +180,9 @@ export default function SendPage({
     <div className="page">
       <header className="page-header page-header-with-action">
         <div>
-          <p className="eyebrow">SEND</p>
-          <h1 ref={headingRef} tabIndex={-1}>{t("发送交接")}</h1>
-          <p className="page-description">{t("项目文件、对话和其他 Codex 内容都可以分开选择。")}</p>
+          <p className="eyebrow">EXPORT</p>
+          <h1 ref={headingRef} tabIndex={-1}>{t("导出 Codex 数据")}</h1>
+          <p className="page-description">{t("在原电脑选择要带走的项目、对话和其他 Codex 内容。")}</p>
         </div>
         <label className="global-select-toggle">
           <input
@@ -283,8 +283,8 @@ export default function SendPage({
       </section>
 
       <section className="workflow-section" aria-labelledby="send-output-title">
-        <div className="section-title-row"><div><span className="step-number">3</span><h2 id="send-output-title">{t("输出位置")}</h2></div></div>
-        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>{t("ReHome 包")}</strong><small>{t("创建时通过系统窗口选择 .rehome 保存位置")}</small></span></div></div>
+        <div className="section-title-row"><div><span className="step-number">3</span><h2 id="send-output-title">{t("保存迁移包")}</h2></div></div>
+        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>{t("ReHome 迁移包")}</strong><small>{t("通过系统窗口选择 .rehome 文件的保存位置")}</small></span></div></div>
         <div className="command-row">
           <p role={busy ? "status" : undefined}>
             {busy
@@ -295,7 +295,7 @@ export default function SendPage({
           </p>
           <button className="command-button" type="button" disabled={!canCreate} onClick={() => void handleCreate()}>
             {busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <PackagePlus aria-hidden="true" />}
-            {t(busy ? "正在创建 ReHome 包" : "创建 ReHome 包")}
+            {t(busy ? "正在创建迁移包" : "创建迁移包")}
           </button>
         </div>
         {error && <p className="inline-state status-error" role="alert">{error}</p>}
