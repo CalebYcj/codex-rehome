@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { listTransactions, openPath, rollbackTransaction } from "../../lib/api";
+import { useI18n } from "../../lib/i18n";
 import { errorMessage, type RecoveryStatus, type RollbackAction, type TransactionSummary } from "../../lib/types";
 
 interface HistoryPageProps {
@@ -23,6 +24,7 @@ export default function HistoryPage({
   onOperationStart,
   onOperationEnd,
 }: HistoryPageProps) {
+  const { locale, t } = useI18n();
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [rollingBack, setRollingBack] = useState<string | null>(null);
@@ -74,14 +76,14 @@ export default function HistoryPage({
   return (
     <div className="page history-page">
       <header className="page-header page-header-with-action">
-        <div><p className="eyebrow">HISTORY</p><h1 ref={headingRef} tabIndex={-1}>历史记录</h1><p className="page-description">查看本机恢复事务和保留的备份。</p></div>
-        <button className="icon-button" type="button" aria-label="刷新历史记录" title="刷新历史记录" onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" /></button>
+        <div><p className="eyebrow">HISTORY</p><h1 ref={headingRef} tabIndex={-1}>{t("历史记录")}</h1><p className="page-description">{t("查看本机恢复事务和保留的备份。")}</p></div>
+        <button className="icon-button" type="button" aria-label={t("刷新历史记录")} title={t("刷新历史记录")} onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" /></button>
       </header>
 
       {error && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{error}</p>}
       {warnings.map((warning) => <p className="inline-state status-warning" role="status" key={warning}><AlertTriangle aria-hidden="true" />{warning}</p>)}
-      {loading && !transactions.length && <p className="inline-state" role="status">正在读取事务记录...</p>}
-      {!loading && !transactions.length && <div className="history-empty"><Clock3 aria-hidden="true" /><strong>暂无恢复事务</strong><span>完成一次接收后，事务会显示在这里。</span></div>}
+      {loading && !transactions.length && <p className="inline-state" role="status">{t("正在读取事务记录...")}</p>}
+      {!loading && !transactions.length && <div className="history-empty"><Clock3 aria-hidden="true" /><strong>{t("暂无恢复事务")}</strong><span>{t("完成一次接收后，事务会显示在这里。")}</span></div>}
 
       <div className="transaction-list">
         {transactions.map((transaction) => {
@@ -93,15 +95,15 @@ export default function HistoryPage({
             <article className="transaction-row" data-testid={`transaction-${transaction.transaction_id}`} key={transaction.transaction_id}>
               <div className="transaction-main">
                 <span className={`transaction-icon status-${transaction.status}`}>{committed ? <CheckCircle2 aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}</span>
-                <div><div className="transaction-title"><strong>{statusLabel(transaction.status)}</strong><time>{formatDate(transaction.created_at)}</time></div><code>{transaction.transaction_id}</code></div>
+                <div><div className="transaction-title"><strong>{statusLabel(transaction.status, t)}</strong><time>{formatDate(transaction.created_at, locale)}</time></div><code>{transaction.transaction_id}</code></div>
               </div>
-              <div className="transaction-facts"><span>变更文件<strong>{transaction.changed_files}</strong></span><span>项目目录<strong>{transaction.projects_root}</strong></span><span>备份目录<strong>{transaction.backup_root}</strong></span></div>
+              <div className="transaction-facts"><span>{t("变更文件")}<strong>{transaction.changed_files}</strong></span><span>{t("项目目录")}<strong>{transaction.projects_root}</strong></span><span>{t("备份目录")}<strong>{transaction.backup_root}</strong></span></div>
               <div className="transaction-actions">
-                <button className="icon-text-button" type="button" onClick={() => void handleReveal(transaction.transaction_backup_path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示备份</button>
+                <button className="icon-text-button" type="button" onClick={() => void handleReveal(transaction.transaction_backup_path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />{t("显示备份")}</button>
                 {transaction.restored_project_paths.map((path) => (
-                  <button className="icon-text-button" type="button" aria-label={`显示项目 ${path}`} key={path} onClick={() => void handleReveal(path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />显示项目</button>
+                  <button className="icon-text-button" type="button" aria-label={t("显示项目 {path}", { path })} key={path} onClick={() => void handleReveal(path, transaction.transaction_id)}><FolderOpen aria-hidden="true" />{t("显示项目")}</button>
                 ))}
-                <button className="rollback-button" type="button" aria-label={resumable ? "继续回滚事务" : "回滚此事务"} disabled={(!committed && !resumable) || busy} onClick={() => void handleRollback(transaction, rollbackAction)}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{resumable ? "继续回滚" : "回滚"}</button>
+                <button className="rollback-button" type="button" aria-label={t(resumable ? "继续回滚事务" : "回滚此事务")} disabled={(!committed && !resumable) || busy} onClick={() => void handleRollback(transaction, rollbackAction)}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t(resumable ? "继续回滚" : "回滚")}</button>
               </div>
             </article>
           );
@@ -115,8 +117,8 @@ function isResumable(status: RecoveryStatus): boolean {
   return ["prepared", "applying", "verifying", "rolling_back", "rollback_failed"].includes(status);
 }
 
-function statusLabel(status: RecoveryStatus): string {
-  return {
+function statusLabel(status: RecoveryStatus, t: (key: string) => string): string {
+  return t({
     prepared: "已准备",
     applying: "恢复中",
     verifying: "验证中",
@@ -124,10 +126,10 @@ function statusLabel(status: RecoveryStatus): string {
     rolling_back: "回滚中",
     rolled_back: "已回滚",
     rollback_failed: "回滚失败",
-  }[status];
+  }[status]);
 }
 
-function formatDate(value: string): string {
+function formatDate(value: string, locale: "zh-CN" | "en"): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(locale, { hour12: false });
 }

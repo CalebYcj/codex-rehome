@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import UpdateControl from "./UpdateControl";
+import { I18nProvider } from "../../lib/i18n";
 
 const updater = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
@@ -10,6 +11,14 @@ const updater = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/updater", () => updater);
+
+function renderUpdateControl(migrationBusy: boolean) {
+  return render(
+    <I18nProvider>
+      <UpdateControl migrationBusy={migrationBusy} onInstallingChange={vi.fn()} />
+    </I18nProvider>,
+  );
+}
 
 describe("UpdateControl", () => {
   beforeEach(() => {
@@ -25,7 +34,7 @@ describe("UpdateControl", () => {
 
   it("checks automatically and installs a signed update after confirmation", async () => {
     const user = userEvent.setup();
-    render(<UpdateControl migrationBusy={false} onInstallingChange={vi.fn()} />);
+    renderUpdateControl(false);
 
     const install = await screen.findByRole("button", { name: "更新到 0.1.4" });
     expect(screen.getByText("当前 0.1.3")).toBeInTheDocument();
@@ -37,7 +46,7 @@ describe("UpdateControl", () => {
   });
 
   it("blocks installation while a migration operation is active", async () => {
-    render(<UpdateControl migrationBusy onInstallingChange={vi.fn()} />);
+    renderUpdateControl(true);
 
     const install = await screen.findByRole("button", { name: "更新到 0.1.4" });
     expect(install).toBeDisabled();
@@ -49,7 +58,7 @@ describe("UpdateControl", () => {
     updater.checkForUpdates
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValueOnce({ status: "current", currentVersion: "0.1.4" });
-    render(<UpdateControl migrationBusy={false} onInstallingChange={vi.fn()} />);
+    renderUpdateControl(false);
 
     const retry = await screen.findByRole("button", { name: "重新检查更新" });
     expect(screen.getByText("检查失败，不影响离线迁移")).toBeInTheDocument();

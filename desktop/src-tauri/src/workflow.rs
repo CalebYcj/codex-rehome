@@ -1077,16 +1077,28 @@ fn ensure_codex_desktop_is_closed() -> Result<(), RehomeError> {
     if codex_desktop_is_running()? {
         return Err(RehomeError::new(
             ErrorCode::CodexRunning,
-            "Codex 仍在运行。请完全退出 Codex Desktop 后，再开始恢复或回滚。",
+            "Codex 或相关后台进程仍在运行。请完全退出 Codex Desktop、ChatGPT 和相关扩展进程后，再开始恢复或回滚。",
         ));
     }
     Ok(())
 }
 
 #[cfg(windows)]
+const WINDOWS_CODEX_PROCESS_NAMES: &[&str] = &[
+    "codex.exe",
+    "codex-code-mode-host.exe",
+    "ChatGPT.exe",
+    "extension-host.exe",
+];
+
+#[cfg(windows)]
 fn codex_desktop_is_running() -> Result<bool, RehomeError> {
-    Ok(tasklist_reports_process("codex.exe")?
-        || tasklist_reports_process("codex-code-mode-host.exe")?)
+    for process_name in WINDOWS_CODEX_PROCESS_NAMES {
+        if tasklist_reports_process(process_name)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]
@@ -1188,5 +1200,7 @@ mod grant_tests {
             "INFO: No tasks are running which match the specified criteria.\r\n",
             "codex.exe"
         ));
+        assert!(WINDOWS_CODEX_PROCESS_NAMES.contains(&"ChatGPT.exe"));
+        assert!(WINDOWS_CODEX_PROCESS_NAMES.contains(&"extension-host.exe"));
     }
 }
