@@ -260,11 +260,11 @@ beforeEach(() => {
 });
 
 async function openReceive(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole("button", { name: "前往接收" }));
-  await user.click(screen.getByRole("button", { name: "选择 ReHome 包" }));
+  await user.click(screen.getByRole("button", { name: "前往导入" }));
+  await user.click(screen.getByRole("button", { name: "选择迁移包" }));
   await screen.findByText("macOS");
-  await user.click(screen.getByRole("button", { name: "选择恢复位置" }));
-  await user.click(screen.getByRole("button", { name: "生成恢复计划" }));
+  await user.click(screen.getByRole("button", { name: "选择项目保存位置" }));
+  await user.click(screen.getByRole("button", { name: "预览导入内容" }));
   await screen.findByText("projects/rehome-app/README.md");
 }
 
@@ -275,14 +275,14 @@ describe("ReHome Desktop workflows", () => {
 
     await user.click(screen.getByRole("button", { name: "Switch to English" }));
     expect(screen.getByRole("heading", { name: "Migration workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Go to Send" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Go to Export" })).toBeInTheDocument();
     expect(screen.getByText("This device is ready")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Go to Send" }));
-    expect(screen.getByRole("heading", { name: "Create handoff" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to Export" }));
+    expect(screen.getByRole("heading", { name: "Export Codex Data" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Select projects and conversations" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Go to Receive" }));
-    expect(screen.getByRole("heading", { name: "Restore handoff" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Inspect migration package" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to Import" }));
+    expect(screen.getByRole("heading", { name: "Import ReHome Package" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Choose migration package" })).toBeInTheDocument();
 
     firstRender.unmount();
     render(<App />);
@@ -320,8 +320,8 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
-    const createButton = screen.getByRole("button", { name: "创建 ReHome 包" });
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
+    const createButton = screen.getByRole("button", { name: "创建迁移包" });
     expect(createButton).toBeDisabled();
 
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
@@ -338,7 +338,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
     expect(screen.queryByRole("checkbox", { name: "选择对话 Desktop workflow" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
@@ -356,7 +356,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
 
     expect(screen.getByRole("checkbox", { name: "选择项目 rehome-app" })).toBeInTheDocument();
     expect(
@@ -373,7 +373,7 @@ describe("ReHome Desktop workflows", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
 
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
     const conversation = screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" });
@@ -388,18 +388,18 @@ describe("ReHome Desktop workflows", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
 
     const selectAll = screen.getByRole("checkbox", { name: "全选迁移内容" });
     await user.click(selectAll);
 
     expect(selectAll).toBeChecked();
-    expect(screen.getByRole("button", { name: "创建 ReHome 包" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "创建迁移包" })).toBeEnabled();
 
     await user.click(selectAll);
 
     expect(selectAll).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "创建 ReHome 包" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "创建迁移包" })).toBeDisabled();
   });
 
   it("keeps conversations selectable when a registered project folder was deleted", async () => {
@@ -412,13 +412,13 @@ describe("ReHome Desktop workflows", () => {
     });
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
 
     expect(screen.getByRole("checkbox", { name: "选择项目 notes" })).toBeDisabled();
     expect(screen.getByText("项目文件夹已不存在，仅可迁移下面的对话")).toBeVisible();
 
     await user.click(screen.getByRole("checkbox", { name: "全选迁移内容" }));
-    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "创建迁移包" }));
 
     expect(api.createPackage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -432,10 +432,10 @@ describe("ReHome Desktop workflows", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
     await user.click(screen.getByRole("button", { name: "展开项目 rehome-app" }));
     await user.click(screen.getByRole("checkbox", { name: "选择对话 Desktop workflow" }));
-    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "创建迁移包" }));
 
     expect(api.createPackage).toHaveBeenCalledWith({
       project_ids: [],
@@ -458,9 +458,9 @@ describe("ReHome Desktop workflows", () => {
     });
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
-    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "创建迁移包" }));
 
     expect(api.openPath).toHaveBeenCalledWith("57575757-5757-4757-8757-575757575757");
     expect(screen.getByText("C:\\Transfers\\handoff.rehome")).toBeInTheDocument();
@@ -480,16 +480,16 @@ describe("ReHome Desktop workflows", () => {
     await screen.findByText(inventory.codex_home);
     const updateButton = await screen.findByRole("button", { name: "更新到 0.1.5" });
 
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
-    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "创建迁移包" }));
 
     expect(updateButton).toBeDisabled();
     expect(screen.getByText("请先完成当前迁移")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "正在创建迁移包。内容较多时可能需要几分钟，请保持 ReHome 打开。",
     );
-    expect(screen.getByRole("button", { name: "正在创建 ReHome 包" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在创建迁移包" })).toBeDisabled();
 
     await act(async () => pending.resolve(null));
   });
@@ -523,13 +523,13 @@ describe("ReHome Desktop workflows", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
 
     await user.click(screen.getAllByRole("button", { name: /已选 0 \/ 1/ })[0]);
     await user.click(screen.getByRole("checkbox", { name: "全选 Skills" }));
     expect(screen.getAllByText("imagegen").length).toBeGreaterThan(0);
 
-    await user.click(screen.getByRole("button", { name: "创建 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "创建迁移包" }));
     expect(api.createPackage).toHaveBeenCalledWith({
       project_ids: [],
       conversation_ids: [],
@@ -543,7 +543,7 @@ describe("ReHome Desktop workflows", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
     await user.click(screen.getByRole("button", { name: "展开项目 notes" }));
 
     expect(screen.getByText("子 Agent · L1")).toBeVisible();
@@ -560,7 +560,7 @@ describe("ReHome Desktop workflows", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往发送" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
     await user.click(screen.getAllByRole("button", { name: /已选 0 \/ 1/ })[2]);
 
     expect(document.querySelector("img.image-thumbnail")).not.toBeNull();
@@ -594,7 +594,7 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.queryByText("事务备份")).toBeNull();
     expect(screen.getByText("安全备份由 ReHome 自动管理")).toBeInTheDocument();
     expect(screen.getAllByText("C:\\Restored Projects").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "开始恢复" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "导入到 Codex" })).toBeDisabled();
   });
 
   it("labels preserved local plugins without blocking restore", async () => {
@@ -622,7 +622,7 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByText("保留本机")).toBeVisible();
     expect(screen.getByText("冲突 0")).toBeVisible();
     await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
-    expect(screen.getByRole("button", { name: "开始恢复" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "导入到 Codex" })).toBeEnabled();
   });
 
   it("disables every native picker while a location selection is pending", async () => {
@@ -631,14 +631,14 @@ describe("ReHome Desktop workflows", () => {
     api.selectRestoreDestinations.mockReturnValue(pending.promise);
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往接收" }));
-    await user.click(screen.getByRole("button", { name: "选择 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "前往导入" }));
+    await user.click(screen.getByRole("button", { name: "选择迁移包" }));
     await screen.findByText("macOS");
 
-    await user.click(screen.getByRole("button", { name: "选择恢复位置" }));
+    await user.click(screen.getByRole("button", { name: "选择项目保存位置" }));
 
-    expect(screen.getByRole("button", { name: "选择 ReHome 包" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "选择恢复位置" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "选择迁移包" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "选择项目保存位置" })).toBeDisabled();
     pending.resolve(null);
   });
 
@@ -651,10 +651,10 @@ describe("ReHome Desktop workflows", () => {
       .mockReturnValueOnce(second.promise);
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往接收" }));
-    await user.click(screen.getByRole("button", { name: "选择 ReHome 包" }));
+    await user.click(screen.getByRole("button", { name: "前往导入" }));
+    await user.click(screen.getByRole("button", { name: "选择迁移包" }));
     await screen.findByText("macOS");
-    const picker = screen.getByRole("button", { name: "选择恢复位置" });
+    const picker = screen.getByRole("button", { name: "选择项目保存位置" });
 
     act(() => {
       picker.click();
@@ -690,8 +690,8 @@ describe("ReHome Desktop workflows", () => {
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
     await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
-    await user.click(screen.getByRole("button", { name: "开始恢复" }));
-    expect(await screen.findByText("恢复事务已提交")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+    expect(await screen.findByText("导入完成")).toBeInTheDocument();
 
     api.selectRestoreDestinations.mockResolvedValueOnce({
       selection_id: "16161616-1616-4161-8161-161616161616",
@@ -699,11 +699,11 @@ describe("ReHome Desktop workflows", () => {
       projects_root: "C:\\Changed Projects",
       backup_root: "C:\\Changed Backups",
     });
-    await user.click(screen.getByRole("button", { name: "选择恢复位置" }));
+    await user.click(screen.getByRole("button", { name: "选择项目保存位置" }));
 
-    expect(screen.queryByText("恢复事务已提交")).toBeNull();
+    expect(screen.queryByText("导入完成")).toBeNull();
     expect(screen.queryByText("projects/rehome-app/README.md")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "生成恢复计划" }));
+    await user.click(screen.getByRole("button", { name: "预览导入内容" }));
     expect(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" })).not.toBeChecked();
   });
 
@@ -740,10 +740,10 @@ describe("ReHome Desktop workflows", () => {
     await openReceive(user);
 
     await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
-    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
 
     expect(
-      await screen.findByText("项目文件已恢复，需要在 Codex 中手动打开"),
+      await screen.findByText("项目文件已导入，需要在 Codex 中手动打开"),
     ).toBeInTheDocument();
   });
 
@@ -757,7 +757,7 @@ describe("ReHome Desktop workflows", () => {
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
     await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
-    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
 
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
 
@@ -772,12 +772,12 @@ describe("ReHome Desktop workflows", () => {
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
     await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
-    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
 
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
 
     expect(
-      await screen.findAllByText("项目文件已恢复，需要在 Codex 中手动打开"),
+      await screen.findAllByText("项目文件已导入，需要在 Codex 中手动打开"),
     ).toHaveLength(2);
   });
 
@@ -789,7 +789,7 @@ describe("ReHome Desktop workflows", () => {
     await screen.findByText(inventory.codex_home);
     await openReceive(user);
     await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
-    await user.click(screen.getByRole("button", { name: "开始恢复" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
 
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
 
@@ -812,7 +812,7 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
-    await user.click(screen.getByRole("button", { name: "前往历史" }));
+    await user.click(screen.getByRole("button", { name: "前往迁移记录" }));
 
     const committedRow = await screen.findByTestId(
       `transaction-${committedTransaction.transaction_id}`,
@@ -834,7 +834,7 @@ describe("ReHome Desktop workflows", () => {
     api.listTransactions.mockResolvedValue({ transactions: [prepared], warnings: [] });
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往历史" }));
+    await user.click(screen.getByRole("button", { name: "前往迁移记录" }));
 
     const resume = await screen.findByRole("button", { name: "继续回滚事务" });
     expect(resume).toBeEnabled();
@@ -852,7 +852,7 @@ describe("ReHome Desktop workflows", () => {
     api.openPath.mockRejectedValue({ message: "无法显示备份" });
     render(<App />);
     await screen.findByText(inventory.codex_home);
-    await user.click(screen.getByRole("button", { name: "前往历史" }));
+    await user.click(screen.getByRole("button", { name: "前往迁移记录" }));
 
     await user.click(await screen.findByRole("button", { name: "显示备份" }));
 
@@ -864,9 +864,9 @@ describe("ReHome Desktop workflows", () => {
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
-    await user.click(screen.getByRole("button", { name: "前往历史" }));
+    await user.click(screen.getByRole("button", { name: "前往迁移记录" }));
 
-    const heading = screen.getByRole("heading", { name: "历史记录" });
+    const heading = screen.getByRole("heading", { name: "迁移记录" });
     expect(heading).toHaveAttribute("tabindex", "-1");
     expect(heading).toHaveFocus();
   });

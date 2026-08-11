@@ -51,17 +51,17 @@ export default function HomePage({
       <header className="page-header">
         <p className="eyebrow">CODEX WORKSPACE</p>
         <h1 ref={headingRef} tabIndex={-1}>{t("迁移工作台")}</h1>
-        <p className="page-description">{t("在本机打包或恢复 Codex 工作内容。")}</p>
+        <p className="page-description">{t("从旧电脑导出，在新电脑导入。全程离线。")}</p>
       </header>
 
       <section className="action-strip" aria-label={t("迁移操作")}>
         <button className="primary-action send-action" type="button" onClick={() => onNavigate("send")}>
           <ArrowUpFromLine aria-hidden="true" />
-          <span><strong>{t("发送")}</strong><small>{t("创建离线 .rehome 包")}</small></span>
+          <span><strong>{t("导出")}</strong><small>{t("创建 .rehome 迁移包")}</small></span>
         </button>
         <button className="primary-action receive-action" type="button" onClick={() => onNavigate("receive")}>
           <ArrowDownToLine aria-hidden="true" />
-          <span><strong>{t("接收")}</strong><small>{t("检查并恢复迁移包")}</small></span>
+          <span><strong>{t("导入")}</strong><small>{t("将迁移包导入本机 Codex")}</small></span>
         </button>
       </section>
 
@@ -93,8 +93,8 @@ export default function HomePage({
       <section className="workflow-section" aria-labelledby="recent-title">
         <div className="section-title-row">
           <div>
-            <p className="section-kicker">{t("事务记录")}</p>
-            <h2 id="recent-title">{t("最近交接")}</h2>
+            <p className="section-kicker">{t("迁移记录")}</p>
+            <h2 id="recent-title">{t("最近一次迁移")}</h2>
           </div>
           <Clock3 aria-hidden="true" />
         </div>
@@ -105,7 +105,7 @@ export default function HomePage({
             <span className={`status status-${recent.status}`}>{recoveryStatusLabel(recent.status, t)}</span>
           </div>
         ) : (
-          <p className="empty-state">{t("暂无交接记录")}</p>
+          <p className="empty-state">{t("暂无迁移记录")}</p>
         )}
       </section>
     </div>
@@ -115,9 +115,9 @@ export default function HomePage({
 function recoveryStatusLabel(status: RecoveryStatus, t: (key: string) => string): string {
   const labels: Record<RecoveryStatus, string> = {
     prepared: "已准备",
-    applying: "恢复中",
+    applying: "导入中",
     verifying: "验证中",
-    committed: "已提交",
+    committed: "已完成",
     rolling_back: "回滚中",
     rolled_back: "已回滚",
     rollback_failed: "回滚失败",
