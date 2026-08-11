@@ -287,25 +287,16 @@ fn apply_bridge_plan_with_lock_token(
     })
 }
 
-pub(crate) fn apply_file_operation_for_transaction(
+pub(crate) fn apply_file_source_for_transaction(
     root: &Path,
     operation: &PlannedOperation,
-    bytes: &[u8],
+    source: &Path,
     transaction_id: Uuid,
 ) -> Result<(), RehomeError> {
-    let token = transaction_id.to_string();
-    apply_file_operation_with_lock_token(root, operation, bytes, Some(&token))
-}
-
-fn apply_file_operation_with_lock_token(
-    root: &Path,
-    operation: &PlannedOperation,
-    bytes: &[u8],
-    lock_token: Option<&str>,
-) -> Result<(), RehomeError> {
     ensure_writable_change(operation)?;
-    let guard = TargetReplacementGuard::acquire(root, operation, lock_token)?;
-    guard.commit_bytes(operation, bytes)
+    let token = transaction_id.to_string();
+    let guard = TargetReplacementGuard::acquire(root, operation, Some(&token))?;
+    guard.commit_file(operation, source)
 }
 
 pub(crate) fn validate_restore_target(root: &Path, target: &Path) -> Result<(), RehomeError> {
@@ -1171,6 +1162,25 @@ impl<'a> TargetReplacementGuard<'a> {
         })?;
         self.parent.sync().map_err(|error| {
             restore_failed(format!("could not sync bridge target directory: {error}"))
+        })
+    }
+
+    fn commit_file(&self, operation: &PlannedOperation, source: &Path) -> Result<(), RehomeError> {
+        validate_operation_state(operation)?;
+        ensure_safe_codex_target(self.root, self.target)?;
+        reject_hard_linked_target(self.target)?;
+        let name = self
+            .target
+            .file_name()
+            .ok_or_else(|| restore_failed("restore target has no file name"))?;
+        self.parent.replace_file(source, name).map_err(|error| {
+            restore_failed(format!(
+                "could not atomically replace restore target {}: {error}",
+                self.target.display()
+            ))
+        })?;
+        self.parent.sync().map_err(|error| {
+            restore_failed(format!("could not sync restore target directory: {error}"))
         })
     }
 }

@@ -32,8 +32,9 @@ const FORMAT: &str = "codex-rehome";
 const SCHEMA_VERSION: u32 = 1;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PLANNING_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INSPECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = MAX_INSPECTION_BYTES;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
@@ -260,7 +261,7 @@ impl VerifiedPackage {
             .planning_payloads
             .get(source)
             .ok_or_else(|| package_invalid("verified planning payload bytes are missing"))?;
-        if bytes.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES {
+        if bytes.len() as u64 > MAX_PLANNING_PAYLOAD_BYTES {
             return Err(package_invalid(
                 "verified planning payload exceeds the inspection limit",
             ));
@@ -273,7 +274,11 @@ impl VerifiedPackage {
         Ok(bytes)
     }
 
-    pub(crate) fn authenticated_payload(&self, source: &str) -> Result<Vec<u8>, RehomeError> {
+    pub(crate) fn write_authenticated_payload<W: Write>(
+        &self,
+        source: &str,
+        writer: &mut W,
+    ) -> Result<u64, RehomeError> {
         let verified = self
             .payloads
             .get(source)
@@ -288,7 +293,8 @@ impl VerifiedPackage {
         }
         if let Some(bytes) = verified.inline_bytes.as_ref() {
             authenticate_payload_bytes(bytes, verified)?;
-            return Ok(bytes.clone());
+            writer.write_all(bytes).map_err(io_package_error)?;
+            return Ok(bytes.len() as u64);
         }
         file.seek(SeekFrom::Start(0))
             .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
@@ -303,9 +309,7 @@ impl VerifiedPackage {
         if entry.is_dir() {
             return Err(package_invalid("restore payload is not a regular file"));
         }
-        let bytes = read_payload_entry(&mut entry)?;
-        authenticate_payload_bytes(&bytes, verified)?;
-        Ok(bytes)
+        stream_authenticated_payload(&mut entry, writer, verified)
     }
 }
 
@@ -368,11 +372,7 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         if entry.is_dir() {
             continue;
         }
-        if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
-            return Err(package_invalid(
-                "ZIP entry size exceeds the inspection limit",
-            ));
-        }
+        ensure_archive_entry_size(&normalized, entry.size())?;
         if matches!(normalized.as_str(), "manifest.json" | "checksums.sha256") {
             ensure_control_size(&normalized, entry.size())?;
         }
@@ -445,7 +445,7 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
                 "could not reopen verified planning payload: {error}"
             ))
         })?;
-        let bytes = read_payload_entry(&mut entry)?;
+        let bytes = read_planning_entry(&mut entry, &source)?;
         let payload = payloads
             .get(&source)
             .ok_or_else(|| package_invalid("verified planning payload metadata is missing"))?;
@@ -857,9 +857,9 @@ fn export_selected_threads(
             .and_then(|size| size.checked_add(encoded.len()))
             .and_then(|size| size.checked_add(3))
             .ok_or_else(|| {
-                package_invalid("Codex thread metadata exceeds the control-file limit")
+                package_invalid("Codex thread metadata exceeds the planning-payload limit")
             })?;
-        ensure_control_size("codex/metadata/threads.json", projected_size as u64)?;
+        ensure_planning_payload_size("codex/metadata/threads.json", projected_size as u64)?;
         if count > 0 {
             bytes.extend_from_slice(b",\n");
         }
@@ -867,7 +867,7 @@ fn export_selected_threads(
         count += 1;
     }
     bytes.extend_from_slice(b"\n]\n");
-    ensure_control_size("codex/metadata/threads.json", bytes.len() as u64)?;
+    ensure_planning_payload_size("codex/metadata/threads.json", bytes.len() as u64)?;
     Ok((bytes, count))
 }
 
@@ -897,13 +897,13 @@ fn sqlite_json_value(value: ValueRef<'_>) -> Result<Value, RehomeError> {
         ValueRef::Integer(value) => Value::from(value),
         ValueRef::Real(value) => Value::from(value),
         ValueRef::Text(value) => {
-            ensure_control_size("Codex thread text field", value.len() as u64)?;
+            ensure_planning_payload_size("Codex thread text field", value.len() as u64)?;
             Value::String(String::from_utf8_lossy(value).into_owned())
         }
         ValueRef::Blob(value) => {
-            if value.len() as u64 > (MAX_CONTROL_FILE_BYTES - 4) / 2 {
+            if value.len() as u64 > (MAX_PLANNING_PAYLOAD_BYTES - 4) / 2 {
                 return Err(package_invalid(
-                    "Codex thread blob field exceeds the control-file limit",
+                    "Codex thread blob field exceeds the planning-payload limit",
                 ));
             }
             Value::String(format!("hex:{}", hex_bytes(value)))
@@ -1068,13 +1068,7 @@ fn copy_source_to_staging_once(
     archive_path: &str,
 ) -> Result<StableCopyAttempt<Payload>, RehomeError> {
     let before = source_fingerprint(source)?;
-    if before.length > MAX_ARCHIVE_ENTRY_BYTES {
-        return Err(package_invalid(format!(
-            "package source entry {archive_path} is {} and exceeds the {} per-file limit; move this large file separately or deselect its project",
-            format_package_bytes(before.length),
-            format_package_bytes(MAX_ARCHIVE_ENTRY_BYTES),
-        )));
-    }
+    ensure_archive_entry_size(archive_path, before.length)?;
     let destination = staging_root.join(Path::new(&archive_path));
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(io_package_error)?;
@@ -1132,7 +1126,7 @@ fn write_archive_atomically(
         let mut writer = ZipWriter::new(temporary.as_file_mut());
         let entries = staged_archive_entries(staging_root, payloads)?;
         for entry in entries {
-            let options = stable_options(entry.permissions);
+            let options = stable_options(entry.permissions, entry.size);
             if entry.is_directory {
                 writer
                     .add_directory(entry.name, options)
@@ -1214,6 +1208,7 @@ struct ArchiveEntry {
     name: String,
     is_directory: bool,
     permissions: u32,
+    size: u64,
 }
 
 fn format_package_bytes(bytes: u64) -> String {
@@ -1267,6 +1262,7 @@ fn staged_archive_entries(
                 name: format!("{name}/"),
                 is_directory: true,
                 permissions: 0o755,
+                size: 0,
             });
         } else if entry.file_type().is_file() {
             let size = entry
@@ -1275,13 +1271,7 @@ fn staged_archive_entries(
                     package_invalid(format!("could not inspect package staging: {error}"))
                 })?
                 .len();
-            if size > MAX_ARCHIVE_ENTRY_BYTES {
-                return Err(package_invalid(format!(
-                    "staged package entry {name} is {} and exceeds the {} per-file limit; move this large file separately or deselect its project",
-                    format_package_bytes(size),
-                    format_package_bytes(MAX_ARCHIVE_ENTRY_BYTES),
-                )));
-            }
+            ensure_archive_entry_size(&name, size)?;
             total_bytes = checked_staged_total_bytes(total_bytes, size)?;
             let executable = payloads
                 .entries
@@ -1292,6 +1282,7 @@ fn staged_archive_entries(
                 name,
                 is_directory: false,
                 permissions: if executable { 0o755 } else { 0o644 },
+                size,
             });
         } else {
             return Err(package_invalid("staging contains a non-regular entry"));
@@ -1306,11 +1297,12 @@ fn staged_archive_entries(
     Ok(entries)
 }
 
-fn stable_options(permissions: u32) -> SimpleFileOptions {
+fn stable_options(permissions: u32, size: u64) -> SimpleFileOptions {
     SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
         .last_modified_time(DateTime::default())
         .unix_permissions(permissions)
+        .large_file(size >= u32::MAX as u64)
 }
 
 fn render_checksums(payloads: &PayloadCollection) -> String {
@@ -1457,17 +1449,15 @@ fn read_control_entry<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, Re
     Ok(bytes)
 }
 
-fn read_payload_entry<R: Read>(reader: &mut R) -> Result<Vec<u8>, RehomeError> {
+fn read_planning_entry<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, RehomeError> {
     let mut bytes = Vec::new();
     reader
-        .take(MAX_ARCHIVE_ENTRY_BYTES + 1)
+        .take(MAX_PLANNING_PAYLOAD_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| package_invalid(format!("could not read ZIP payload: {error}")))?;
-    if bytes.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES {
-        return Err(package_invalid(
-            "ZIP entry size exceeds the inspection limit",
-        ));
-    }
+        .map_err(|error| {
+            package_invalid(format!("could not read ZIP planning payload: {error}"))
+        })?;
+    ensure_planning_payload_size(name, bytes.len() as u64)?;
     Ok(bytes)
 }
 
@@ -1541,6 +1531,25 @@ mod authenticated_payload_tests {
         assert!(error.message.contains(&MAX_INSPECTION_BYTES.to_string()));
         assert!(error.message.contains("deselect large project files"));
     }
+
+    #[test]
+    fn per_file_limit_accepts_the_reported_one_gib_project_file() {
+        let reported_size = 1_115_432_819_u64;
+
+        ensure_archive_entry_size("projects/large.pptx", reported_size).unwrap();
+    }
+
+    #[test]
+    fn thread_metadata_uses_the_larger_planning_payload_limit() {
+        ensure_control_size("manifest.json", MAX_CONTROL_FILE_BYTES + 1).unwrap_err();
+        ensure_planning_payload_size("codex/metadata/threads.json", MAX_CONTROL_FILE_BYTES + 1)
+            .unwrap();
+        ensure_planning_payload_size(
+            "codex/metadata/threads.json",
+            MAX_PLANNING_PAYLOAD_BYTES + 1,
+        )
+        .unwrap_err();
+    }
 }
 
 fn hash_archive_file(file: &mut fs::File) -> Result<String, RehomeError> {
@@ -1574,6 +1583,63 @@ fn ensure_control_size(name: &str, size: u64) -> Result<(), RehomeError> {
         )));
     }
     Ok(())
+}
+
+fn ensure_planning_payload_size(name: &str, size: u64) -> Result<(), RehomeError> {
+    if size > MAX_PLANNING_PAYLOAD_BYTES {
+        return Err(package_invalid(format!(
+            "ZIP planning payload size exceeds the inspection limit: {name}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn ensure_archive_entry_size(name: &str, size: u64) -> Result<(), RehomeError> {
+    if size > MAX_ARCHIVE_ENTRY_BYTES {
+        return Err(package_invalid(format!(
+            "package entry {name} is {} and exceeds the {} per-file limit; deselect this file or reduce the package selection",
+            format_package_bytes(size),
+            format_package_bytes(MAX_ARCHIVE_ENTRY_BYTES),
+        )));
+    }
+    Ok(())
+}
+
+fn stream_authenticated_payload<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    verified: &VerifiedPayload,
+) -> Result<u64, RehomeError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    let mut bytes_read = 0_u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| package_invalid(format!("could not stream ZIP payload: {error}")))?;
+        if count == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(count as u64)
+            .ok_or_else(|| package_invalid("ZIP entry size exceeds the inspection limit"))?;
+        ensure_archive_entry_size("restored payload", bytes_read)?;
+        writer
+            .write_all(&buffer[..count])
+            .map_err(io_package_error)?;
+        hasher.update(&buffer[..count]);
+    }
+    let content_hash = format!("{:x}", hasher.finalize());
+    if bytes_read != verified.size_bytes
+        || !content_hash.eq_ignore_ascii_case(&verified.content_hash)
+    {
+        return Err(RehomeError::new(
+            ErrorCode::ChecksumMismatch,
+            "ZIP payload changed after checksum verification",
+        ));
+    }
+    Ok(bytes_read)
 }
 
 fn hash_reader<R: Read>(reader: &mut R) -> Result<String, RehomeError> {

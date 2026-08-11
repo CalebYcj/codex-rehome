@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { createPackage, openPath } from "../../lib/api";
+import { useI18n } from "../../lib/i18n";
 import {
   errorMessage,
   type CodexInventory,
@@ -36,6 +37,7 @@ export default function SendPage({
   onOperationStart,
   onOperationEnd,
 }: SendPageProps) {
+  const { t } = useI18n();
   const [projects, setProjects] = useState<Set<string>>(new Set());
   const [conversations, setConversations] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -158,14 +160,14 @@ export default function SendPage({
         try {
           await openPath(created.reveal_id);
         } catch {
-          setError(`迁移包已创建在：${created.package_path}\n但没能自动打开所在文件夹。`);
+          setError(t("迁移包已创建在：{path}\n但没能自动打开所在文件夹。", { path: created.package_path }));
         }
       }
     } catch (caught) {
       const message = errorMessage(caught);
       setError(
         message.includes("source file kept changing while being copied")
-          ? `有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n${message}`
+          ? t("有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n{message}", { message })
           : message,
       );
     } finally {
@@ -179,8 +181,8 @@ export default function SendPage({
       <header className="page-header page-header-with-action">
         <div>
           <p className="eyebrow">SEND</p>
-          <h1 ref={headingRef} tabIndex={-1}>发送交接</h1>
-          <p className="page-description">项目文件、对话和其他 Codex 内容都可以分开选择。</p>
+          <h1 ref={headingRef} tabIndex={-1}>{t("发送交接")}</h1>
+          <p className="page-description">{t("项目文件、对话和其他 Codex 内容都可以分开选择。")}</p>
         </div>
         <label className="global-select-toggle">
           <input
@@ -188,19 +190,19 @@ export default function SendPage({
             checked={allContentSelected}
             onChange={toggleAllContent}
             disabled={!hasSelectableContent}
-            aria-label="全选迁移内容"
+            aria-label={t("全选迁移内容")}
           />
           <span>
-            <strong>全选迁移内容</strong>
-            <small>项目、对话和 Codex 内容</small>
+            <strong>{t("全选迁移内容")}</strong>
+            <small>{t("项目、对话和 Codex 内容")}</small>
           </span>
         </label>
       </header>
 
       <section className="workflow-section" aria-labelledby="send-projects-title">
         <div className="section-title-row">
-          <div><span className="step-number">1</span><h2 id="send-projects-title">选择项目与对话</h2></div>
-          <span className="selection-count">项目 {projects.size} · 对话 {conversations.size}</span>
+          <div><span className="step-number">1</span><h2 id="send-projects-title">{t("选择项目与对话")}</h2></div>
+          <span className="selection-count">{t("项目 {projects} · 对话 {conversations}", { projects: projects.size, conversations: conversations.size })}</span>
         </div>
         <div className="project-list">
           {projectGroups.map((project) => (
@@ -220,11 +222,11 @@ export default function SendPage({
               onSelectRecommended={() => selectRecommended(project.conversations)}
             />
           ))}
-          {!projectGroups.length && <p className="empty-state">未检测到 Codex 已登记的本机项目</p>}
+          {!projectGroups.length && <p className="empty-state">{t("未检测到 Codex 已登记的本机项目")}</p>}
           {unassociatedConversations.length > 0 && (
             <ProjectChoice
-              name="未归属项目的对话"
-              path="只迁移对话，不包含项目文件"
+              name={t("未归属项目的对话")}
+              path={t("只迁移对话，不包含项目文件")}
               fileCount={null}
               conversations={unassociatedConversations}
               projectSelected={false}
@@ -240,14 +242,14 @@ export default function SendPage({
 
       <section className="workflow-section" aria-labelledby="send-content-title">
         <div className="section-title-row">
-          <div><span className="step-number">2</span><h2 id="send-content-title">其他 Codex 内容</h2></div>
-          <span className="selection-count">都不是必选项</span>
+          <div><span className="step-number">2</span><h2 id="send-content-title">{t("其他 Codex 内容")}</h2></div>
+          <span className="selection-count">{t("都不是必选项")}</span>
         </div>
         <div className="optional-content-list">
           <OptionalContentGroup
             id="skills"
             title="Skills"
-            description="迁移你希望在新电脑继续使用的能力"
+            description={t("迁移你希望在新电脑继续使用的能力")}
             icon={<Sparkles aria-hidden="true" />}
             items={inventory?.skills ?? []}
             selected={skills}
@@ -258,7 +260,7 @@ export default function SendPage({
           <OptionalContentGroup
             id="plugins"
             title="Plugins"
-            description="通常可以在新电脑重装，也可以选择带走"
+            description={t("通常可以在新电脑重装，也可以选择带走")}
             icon={<Puzzle aria-hidden="true" />}
             items={inventory?.plugins ?? []}
             selected={plugins}
@@ -268,8 +270,8 @@ export default function SendPage({
           />
           <OptionalContentGroup
             id="images"
-            title="生成图片"
-            description="只在需要保留历史生成物时选择"
+            title={t("生成图片")}
+            description={t("只在需要保留历史生成物时选择")}
             icon={<Image aria-hidden="true" />}
             items={inventory?.generated_images ?? []}
             selected={images}
@@ -281,19 +283,19 @@ export default function SendPage({
       </section>
 
       <section className="workflow-section" aria-labelledby="send-output-title">
-        <div className="section-title-row"><div><span className="step-number">3</span><h2 id="send-output-title">输出位置</h2></div></div>
-        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>ReHome 包</strong><small>创建时通过系统窗口选择 .rehome 保存位置</small></span></div></div>
+        <div className="section-title-row"><div><span className="step-number">3</span><h2 id="send-output-title">{t("输出位置")}</h2></div></div>
+        <div className="form-row"><div className="form-label"><FileArchive aria-hidden="true" /><span><strong>{t("ReHome 包")}</strong><small>{t("创建时通过系统窗口选择 .rehome 保存位置")}</small></span></div></div>
         <div className="command-row">
           <p role={busy ? "status" : undefined}>
             {busy
-              ? "正在创建迁移包。内容较多时可能需要几分钟，请保持 ReHome 打开。"
+              ? t("正在创建迁移包。内容较多时可能需要几分钟，请保持 ReHome 打开。")
               : hasContent
-                ? "选择已完成，可以创建迁移包"
-                : "请选择需要迁移的内容"}
+                ? t("选择已完成，可以创建迁移包")
+                : t("请选择需要迁移的内容")}
           </p>
           <button className="command-button" type="button" disabled={!canCreate} onClick={() => void handleCreate()}>
             {busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <PackagePlus aria-hidden="true" />}
-            {busy ? "正在创建 ReHome 包" : "创建 ReHome 包"}
+            {t(busy ? "正在创建 ReHome 包" : "创建 ReHome 包")}
           </button>
         </div>
         {error && <p className="inline-state status-error" role="alert">{error}</p>}
@@ -301,9 +303,9 @@ export default function SendPage({
 
       {report && (
         <section className="result-panel" aria-labelledby="package-result-title">
-          <div className="section-title-row"><div><CheckCircle2 aria-hidden="true" /><h2 id="package-result-title">迁移包已创建</h2></div><span className="status status-success">校验通过</span></div>
-          <div className="result-grid"><span>大小<strong>{formatBytes(report.bytes_written)}</strong></span><span>SHA-256<strong className="hash-text">{report.archive_hash}</strong></span><span>内容<strong>{report.counts.project_files} 个项目文件 / {report.counts.conversations} 个对话</strong></span></div>
-          <div className="result-actions"><code>{report.package_path}</code><button className="secondary-button" type="button" onClick={() => void openPath(report.reveal_id)}><FolderOpen aria-hidden="true" />在文件夹中显示</button></div>
+          <div className="section-title-row"><div><CheckCircle2 aria-hidden="true" /><h2 id="package-result-title">{t("迁移包已创建")}</h2></div><span className="status status-success">{t("校验通过")}</span></div>
+          <div className="result-grid"><span>{t("大小")}<strong>{formatBytes(report.bytes_written)}</strong></span><span>SHA-256<strong className="hash-text">{report.archive_hash}</strong></span><span>{t("内容")}<strong>{t("{files} 个项目文件 / {conversations} 个对话", { files: report.counts.project_files, conversations: report.counts.conversations })}</strong></span></div>
+          <div className="result-actions"><code>{report.package_path}</code><button className="secondary-button" type="button" onClick={() => void openPath(report.reveal_id)}><FolderOpen aria-hidden="true" />{t("在文件夹中显示")}</button></div>
         </section>
       )}
     </div>
@@ -326,6 +328,7 @@ interface ProjectChoiceProps {
 }
 
 function ProjectChoice({ name, path, fileCount, sourceAvailable = true, conversations, projectSelected, expanded, selectedConversations, onToggleProject, onToggleExpanded, onToggleConversation, onSelectRecommended }: ProjectChoiceProps) {
+  const { locale, t } = useI18n();
   const subagents = conversations.filter((conversation) => conversation.classification).length;
   const mainConversations = conversations.length - subagents;
   return (
@@ -333,44 +336,44 @@ function ProjectChoice({ name, path, fileCount, sourceAvailable = true, conversa
       <div className="project-choice-header">
         {onToggleProject ? (
           <label className="project-file-toggle">
-            <input type="checkbox" checked={projectSelected} onChange={onToggleProject} disabled={!sourceAvailable} aria-label={`选择项目 ${name}`} />
+            <input type="checkbox" checked={projectSelected} onChange={onToggleProject} disabled={!sourceAvailable} aria-label={t("选择项目 {name}", { name })} />
             <span className="project-copy">
               <strong>{name}</strong>
               <code>{path}</code>
-              {!sourceAvailable && <small>项目文件夹已不存在，仅可迁移下面的对话</small>}
+              {!sourceAvailable && <small>{t("项目文件夹已不存在，仅可迁移下面的对话")}</small>}
             </span>
           </label>
         ) : (
           <span className="project-copy project-copy-unassociated"><strong>{name}</strong><small>{path}</small></span>
         )}
-        <button className="project-expand" type="button" aria-expanded={expanded} aria-label={`${expanded ? "收起" : "展开"}项目 ${name}`} onClick={onToggleExpanded}>
-          <span>{conversations.length} 个对话{fileCount !== null && (sourceAvailable ? ` · ${fileCount || "已检测"} 个文件` : " · 项目文件缺失")}</span>
+        <button className="project-expand" type="button" aria-expanded={expanded} aria-label={t(expanded ? "收起项目 {name}" : "展开项目 {name}", { name })} onClick={onToggleExpanded}>
+          <span>{t("{count} 个对话", { count: conversations.length })}{fileCount !== null && (sourceAvailable ? ` · ${fileCount ? t("{count} 个文件", { count: fileCount }) : t("已检测 个文件")}` : ` · ${t("项目文件缺失")}`)}</span>
           {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         </button>
       </div>
       {expanded && (
-        <div className="project-conversations" aria-label={`${name} 的对话`}>
+        <div className="project-conversations" aria-label={t("{name} 的对话", { name })}>
           {conversations.length > 0 && (
             <div className="conversation-toolbar">
-              <span>主对话 {mainConversations} · 子 Agent {subagents} · 单独勾对话不含项目文件</span>
-              {mainConversations > 0 && <button type="button" onClick={onSelectRecommended}>只选主对话</button>}
+              <span>{t("主对话 {main} · 子 Agent {subagents} · 单独勾对话不含项目文件", { main: mainConversations, subagents })}</span>
+              {mainConversations > 0 && <button type="button" onClick={onSelectRecommended}>{t("只选主对话")}</button>}
             </div>
           )}
           {conversations.map((conversation) => (
             <label className="conversation-choice" key={conversation.task_id}>
-              <input type="checkbox" checked={selectedConversations.has(conversation.task_id)} onChange={() => onToggleConversation(conversation.task_id)} aria-label={`选择对话 ${conversation.title}`} />
+              <input type="checkbox" checked={selectedConversations.has(conversation.task_id)} onChange={() => onToggleConversation(conversation.task_id)} aria-label={t("选择对话 {name}", { name: conversation.title })} />
               {conversation.classification ? <Bot aria-hidden="true" /> : <MessageSquareText aria-hidden="true" />}
               <span>
                 <strong>{conversation.title}</strong>
                 <small className="conversation-details">
-                  <span className={conversation.classification ? "conversation-badge badge-subagent" : "conversation-badge badge-main"}>{conversation.classification ? `子 Agent${conversation.classification.depth ? ` · L${conversation.classification.depth}` : ""}` : "主对话"}</span>
-                  <span>{conversation.classification ? "辅助记录，通常可不迁移" : "建议迁移"}</span>
-                  <time>{formatDate(conversation.updated_at)}</time>
+                  <span className={conversation.classification ? "conversation-badge badge-subagent" : "conversation-badge badge-main"}>{conversation.classification ? `${t("子 Agent")}${conversation.classification.depth ? ` · L${conversation.classification.depth}` : ""}` : t("主对话")}</span>
+                  <span>{t(conversation.classification ? "辅助记录，通常可不迁移" : "建议迁移")}</span>
+                  <time>{formatDate(conversation.updated_at, locale)}</time>
                 </small>
               </span>
             </label>
           ))}
-          {!conversations.length && <p className="project-empty">这个项目下暂无可迁移对话</p>}
+          {!conversations.length && <p className="project-empty">{t("这个项目下暂无可迁移对话")}</p>}
         </div>
       )}
     </div>
@@ -390,6 +393,7 @@ interface OptionalContentGroupProps {
 }
 
 function OptionalContentGroup({ id, title, description, icon, items, selected, expanded, onToggleExpanded, onChange }: OptionalContentGroupProps) {
+  const { t } = useI18n();
   const allSelected = items.length > 0 && items.every((item) => selected.has(item.content_id));
   function toggleItem(contentId: string) {
     const next = new Set(selected);
@@ -405,12 +409,12 @@ function OptionalContentGroup({ id, title, description, icon, items, selected, e
     <div className="optional-content-group">
       <div className="optional-content-header">
         <label className="optional-all-toggle">
-          <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={!items.length} aria-label={`全选 ${title}`} />
+          <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={!items.length} aria-label={t("全选 {name}", { name: title })} />
           {icon}
           <span><strong>{title}</strong><small>{description}</small></span>
         </label>
         <button type="button" className="project-expand" aria-expanded={expanded} aria-controls={`optional-${id}`} onClick={onToggleExpanded}>
-          <span>已选 {selected.size} / {items.length}</span>
+          <span>{t("已选 {selected} / {total}", { selected: selected.size, total: items.length })}</span>
           {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         </button>
       </div>
@@ -418,18 +422,18 @@ function OptionalContentGroup({ id, title, description, icon, items, selected, e
         <div className="optional-items" id={`optional-${id}`}>
           {items.map((item) => (
             <div className={`optional-item${item.thumbnail_data_url ? " optional-item-image" : ""}`} key={item.content_id}>
-              <input type="checkbox" checked={selected.has(item.content_id)} onChange={() => toggleItem(item.content_id)} aria-label={`选择 ${item.name}`} />
+              <input type="checkbox" checked={selected.has(item.content_id)} onChange={() => toggleItem(item.content_id)} aria-label={t("选择 {name}", { name: item.name })} />
               {item.thumbnail_data_url && <img className="image-thumbnail" src={item.thumbnail_data_url} alt="" />}
               <span><strong>{item.name}</strong><small>{item.relative_path}</small></span>
               <small className="item-size">{formatBytes(item.size_bytes)}</small>
               {item.reveal_id && (
-                <button className="icon-button image-reveal-button" type="button" title="在文件夹中显示" aria-label={`在文件夹中显示 ${item.name}`} onClick={() => void openPath(item.reveal_id!)}>
+                <button className="icon-button image-reveal-button" type="button" title={t("在文件夹中显示")} aria-label={t("在文件夹中显示 {name}", { name: item.name })} onClick={() => void openPath(item.reveal_id!)}>
                   <FolderOpen aria-hidden="true" />
                 </button>
               )}
             </div>
           ))}
-          {!items.length && <p className="project-empty">没有检测到这类内容</p>}
+          {!items.length && <p className="project-empty">{t("没有检测到这类内容")}</p>}
         </div>
       )}
     </div>
@@ -440,10 +444,10 @@ function formatDisplayPath(value: string): string {
   return value.startsWith("\\\\?\\") ? value.slice(4) : value;
 }
 
-function formatDate(value: string): string {
-  if (!value) return "时间未知";
+function formatDate(value: string, locale: "zh-CN" | "en"): string {
+  if (!value) return locale === "en" ? "Time unknown" : "时间未知";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(locale, { hour12: false });
 }
 
 function formatBytes(bytes: number): string {

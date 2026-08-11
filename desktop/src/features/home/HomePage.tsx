@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { listTransactions } from "../../lib/api";
+import { useI18n } from "../../lib/i18n";
 import type { CodexInventory, RecoveryStatus, TransactionSummary } from "../../lib/types";
 
 interface HomePageProps {
@@ -30,6 +31,7 @@ export default function HomePage({
   error,
   onNavigate,
 }: HomePageProps) {
+  const { t } = useI18n();
   const [recent, setRecent] = useState<TransactionSummary | null>(null);
 
   useEffect(() => {
@@ -48,41 +50,41 @@ export default function HomePage({
     <div className="page home-page">
       <header className="page-header">
         <p className="eyebrow">CODEX WORKSPACE</p>
-        <h1 ref={headingRef} tabIndex={-1}>迁移工作台</h1>
-        <p className="page-description">在本机打包或恢复 Codex 工作内容。</p>
+        <h1 ref={headingRef} tabIndex={-1}>{t("迁移工作台")}</h1>
+        <p className="page-description">{t("在本机打包或恢复 Codex 工作内容。")}</p>
       </header>
 
-      <section className="action-strip" aria-label="迁移操作">
+      <section className="action-strip" aria-label={t("迁移操作")}>
         <button className="primary-action send-action" type="button" onClick={() => onNavigate("send")}>
           <ArrowUpFromLine aria-hidden="true" />
-          <span><strong>发送</strong><small>创建离线 .rehome 包</small></span>
+          <span><strong>{t("发送")}</strong><small>{t("创建离线 .rehome 包")}</small></span>
         </button>
         <button className="primary-action receive-action" type="button" onClick={() => onNavigate("receive")}>
           <ArrowDownToLine aria-hidden="true" />
-          <span><strong>接收</strong><small>检查并恢复迁移包</small></span>
+          <span><strong>{t("接收")}</strong><small>{t("检查并恢复迁移包")}</small></span>
         </button>
       </section>
 
       <section className="workflow-section" aria-labelledby="detected-title">
         <div className="section-title-row">
           <div>
-            <p className="section-kicker">本机检测</p>
-            <h2 id="detected-title">Codex 内容</h2>
+            <p className="section-kicker">{t("本机检测")}</p>
+            <h2 id="detected-title">{t("Codex 内容")}</h2>
           </div>
-          {inventory && <span className="status status-success"><CheckCircle2 aria-hidden="true" />已检测</span>}
+          {inventory && <span className="status status-success"><CheckCircle2 aria-hidden="true" />{t("已检测")}</span>}
         </div>
 
-        {loading && <p className="inline-state" role="status">正在检测 Codex...</p>}
+        {loading && <p className="inline-state" role="status">{t("正在检测 Codex...")}</p>}
         {error && <p className="inline-state status-error" role="alert">{error}</p>}
         {inventory && (
           <>
             <div className="path-line"><span>Codex Home</span><code>{inventory.codex_home}</code></div>
-            <div className="count-grid" aria-label="内容数量">
-              <span><FolderKanban aria-hidden="true" /><strong>{inventory.counts.projects}</strong> 个项目</span>
-              <span><MessageSquareText aria-hidden="true" /><strong>{inventory.counts.conversations}</strong> 个对话</span>
-              <span><Sparkles aria-hidden="true" /><strong>{inventory.counts.skills}</strong> 个技能</span>
-              <span><Puzzle aria-hidden="true" /><strong>{inventory.counts.plugins}</strong> 个插件</span>
-              <span><Image aria-hidden="true" /><strong>{inventory.counts.generated_images}</strong> 张生成图片</span>
+            <div className="count-grid" aria-label={t("内容数量")}>
+              <span><FolderKanban aria-hidden="true" /><strong>{inventory.counts.projects}</strong> {t("{count} 个项目", { count: "" }).trim()}</span>
+              <span><MessageSquareText aria-hidden="true" /><strong>{inventory.counts.conversations}</strong> {t("{count} 个对话", { count: "" }).trim()}</span>
+              <span><Sparkles aria-hidden="true" /><strong>{inventory.counts.skills}</strong> {t("{count} 个技能", { count: "" }).trim()}</span>
+              <span><Puzzle aria-hidden="true" /><strong>{inventory.counts.plugins}</strong> {t("{count} 个插件", { count: "" }).trim()}</span>
+              <span><Image aria-hidden="true" /><strong>{inventory.counts.generated_images}</strong> {t("{count} 张生成图片", { count: "" }).trim()}</span>
             </div>
           </>
         )}
@@ -91,26 +93,26 @@ export default function HomePage({
       <section className="workflow-section" aria-labelledby="recent-title">
         <div className="section-title-row">
           <div>
-            <p className="section-kicker">事务记录</p>
-            <h2 id="recent-title">最近交接</h2>
+            <p className="section-kicker">{t("事务记录")}</p>
+            <h2 id="recent-title">{t("最近交接")}</h2>
           </div>
           <Clock3 aria-hidden="true" />
         </div>
         {recent ? (
           <div className="recent-row">
             <PackageCheck aria-hidden="true" />
-            <div><strong>{recent.changed_files} 个文件变更</strong><span>{recent.created_at}</span></div>
-            <span className={`status status-${recent.status}`}>{recoveryStatusLabel(recent.status)}</span>
+            <div><strong>{t("{count} 个文件变更", { count: recent.changed_files })}</strong><span>{recent.created_at}</span></div>
+            <span className={`status status-${recent.status}`}>{recoveryStatusLabel(recent.status, t)}</span>
           </div>
         ) : (
-          <p className="empty-state">暂无交接记录</p>
+          <p className="empty-state">{t("暂无交接记录")}</p>
         )}
       </section>
     </div>
   );
 }
 
-function recoveryStatusLabel(status: RecoveryStatus): string {
+function recoveryStatusLabel(status: RecoveryStatus, t: (key: string) => string): string {
   const labels: Record<RecoveryStatus, string> = {
     prepared: "已准备",
     applying: "恢复中",
@@ -120,5 +122,5 @@ function recoveryStatusLabel(status: RecoveryStatus): string {
     rolled_back: "已回滚",
     rollback_failed: "回滚失败",
   };
-  return labels[status];
+  return t(labels[status]);
 }

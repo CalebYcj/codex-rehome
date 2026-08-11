@@ -4,7 +4,7 @@ use crate::core::{
         update_status, PreparedTransaction,
     },
     bridge::{
-        apply_bridge_plan_for_transaction, apply_file_operation_for_transaction,
+        apply_bridge_plan_for_transaction, apply_file_source_for_transaction,
         register_project_with_detected_cli,
     },
     error::{ErrorCode, RehomeError},
@@ -20,6 +20,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, io, path::Path};
+use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 const SESSION_INDEX_SOURCE: &str = "codex/session_index.jsonl";
@@ -260,18 +261,25 @@ fn apply_regular_files(
         {
             continue;
         }
-        let bytes = verified.authenticated_payload(&operation.package_source)?;
+        let mut staged = NamedTempFile::new().map_err(|error| {
+            restore_failed(format!("could not stage restored payload: {error}"))
+        })?;
+        let bytes = verified
+            .write_authenticated_payload(&operation.package_source, staged.as_file_mut())?;
+        staged.as_file().sync_all().map_err(|error| {
+            restore_failed(format!("could not flush restored payload: {error}"))
+        })?;
         let root = operation_root(plan, &operation.target)?;
-        apply_file_operation_for_transaction(
+        apply_file_source_for_transaction(
             root,
             operation,
-            &bytes,
+            staged.path(),
             transaction.journal.transaction_id,
         )?;
         record_applied_mutation(transaction, &operation.target)?;
         restored_files += 1;
         restored_bytes = restored_bytes
-            .checked_add(bytes.len() as u64)
+            .checked_add(bytes)
             .ok_or_else(|| restore_failed("restored byte count overflowed"))?;
     }
     Ok((restored_files, restored_bytes))

@@ -213,6 +213,7 @@ const committedTransaction = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   api.discoverCodex.mockResolvedValue(inventory);
   api.listTransactions.mockResolvedValue({ transactions: [], warnings: [] });
   api.inspectPackage.mockResolvedValue(preview);
@@ -268,6 +269,26 @@ async function openReceive(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("ReHome Desktop workflows", () => {
+  it("switches the complete workspace to English and remembers the choice", async () => {
+    const user = userEvent.setup();
+    const firstRender = render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Switch to English" }));
+    expect(screen.getByRole("heading", { name: "Migration workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Go to Send" })).toBeInTheDocument();
+    expect(screen.getByText("This device is ready")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to Send" }));
+    expect(screen.getByRole("heading", { name: "Create handoff" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Select projects and conversations" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to Receive" }));
+    expect(screen.getByRole("heading", { name: "Restore handoff" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Inspect migration package" })).toBeInTheDocument();
+
+    firstRender.unmount();
+    render(<App />);
+    expect(screen.getByRole("heading", { name: "Migration workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "切换为中文" })).toBeInTheDocument();
+  });
   it("shows the detected Codex home and content counts", async () => {
     render(<App />);
 

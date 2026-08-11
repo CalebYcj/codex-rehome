@@ -6,6 +6,7 @@ import {
   installCheckedUpdate,
   type UpdateCheckResult,
 } from "../../lib/updater";
+import { useI18n } from "../../lib/i18n";
 
 interface UpdateControlProps {
   migrationBusy: boolean;
@@ -20,6 +21,7 @@ type UpdateState =
   | { phase: "error" };
 
 export default function UpdateControl({ migrationBusy, onInstallingChange }: UpdateControlProps) {
+  const { t } = useI18n();
   const [state, setState] = useState<UpdateState>({ phase: "checking" });
 
   const runCheck = useCallback(async () => {
@@ -54,7 +56,7 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
     return (
       <div className="update-control" role="status">
         <LoaderCircle className="spin" aria-hidden="true" />
-        <span>正在检查更新</span>
+        <span>{t("正在检查更新")}</span>
       </div>
     );
   }
@@ -63,7 +65,7 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
     return (
       <div className="update-control update-success" role="status">
         <ShieldCheck aria-hidden="true" />
-        <span>安装完成，正在重启…</span>
+        <span>{t("安装完成，正在重启…")}</span>
       </div>
     );
   }
@@ -71,9 +73,9 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
   if (state.phase === "error") {
     return (
       <div className="update-control update-stack">
-        <span>检查失败，不影响离线迁移</span>
-        <button type="button" onClick={() => void runCheck()} aria-label="重新检查更新">
-          <RefreshCw aria-hidden="true" />重新检查
+        <span>{t("检查失败，不影响离线迁移")}</span>
+        <button type="button" onClick={() => void runCheck()} aria-label={t("重新检查更新")}>
+          <RefreshCw aria-hidden="true" />{t("重新检查")}
         </button>
       </div>
     );
@@ -82,7 +84,7 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
   if (state.phase === "installing") {
     return (
       <div className="update-control update-stack" role="status">
-        <span>正在安装 {state.percent === null ? "…" : `${state.percent}%`}</span>
+        <span>{t("正在安装 {percent}", { percent: state.percent === null ? "…" : `${state.percent}%` })}</span>
         <div className="update-progress" aria-hidden="true">
           <span style={{ width: `${state.percent ?? 8}%` }} />
         </div>
@@ -92,13 +94,13 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
 
   const { result } = state;
   if (result.status === "unsupported") {
-    return <div className="update-control"><span>开发预览模式</span></div>;
+    return <div className="update-control"><span>{t("开发预览模式")}</span></div>;
   }
 
   if (result.status === "current") {
     return (
       <div className="update-control update-stack">
-        <span>当前已是最新版</span>
+        <span>{t("当前已是最新版")}</span>
         <button type="button" onClick={() => void runCheck()}>
           <RefreshCw aria-hidden="true" />v{result.currentVersion}
         </button>
@@ -109,16 +111,16 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
   return (
     <div className="update-control update-available">
       <div className="update-copy">
-        <strong>发现新版本</strong>
-        <span>当前 {result.currentVersion}</span>
-        {migrationBusy && <small>请先完成当前迁移</small>}
+        <strong>{t("发现新版本")}</strong>
+        <span>{t("当前 {version}", { version: result.currentVersion })}</span>
+        {migrationBusy && <small>{t("请先完成当前迁移")}</small>}
       </div>
       <button
         type="button"
         disabled={migrationBusy}
         onClick={() => void install(result)}
-        aria-label={`更新到 ${result.version}`}
-        title={result.notes ?? `更新到 ${result.version}`}
+        aria-label={t("更新到 {version}", { version: result.version })}
+        title={result.notes ?? t("更新到 {version}", { version: result.version })}
       >
         <Download aria-hidden="true" />v{result.version}
       </button>

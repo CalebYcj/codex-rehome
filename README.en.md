@@ -47,6 +47,8 @@ Packages exclude login tokens, cookies, `.env` files, private keys, `.git`, `nod
 
 This is not official cloud sync and it does not automatically keep two computers synchronized each day. After a cross-platform move, an old conversation can remain useful historical context while its original working-directory handle no longer works. Reopen the restored project, then continue in a new task when needed.
 
+Each `.rehome` package and individual file can currently be up to 16 GiB. Large files are streamed during creation, inspection, and restore instead of being loaded entirely into memory. Codex thread metadata has a separate 64 MiB limit.
+
 Login sessions, browser state, running terminals, unsaved work, and native system dependencies are not fully portable. Different accounts or workspaces may require fresh sign-in or authorization for external services.
 
 ## Need the Skill instead?
@@ -56,6 +58,8 @@ Login sessions, browser state, running terminals, unsaved work, and native syste
 ## Install and help
 
 Starting with `v0.1.4`, ReHome Desktop can check, verify, and install signed updates inside the app. Users on `v0.1.3` or earlier must install one final release manually. The updater signature prevents tampered update packages; it is separate from paid Apple or Windows publisher signing, so the operating system may still show an unknown-developer warning.
+
+The interface starts in Chinese. Click `English` in the sidebar; ReHome remembers the choice on this device.
 
 - [Chinese installation guide](docs/desktop-install.md)
 - [English installation guide](docs/desktop-install.en.md)

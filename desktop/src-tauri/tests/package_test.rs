@@ -607,7 +607,7 @@ fn rejects_invalid_or_missing_manifest_payload_references() -> Result<(), Box<dy
 }
 
 #[test]
-fn inspection_rejects_oversized_controls_entries_and_entry_counts() -> Result<(), Box<dyn Error>> {
+fn inspection_rejects_oversized_controls_and_entry_counts() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
 
     let oversized_control = directory.path().join("oversized-control.rehome");
@@ -616,11 +616,6 @@ fn inspection_rejects_oversized_controls_entries_and_entry_counts() -> Result<()
         &[("manifest.json", &vec![b' '; 4 * 1024 * 1024 + 1])],
     )?;
     assert_error_message_contains(inspect_package(&oversized_control), "control file size");
-
-    let oversized_entry = directory.path().join("oversized-entry.rehome");
-    write_test_zip(&oversized_entry, &[("payload.bin", b"x")])?;
-    patch_first_central_uncompressed_size(&oversized_entry, 300 * 1024 * 1024)?;
-    assert_error_message_contains(inspect_package(&oversized_entry), "entry size");
 
     let excessive_count = directory.path().join("excessive-count.rehome");
     write_many_directories_zip(&excessive_count, 10_001)?;
@@ -1049,18 +1044,6 @@ fn write_many_directories_zip(path: &Path, count: usize) -> Result<(), Box<dyn E
         writer.add_directory(format!("entries/{index:05}/"), options)?;
     }
     writer.finish()?;
-    Ok(())
-}
-
-fn patch_first_central_uncompressed_size(path: &Path, size: u32) -> Result<(), Box<dyn Error>> {
-    let mut bytes = fs::read(path)?;
-    let signature = [0x50, 0x4b, 0x01, 0x02];
-    let offset = bytes
-        .windows(signature.len())
-        .position(|window| window == signature)
-        .ok_or("central directory header missing")?;
-    bytes[offset + 24..offset + 28].copy_from_slice(&size.to_le_bytes());
-    fs::write(path, bytes)?;
     Ok(())
 }
 
