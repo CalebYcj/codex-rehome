@@ -2,12 +2,12 @@ use rehome_desktop_lib::core::{
     bridge::apply_bridge_plan,
     error::ErrorCode,
     models::{
-        ChangeKind, ContentCounts, ConversationEntry, ExclusionSummary, PackageManifest,
-        PackageMode, PackagePreview, ProjectEntry, ReferenceRewriteKind, SessionAction, SourceOs,
-        TargetInventory,
+        ChangeKind, ContentCounts, ConversationEntry, ExclusionSummary, FileConflictResolution,
+        PackageManifest, PackageMode, PackagePreview, ProjectEntry, ReferenceRewriteKind,
+        SessionAction, SourceOs, TargetInventory,
     },
     package::inspect_package,
-    planner::build_restore_plan,
+    planner::{build_restore_plan, build_restore_plan_with_conflict_resolution},
 };
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -101,6 +101,60 @@ fn classifies_project_files_from_target_state() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn resolves_regular_file_conflicts_with_an_explicit_policy() -> Result<(), Box<dyn Error>> {
+    for (resolution, expected_action, rollback_required) in [
+        (
+            FileConflictResolution::KeepExisting,
+            ChangeKind::Preserve,
+            false,
+        ),
+        (FileConflictResolution::UsePackage, ChangeKind::Update, true),
+    ] {
+        let fixture = planner_fixture(None)?;
+        fs::create_dir_all(fixture.project_target.parent().unwrap())?;
+        fs::write(&fixture.project_target, b"local project\n")?;
+
+        let plan = build_restore_plan_with_conflict_resolution(
+            &fixture.preview,
+            &fixture.target,
+            &fixture.projects_root,
+            Some(resolution),
+        )?;
+        let operation = operation_for(&plan.operations, PROJECT_SOURCE);
+
+        assert_eq!(operation.action, expected_action);
+        assert_eq!(
+            operation.expected_previous_hash,
+            Some(checksum(b"local project\n"))
+        );
+        assert_eq!(operation.rollback_required, rollback_required);
+        assert_eq!(plan.conflict_count, 0);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn explicit_file_policy_does_not_overwrite_non_file_targets() -> Result<(), Box<dyn Error>> {
+    let fixture = planner_fixture(None)?;
+    fs::create_dir_all(&fixture.project_target)?;
+
+    let plan = build_restore_plan_with_conflict_resolution(
+        &fixture.preview,
+        &fixture.target,
+        &fixture.projects_root,
+        Some(FileConflictResolution::UsePackage),
+    )?;
+    let operation = operation_for(&plan.operations, PROJECT_SOURCE);
+
+    assert_eq!(operation.action, ChangeKind::Conflict);
+    assert_eq!(operation.expected_previous_hash, None);
+    assert!(!operation.rollback_required);
+    assert_eq!(plan.conflict_count, 1);
     Ok(())
 }
 

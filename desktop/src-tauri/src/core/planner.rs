@@ -1,9 +1,9 @@
 use crate::core::{
     error::{ErrorCode, RehomeError},
     models::{
-        BridgeVerificationRequirements, ChangeKind, PackagePreview, PlannedOperation,
-        PlannedSession, ReferenceRewrite, ReferenceRewriteKind, RestorePlan, SessionAction,
-        SourceOs, TargetInventory,
+        BridgeVerificationRequirements, ChangeKind, FileConflictResolution, PackagePreview,
+        PlannedOperation, PlannedSession, ReferenceRewrite, ReferenceRewriteKind, RestorePlan,
+        SessionAction, SourceOs, TargetInventory,
     },
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
@@ -61,6 +61,15 @@ pub fn build_restore_plan(
     target: &TargetInventory,
     projects_root: &Path,
 ) -> Result<RestorePlan, RehomeError> {
+    build_restore_plan_with_conflict_resolution(package, target, projects_root, None)
+}
+
+pub fn build_restore_plan_with_conflict_resolution(
+    package: &PackagePreview,
+    target: &TargetInventory,
+    projects_root: &Path,
+    conflict_resolution: Option<FileConflictResolution>,
+) -> Result<RestorePlan, RehomeError> {
     validate_plan_inputs(package, target, projects_root)?;
     validate_root_ancestry(&target.codex_home, target.target_os)?;
     validate_root_ancestry(projects_root, target.target_os)?;
@@ -98,6 +107,7 @@ pub fn build_restore_plan(
                 target_path,
                 payload,
                 target.target_os,
+                conflict_resolution,
             )?);
             consumed.insert(source.clone());
         }
@@ -320,7 +330,13 @@ pub fn build_restore_plan(
             Some(disposition) => {
                 classify_plugin_file(source, target_path, disposition, target.target_os)?
             }
-            None => classify_file(source, target_path, payload, target.target_os)?,
+            None => classify_file(
+                source,
+                target_path,
+                payload,
+                target.target_os,
+                conflict_resolution,
+            )?,
         };
         operations.push(operation);
     }
@@ -450,9 +466,11 @@ fn classify_file(
     target: PathBuf,
     payload: &VerifiedPayload,
     target_os: SourceOs,
+    conflict_resolution: Option<FileConflictResolution>,
 ) -> Result<PlannedOperation, RehomeError> {
     let state = target_state(&target, target_os)?;
-    let (action, expected_previous_hash) = classify_target_state(&state, &payload.content_hash);
+    let (action, expected_previous_hash) =
+        classify_target_state(&state, &payload.content_hash, conflict_resolution);
     Ok(PlannedOperation {
         package_source: source.to_owned(),
         target,
@@ -634,13 +652,24 @@ fn classify_bridge_change(source: &str, target: PathBuf, state: TargetState) -> 
     }
 }
 
-fn classify_target_state(state: &TargetState, incoming_hash: &str) -> (ChangeKind, Option<String>) {
+fn classify_target_state(
+    state: &TargetState,
+    incoming_hash: &str,
+    conflict_resolution: Option<FileConflictResolution>,
+) -> (ChangeKind, Option<String>) {
     match state {
         TargetState::Missing => (ChangeKind::Add, None),
         TargetState::File(hash) if hash.eq_ignore_ascii_case(incoming_hash) => {
             (ChangeKind::Unchanged, Some(hash.clone()))
         }
-        TargetState::File(hash) => (ChangeKind::Conflict, Some(hash.clone())),
+        TargetState::File(hash) => (
+            match conflict_resolution {
+                Some(FileConflictResolution::KeepExisting) => ChangeKind::Preserve,
+                Some(FileConflictResolution::UsePackage) => ChangeKind::Update,
+                None => ChangeKind::Conflict,
+            },
+            Some(hash.clone()),
+        ),
         TargetState::Other => (ChangeKind::Conflict, None),
     }
 }
@@ -835,7 +864,7 @@ fn plan_branch_session(
                 ));
             }
         }
-        let (change, previous) = classify_target_state(&state, &expected_hash);
+        let (change, previous) = classify_target_state(&state, &expected_hash, None);
         return Ok((
             SessionAction::ImportAsBranch,
             candidate,

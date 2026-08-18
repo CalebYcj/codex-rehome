@@ -112,6 +112,14 @@ mod tests {
         });
         assert!(serde_json::from_value::<BuildRestorePlanRequest>(build).is_err());
 
+        let conflict_resolution = json!({
+            "action": "build",
+            "package_selection_id": Uuid::new_v4(),
+            "destination_selection_id": Uuid::new_v4(),
+            "conflict_resolution": "keep_existing"
+        });
+        assert!(serde_json::from_value::<BuildRestorePlanRequest>(conflict_resolution).is_ok());
+
         let apply = json!({
             "plan_id": Uuid::new_v4(),
             "codex_closed_confirmed": true,

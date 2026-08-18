@@ -6,11 +6,11 @@ use rehome_desktop_lib::core::{
     backup::claim_transaction_rollback,
     error::ErrorCode,
     models::{
-        ChangeKind, ContentCounts, ConversationEntry, CreatePackageRequest, RecoveryStatus,
-        RegistrationStatus, RestoreOptions, RestorePlan, SourceOs, TargetInventory,
+        ChangeKind, ContentCounts, ConversationEntry, CreatePackageRequest, FileConflictResolution,
+        RecoveryStatus, RegistrationStatus, RestoreOptions, RestorePlan, SourceOs, TargetInventory,
     },
     package::{create_package, inspect_package},
-    planner::build_restore_plan,
+    planner::{build_restore_plan, build_restore_plan_with_conflict_resolution},
     restore::{
         apply_restore, apply_restore_by_id, apply_restore_with_registrar, list_transaction_history,
         list_transactions, recover_incomplete_transactions, rollback, transaction_summary,
@@ -69,6 +69,66 @@ fn successful_restore_commits_with_layered_verification() -> Result<(), Box<dyn 
         operation["target"] == harness.plan.sessions[0].target.to_string_lossy().as_ref()
             && operation["backup_kind"] == "absent"
     }));
+    Ok(())
+}
+
+#[test]
+fn replacing_a_conflicting_project_file_is_backed_up_and_rollback_safe(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let project_operation = harness
+        .plan
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.package_source.starts_with("projects/")
+                && operation.package_source.ends_with("README.md")
+        })
+        .ok_or("fixture project README operation is missing")?;
+    let target_path = project_operation.target.clone();
+    fs::create_dir_all(target_path.parent().ok_or("project target has no parent")?)?;
+    let local_contents = b"# Keep this local version until replacement is committed\n";
+    fs::write(&target_path, local_contents)?;
+    let package_contents = fs::read(harness._fixture.project_path.join("README.md"))?;
+
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan_with_conflict_resolution(
+        &preview,
+        &target,
+        &harness.plan.projects_root,
+        Some(FileConflictResolution::UsePackage),
+    )?;
+    let replacement = plan
+        .operations
+        .iter()
+        .find(|operation| operation.target == target_path)
+        .ok_or("resolved project operation is missing")?;
+    assert_eq!(replacement.action, ChangeKind::Update);
+    assert!(replacement.rollback_required);
+
+    let report = apply_restore(plan, harness.options())?;
+    assert_eq!(fs::read(&target_path)?, package_contents);
+
+    let journal = harness.read_journal(report.transaction_id)?;
+    let journal_operation = journal["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["target"] == target_path.to_string_lossy().as_ref())
+        .ok_or("project replacement was not recorded in the transaction")?;
+    assert_eq!(journal_operation["backup_kind"], "file");
+
+    let rollback_report = rollback(report.transaction_id)?;
+    assert!(rollback_report.restored_files > 0);
+    assert_eq!(fs::read(target_path)?, local_contents);
     Ok(())
 }
 

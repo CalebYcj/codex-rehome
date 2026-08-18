@@ -8,6 +8,7 @@ export type RecoveryStatus =
   | "rolled_back"
   | "rollback_failed";
 export type ChangeKind = "add" | "update" | "unchanged" | "preserve" | "conflict";
+export type FileConflictResolution = "keep_existing" | "use_package";
 export type RegistrationStatus =
   | "registered"
   | "command_unavailable"

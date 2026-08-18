@@ -2,10 +2,11 @@ use rehome_desktop_lib::core::{
     error::{ErrorCode, RehomeError},
     models::{
         ChangeKind, CodexInventory, ContentCounts, ConversationEntry, CreatePackageReport,
-        CreatePackageRequest, ExclusionSummary, PackageManifest, PackageMode, PackagePreview,
-        PendingRecovery, PlannedOperation, PlannedSession, ProjectEntry, RecoveryStatus,
-        ReferenceRewrite, ReferenceRewriteKind, RestoreOptions, RestorePlan, RestoreReport,
-        RollbackReport, SessionAction, SourceOs, TargetInventory, VerificationReport,
+        CreatePackageRequest, ExclusionSummary, FileConflictResolution, PackageManifest,
+        PackageMode, PackagePreview, PendingRecovery, PlannedOperation, PlannedSession,
+        ProjectEntry, RecoveryStatus, ReferenceRewrite, ReferenceRewriteKind, RestoreOptions,
+        RestorePlan, RestoreReport, RollbackReport, SessionAction, SourceOs, TargetInventory,
+        VerificationReport,
     },
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -140,6 +141,7 @@ fn public_models_support_the_core_contract_traits() {
     assert_contract::<CreatePackageReport>();
     assert_contract::<PackagePreview>();
     assert_contract::<ChangeKind>();
+    assert_contract::<FileConflictResolution>();
     assert_contract::<SessionAction>();
     assert_contract::<ReferenceRewriteKind>();
     assert_contract::<ReferenceRewrite>();
@@ -170,6 +172,10 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
         (SessionAction::Import, "import"),
         (SessionAction::ImportAsBranch, "import_as_branch"),
     ];
+    let conflict_resolutions = [
+        (FileConflictResolution::KeepExisting, "keep_existing"),
+        (FileConflictResolution::UsePackage, "use_package"),
+    ];
     let rewrite_kinds = [
         (ReferenceRewriteKind::ConversationId, "conversation_id"),
         (
@@ -193,6 +199,9 @@ fn planning_and_recovery_enums_serialize_as_stable_snake_case_values() {
         assert_eq!(serde_json::to_value(value).unwrap(), expected);
     }
     for (value, expected) in session_actions {
+        assert_eq!(serde_json::to_value(value).unwrap(), expected);
+    }
+    for (value, expected) in conflict_resolutions {
         assert_eq!(serde_json::to_value(value).unwrap(), expected);
     }
     for (value, expected) in rewrite_kinds {

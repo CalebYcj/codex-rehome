@@ -173,6 +173,13 @@ pub enum ChangeKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum FileConflictResolution {
+    KeepExisting,
+    UsePackage,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionAction {
     Skip,
     Import,
