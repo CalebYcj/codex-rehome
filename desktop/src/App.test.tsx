@@ -568,9 +568,9 @@ describe("ReHome Desktop workflows", () => {
     expect(api.openPath).toHaveBeenCalledWith(inventory.generated_images[0].reveal_id);
   });
 
-  it("shows package integrity, conflicts, and destination before restore enablement", async () => {
+  it("lets the user keep local files to resolve ordinary conflicts", async () => {
     const user = userEvent.setup();
-    api.buildRestorePlan.mockResolvedValue({
+    const conflictPlan = {
       ...basePlan,
       conflict_count: 1,
       operations: [
@@ -580,7 +580,14 @@ describe("ReHome Desktop workflows", () => {
           expected_previous_hash: "different-hash",
         },
       ],
-    });
+    };
+    api.buildRestorePlan
+      .mockResolvedValueOnce(conflictPlan)
+      .mockResolvedValueOnce({
+        ...conflictPlan,
+        conflict_count: 0,
+        operations: [{ ...conflictPlan.operations[0], action: "preserve", rollback_required: false }],
+      });
     render(<App />);
     await screen.findByText(inventory.codex_home);
 
@@ -594,7 +601,45 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.queryByText("事务备份")).toBeNull();
     expect(screen.getByText("安全备份由 ReHome 自动管理")).toBeInTheDocument();
     expect(screen.getAllByText("C:\\Restored Projects").length).toBeGreaterThan(0);
+    expect(screen.getByText("发现 1 个同名但内容不同的文件。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "保留新电脑文件（推荐）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "使用迁移包文件" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "导入到 Codex" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "保留新电脑文件（推荐）" }));
+
+    expect(api.buildRestorePlan).toHaveBeenLastCalledWith(
+      preview.selection_id,
+      "13131313-1313-4131-8131-131313131313",
+      "keep_existing",
+    );
+    expect(await screen.findByText("已选择保留新电脑上的不同文件。")).toBeVisible();
+    expect(screen.getByText("冲突 0")).toBeVisible();
+  });
+
+  it("offers the same conflict choices in English", async () => {
+    const user = userEvent.setup();
+    api.buildRestorePlan.mockResolvedValue({
+      ...basePlan,
+      conflict_count: 1,
+      operations: [{
+        ...basePlan.operations[0],
+        action: "conflict",
+        expected_previous_hash: "different-hash",
+      }],
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "Switch to English" }));
+    await user.click(screen.getByRole("button", { name: "Go to Import" }));
+    await user.click(screen.getByRole("button", { name: "Choose migration package" }));
+    await screen.findByText("macOS");
+    await user.click(screen.getByRole("button", { name: "Choose project save location" }));
+    await user.click(screen.getByRole("button", { name: "Preview import" }));
+
+    expect(await screen.findByText("Same-name files with different content: 1.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Keep files on this computer (recommended)" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Use files from the migration package" })).toBeVisible();
   });
 
   it("labels preserved local plugins without blocking restore", async () => {

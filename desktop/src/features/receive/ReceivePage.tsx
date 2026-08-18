@@ -24,6 +24,7 @@ import {
   errorMessage,
   registrationIsComplete,
   type CodexInventory,
+  type FileConflictResolution,
   type PackagePreview,
   type ProjectRegistration,
   type RegistrationStatus,
@@ -62,6 +63,7 @@ export default function ReceivePage({
   const [preview, setPreview] = useState<PackagePreview | null>(null);
   const [locations, setLocations] = useState<RestoreLocationSelection | null>(null);
   const [plan, setPlan] = useState<RestorePlan | null>(null);
+  const [conflictResolution, setConflictResolution] = useState<FileConflictResolution | null>(null);
   const [codexClosed, setCodexClosed] = useState(false);
   const [report, setReport] = useState<RestoreReport | null>(null);
   const [phase, setPhase] = useState<"idle" | "inspecting" | "selecting" | "planning" | "restoring">("idle");
@@ -115,7 +117,7 @@ export default function ReceivePage({
     }
   }
 
-  async function handlePlan() {
+  async function handlePlan(resolution: FileConflictResolution | null = null) {
     if (!preview || !locations || phase !== "idle") return;
     const generation = ++requestGeneration.current;
     setError(null);
@@ -123,8 +125,15 @@ export default function ReceivePage({
     setPhase("planning");
     onOperationStart();
     try {
-      const nextPlan = await buildRestorePlan(preview.selection_id, locations.selection_id);
-      if (generation === requestGeneration.current) setPlan(nextPlan);
+      const nextPlan = await buildRestorePlan(
+        preview.selection_id,
+        locations.selection_id,
+        resolution ?? undefined,
+      );
+      if (generation === requestGeneration.current) {
+        setPlan(nextPlan);
+        setConflictResolution(resolution);
+      }
     } catch (caught) {
       if (generation !== requestGeneration.current) return;
       setPlan(null);
@@ -137,6 +146,7 @@ export default function ReceivePage({
 
   function clearRestoreSelection() {
     setPlan(null);
+    setConflictResolution(null);
     setReport(null);
     setCodexClosed(false);
     setRegistrationStatuses({});
@@ -229,7 +239,22 @@ export default function ReceivePage({
               <tbody>{plan.operations.map((operation) => <tr key={`${operation.package_source}-${operation.target}`}><td><code>{operation.package_source}</code></td><td><code>{operation.target}</code></td><td><span className={`change change-${operation.action}`}>{changeLabel(operation.action, t)}</span></td></tr>)}</tbody>
             </table>
           </div>
-          {plan.conflict_count > 0 && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{t("请先处理冲突，再重新预览导入内容。")}</p>}
+          {plan.conflict_count > 0 && (
+            <ConflictResolutionPanel
+              count={plan.conflict_count}
+              resolution={conflictResolution}
+              busy={phase === "planning"}
+              onResolve={handlePlan}
+            />
+          )}
+          {plan.conflict_count === 0 && conflictResolution && (
+            <p className="inline-state status-success" role="status">
+              <CheckCircle2 aria-hidden="true" />
+              {t(conflictResolution === "keep_existing"
+                ? "已选择保留新电脑上的不同文件。"
+                : "已选择使用迁移包文件；被替换的文件会自动备份。")}
+            </p>
+          )}
           <label className="confirmation-row"><input type="checkbox" checked={codexClosed} onChange={(event) => setCodexClosed(event.target.checked)} aria-label={t("确认已保存当前 Codex 工作")} /><span><strong>{t("当前 Codex 工作已保存")}</strong><small>{t("导入完成后请退出并重新打开 Codex，以加载迁移内容。")}</small></span></label>
           <div className="command-row"><ProgressSteps active={phase === "restoring"} complete={Boolean(report)} /><button className="command-button danger-command" type="button" disabled={!canRestore} onClick={() => void handleRestore()}>{phase === "restoring" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Play aria-hidden="true" />}{t(phase === "restoring" ? "正在导入" : "导入到 Codex")}</button></div>
         </section>
@@ -258,6 +283,57 @@ export default function ReceivePage({
 
 function PathPicker({ icon: Icon, label, value, buttonLabel, onClick, disabled }: { icon: typeof FolderOpen; label: string; value: string; buttonLabel?: string; onClick?: () => Promise<void>; disabled?: boolean }) {
   return <div className="form-row"><div className="form-label"><Icon aria-hidden="true" /><span><strong>{label}</strong><small>{value}</small></span></div>{buttonLabel && onClick && <button className="secondary-button" type="button" disabled={disabled} onClick={() => void onClick()}><FolderOpen aria-hidden="true" />{buttonLabel}</button>}</div>;
+}
+
+function ConflictResolutionPanel({
+  count,
+  resolution,
+  busy,
+  onResolve,
+}: {
+  count: number;
+  resolution: FileConflictResolution | null;
+  busy: boolean;
+  onResolve: (resolution: FileConflictResolution) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const unresolvedAfterChoice = resolution !== null;
+  return (
+    <div className="conflict-resolution-panel" role="alert">
+      <div className="conflict-resolution-copy">
+        <AlertTriangle aria-hidden="true" />
+        <span>
+          <strong>{t(unresolvedAfterChoice
+            ? "仍有 {count} 个无法自动处理的结构冲突。"
+            : "发现 {count} 个同名但内容不同的文件。", { count })}</strong>
+          <small>{t(unresolvedAfterChoice
+            ? "请查看上表中的冲突路径，移开对应文件或目录，或重新选择一个空的项目保存位置后再预览。"
+            : "请选择如何处理这些普通文件冲突。")}</small>
+        </span>
+      </div>
+      <div className="conflict-resolution-actions" role="group" aria-label={t("冲突处理方式")}>
+        <button
+          className="secondary-button"
+          type="button"
+          aria-pressed={resolution === "keep_existing"}
+          disabled={busy || resolution === "keep_existing"}
+          onClick={() => void onResolve("keep_existing")}
+        >
+          <ShieldCheck aria-hidden="true" />{t("保留新电脑文件（推荐）")}
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          aria-pressed={resolution === "use_package"}
+          disabled={busy || resolution === "use_package"}
+          onClick={() => void onResolve("use_package")}
+        >
+          <FileArchive aria-hidden="true" />{t("使用迁移包文件")}
+        </button>
+      </div>
+      <p>{t("保留会跳过同名文件；替换会先自动备份新电脑上的原文件。")}</p>
+    </div>
+  );
 }
 
 function ProgressSteps({ active, complete }: { active: boolean; complete: boolean }) {

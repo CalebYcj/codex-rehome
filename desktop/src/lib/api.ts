@@ -4,6 +4,7 @@ import type {
   CodexInventory,
   CreatePackageReport,
   CreatePackageRequest,
+  FileConflictResolution,
   PackagePreview,
   RegistrationStatus,
   RestoreOptions,
@@ -43,6 +44,7 @@ export async function selectRestoreDestinations(
 export async function buildRestorePlan(
   packageSelectionId: string,
   destinationSelectionId: string,
+  conflictResolution?: FileConflictResolution,
 ): Promise<RestorePlan> {
   const response = await invoke<{ action: "plan"; plan: RestorePlan } | null>(
     "build_restore_plan",
@@ -51,6 +53,7 @@ export async function buildRestorePlan(
         action: "build",
         package_selection_id: packageSelectionId,
         destination_selection_id: destinationSelectionId,
+        conflict_resolution: conflictResolution,
       },
     },
   );

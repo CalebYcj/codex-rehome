@@ -4,15 +4,16 @@ use crate::core::{
     discovery::discover_codex as core_discover_codex,
     error::{ErrorCode, RehomeError},
     models::{
-        CodexInventory, CreatePackageReport, CreatePackageRequest, PackagePreview, RecoveryStatus,
-        RegistrationStatus, RestoreOptions, RestorePlan, RestoreReport, RollbackReport, SourceOs,
-        TargetInventory, TransactionHistory, TransactionSummary,
+        CodexInventory, CreatePackageReport, CreatePackageRequest, FileConflictResolution,
+        PackagePreview, RecoveryStatus, RegistrationStatus, RestoreOptions, RestorePlan,
+        RestoreReport, RollbackReport, SourceOs, TargetInventory, TransactionHistory,
+        TransactionSummary,
     },
     package::{
         create_package_replacing as core_create_package_replacing,
         inspect_package as core_inspect_package,
     },
-    planner::build_restore_plan as core_build_restore_plan,
+    planner::build_restore_plan_with_conflict_resolution as core_build_restore_plan,
     restore::{
         apply_restore_by_id, list_transaction_history as core_list_transaction_history,
         rollback as core_rollback, transaction_summary as core_transaction_summary,
@@ -68,6 +69,7 @@ pub enum BuildRestorePlanRequest {
     Build {
         package_selection_id: Uuid,
         destination_selection_id: Uuid,
+        conflict_resolution: Option<FileConflictResolution>,
     },
 }
 
@@ -559,6 +561,7 @@ pub async fn build_restore_plan(
         BuildRestorePlanRequest::Build {
             package_selection_id,
             destination_selection_id,
+            conflict_resolution,
         } => {
             let package_path = state.resolve_package(package_selection_id)?;
             let (projects_root, backup_root) =
@@ -574,7 +577,8 @@ pub async fn build_restore_plan(
                 projects: inventory.projects,
                 conversations: inventory.conversations,
             };
-            let plan = core_build_restore_plan(&package, &target, &projects_root)?;
+            let plan =
+                core_build_restore_plan(&package, &target, &projects_root, conflict_resolution)?;
             state.grant_plan(plan.plan_id, backup_root)?;
             Ok(Some(BuildRestorePlanResponse::Plan { plan }))
         }
