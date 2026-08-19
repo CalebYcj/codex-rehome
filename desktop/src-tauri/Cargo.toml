@@ -1,6 +1,6 @@
 [package]
 name = "rehome-desktop"
-version = "0.1.11"
+version = "0.1.12"
 description = "ReHome Desktop migration utility"
 authors = ["ReHome contributors"]
 edition = "2021"
