@@ -41,8 +41,10 @@ const MAX_ARCHIVE_ENTRY_BYTES: u64 = MAX_INSPECTION_BYTES;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
-const MAX_SOURCE_COPY_ATTEMPTS: usize = 3;
-const SOURCE_COPY_RETRY_DELAY: Duration = Duration::from_millis(50);
+// Codex keeps updating its session index while the app is open. Give a
+// transient write enough time to settle before treating it as a failed pack.
+const MAX_SOURCE_COPY_ATTEMPTS: usize = 8;
+const SOURCE_COPY_RETRY_DELAY: Duration = Duration::from_millis(200);
 const THREAD_EXPORT_COLUMNS_V1: &[&str] = &[
     "id",
     "cwd",
@@ -771,6 +773,15 @@ fn read_selected_session_index(
     let Some(path) = path else {
         return Ok(SessionIndexMetadata::default());
     };
+    retry_stable_copy(path, || {
+        read_selected_session_index_once(path, selected_ids)
+    })
+}
+
+fn read_selected_session_index_once(
+    path: &Path,
+    selected_ids: &[Uuid],
+) -> Result<StableCopyAttempt<SessionIndexMetadata>, RehomeError> {
     let selected: HashSet<Uuid> = selected_ids.iter().copied().collect();
     let mut result = SessionIndexMetadata::default();
     let before = source_fingerprint(path)?;
@@ -794,11 +805,9 @@ fn read_selected_session_index(
         }
     }
     if before != source_fingerprint(path)? {
-        return Err(package_invalid(
-            "source file changed in size or modification time while being read",
-        ));
+        return Ok(StableCopyAttempt::Changed);
     }
-    Ok(result)
+    Ok(StableCopyAttempt::Complete(result))
 }
 
 fn export_selected_threads(
@@ -1051,7 +1060,7 @@ fn retry_stable_copy<T>(
             }
             StableCopyAttempt::Changed => {
                 return Err(package_invalid(format!(
-                    "source file kept changing while being copied after {MAX_SOURCE_COPY_ATTEMPTS} attempts: {}",
+                    "source file kept changing while being packaged after {MAX_SOURCE_COPY_ATTEMPTS} attempts: {}; close Codex or retry after it finishes saving",
                     source.display()
                 )));
             }
