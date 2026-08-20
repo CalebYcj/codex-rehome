@@ -524,6 +524,28 @@ fn user_rollback_restores_exact_pre_restore_hashes_and_tombstones() -> Result<()
 }
 
 #[test]
+fn rollback_recovers_applied_states_from_sharded_checkpoints() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let journal_path = harness.journal_path(report.transaction_id);
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal["status"] = Value::String("applying".into());
+    for operation in journal["operations"].as_array_mut().unwrap() {
+        operation["applied_hash"] = Value::Null;
+        operation["applied_state"] = Value::Null;
+        operation["applied_database_hash"] = Value::Null;
+    }
+    fs::write(&journal_path, serde_json::to_vec_pretty(&journal)?)?;
+
+    let rollback_report = rollback(report.transaction_id)?;
+
+    assert!(rollback_report.success);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
 fn restore_requires_explicit_confirmation_that_current_work_is_saved() -> Result<(), Box<dyn Error>>
 {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
