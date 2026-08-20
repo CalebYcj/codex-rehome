@@ -47,7 +47,7 @@ Packages exclude login tokens, cookies, `.env` files, private keys, `.git`, `nod
 
 This is not official cloud sync and it does not automatically keep two computers synchronized each day. After a cross-platform move, an old conversation can remain useful historical context while its original working-directory handle no longer works. Reopen the restored project, then continue in a new task when needed.
 
-Each `.rehome` package and individual file can currently be up to 16 GiB. Large files are streamed during creation, inspection, and restore. A single Codex conversation can be up to 1 GiB during path rewriting; if one conversation exceeds that limit, split it or leave it unselected.
+Each `.rehome` package, individual file, and single Codex conversation can currently be up to 16 GiB. Large files are streamed during creation, inspection, and restore. If a conversation exceeds that limit, split it or leave it unselected.
 
 Login sessions, browser state, running terminals, unsaved work, and native system dependencies are not fully portable. Different accounts or workspaces may require fresh sign-in or authorization for external services.
 

@@ -32,10 +32,10 @@ const FORMAT: &str = "codex-rehome";
 const SCHEMA_VERSION: u32 = 1;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
-// A single long-running Codex conversation can legitimately exceed the old
-// 64 MiB planning limit. Keep a bounded in-memory ceiling while allowing
-// ordinary large sessions to be inspected and path-rewritten.
-const MAX_PLANNING_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+// Keep the planning limit aligned with the package's existing per-file and
+// total-size safety ceiling. This lets a large Codex conversation be checked
+// and path-rewritten instead of being rejected by a smaller legacy limit.
+const MAX_PLANNING_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_INSPECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = MAX_INSPECTION_BYTES;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
@@ -1543,12 +1543,17 @@ mod authenticated_payload_tests {
     }
 
     #[test]
-    fn thread_metadata_uses_the_larger_planning_payload_limit() {
+    fn thread_metadata_uses_the_package_planning_payload_limit() {
         ensure_control_size("manifest.json", MAX_CONTROL_FILE_BYTES + 1).unwrap_err();
         ensure_planning_payload_size("codex/metadata/threads.json", MAX_CONTROL_FILE_BYTES + 1)
             .unwrap();
         ensure_planning_payload_size("codex/sessions/large-rollout.jsonl", 64 * 1024 * 1024 + 1)
             .unwrap();
+        ensure_planning_payload_size(
+            "codex/sessions/ten-gib-rollout.jsonl",
+            10 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
         ensure_planning_payload_size(
             "codex/metadata/threads.json",
             MAX_PLANNING_PAYLOAD_BYTES + 1,
