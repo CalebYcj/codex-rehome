@@ -255,6 +255,7 @@ fn apply_regular_files(
 ) -> Result<(u64, u64), RehomeError> {
     let mut restored_files = 0_u64;
     let mut restored_bytes = 0_u64;
+    let mut payload_archive = verified.open_payload_archive()?;
     for operation in &plan.operations {
         if !matches!(operation.action, ChangeKind::Add | ChangeKind::Update)
             || is_bridge_operation(plan, &operation.package_source)
@@ -264,8 +265,8 @@ fn apply_regular_files(
         let mut staged = NamedTempFile::new().map_err(|error| {
             restore_failed(format!("could not stage restored payload: {error}"))
         })?;
-        let bytes = verified
-            .write_authenticated_payload(&operation.package_source, staged.as_file_mut())?;
+        let bytes =
+            payload_archive.write_payload(&operation.package_source, staged.as_file_mut())?;
         staged.as_file().sync_all().map_err(|error| {
             restore_failed(format!("could not flush restored payload: {error}"))
         })?;

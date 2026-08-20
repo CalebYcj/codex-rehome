@@ -255,6 +255,13 @@ pub(crate) struct VerifiedPackage {
     pub preview: PackagePreview,
     pub payloads: BTreeMap<String, VerifiedPayload>,
     pub planning_payloads: BTreeMap<String, Vec<u8>>,
+    pub(crate) archive_size_bytes: u64,
+    pub(crate) archive_modified: SystemTime,
+}
+
+pub(crate) struct AuthenticatedPayloadArchive<'a> {
+    verified: &'a VerifiedPackage,
+    archive: ZipArchive<fs::File>,
 }
 
 impl VerifiedPackage {
@@ -279,15 +286,19 @@ impl VerifiedPackage {
         Ok(bytes)
     }
 
-    pub(crate) fn write_authenticated_payload<W: Write>(
+    pub(crate) fn open_payload_archive(
         &self,
-        source: &str,
-        writer: &mut W,
-    ) -> Result<u64, RehomeError> {
-        let verified = self
-            .payloads
-            .get(source)
-            .ok_or_else(|| package_invalid("restore operation references a missing payload"))?;
+    ) -> Result<AuthenticatedPayloadArchive<'_>, RehomeError> {
+        let metadata = fs::metadata(&self.preview.package_path)
+            .map_err(|error| package_invalid(format!("could not inspect package: {error}")))?;
+        if !metadata.is_file()
+            || metadata.len() != self.archive_size_bytes
+            || metadata.modified().map_err(io_package_error)? != self.archive_modified
+        {
+            return Err(package_invalid(
+                "package archive changed after restore planning",
+            ));
+        }
         let mut file = fs::File::open(&self.preview.package_path)
             .map_err(|error| package_invalid(format!("could not reopen package: {error}")))?;
         let archive_hash = hash_archive_file(&mut file)?;
@@ -296,17 +307,35 @@ impl VerifiedPackage {
                 "package archive changed after restore planning",
             ));
         }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
+        let archive = ZipArchive::new(file)
+            .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
+        Ok(AuthenticatedPayloadArchive {
+            verified: self,
+            archive,
+        })
+    }
+}
+
+impl AuthenticatedPayloadArchive<'_> {
+    pub(crate) fn write_payload<W: Write>(
+        &mut self,
+        source: &str,
+        writer: &mut W,
+    ) -> Result<u64, RehomeError> {
+        let verified = self
+            .verified
+            .payloads
+            .get(source)
+            .ok_or_else(|| package_invalid("restore operation references a missing payload"))?;
         if let Some(bytes) = verified.inline_bytes.as_ref() {
             authenticate_payload_bytes(bytes, verified)?;
             writer.write_all(bytes).map_err(io_package_error)?;
             return Ok(bytes.len() as u64);
         }
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
-        let mut archive = ZipArchive::new(file)
-            .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
         let archive_name = verified.archive_name.as_deref().unwrap_or(source);
-        let mut entry = archive.by_name(archive_name).map_err(|error| {
+        let mut entry = self.archive.by_name(archive_name).map_err(|error| {
             package_invalid(format!(
                 "could not reopen verified payload {source}: {error}"
             ))
@@ -326,6 +355,10 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
     if let Some(package) = crate::core::legacy::inspect_schema_v3(path)? {
         return Ok(package);
     }
+    let archive_metadata = fs::metadata(path)
+        .map_err(|error| package_invalid(format!("could not inspect package: {error}")))?;
+    let archive_size_bytes = archive_metadata.len();
+    let archive_modified = archive_metadata.modified().map_err(io_package_error)?;
     let mut file = fs::File::open(path)
         .map_err(|error| package_invalid(format!("could not open package: {error}")))?;
     let archive_hash = hash_archive_file(&mut file)?;
@@ -480,6 +513,8 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         },
         payloads,
         planning_payloads,
+        archive_size_bytes,
+        archive_modified,
     })
 }
 

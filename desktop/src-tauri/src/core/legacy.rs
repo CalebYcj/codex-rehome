@@ -64,6 +64,12 @@ struct ProjectSource {
 }
 
 pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, RehomeError> {
+    let archive_metadata = fs::metadata(path)
+        .map_err(|error| invalid(format!("could not inspect package: {error}")))?;
+    let archive_size_bytes = archive_metadata.len();
+    let archive_modified = archive_metadata
+        .modified()
+        .map_err(|error| invalid(format!("could not inspect package: {error}")))?;
     let mut file = fs::File::open(path)
         .map_err(|error| invalid(format!("could not open package: {error}")))?;
     let archive_hash = hash_file(&mut file)?;
@@ -309,6 +315,8 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
         },
         payloads,
         planning_payloads,
+        archive_size_bytes,
+        archive_modified,
     }))
 }
 

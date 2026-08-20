@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 const APP_IDENTIFIER: &str = "com.rehome.desktop";
 const TRANSACTIONS_DIRECTORY: &str = "transactions";
+const APPLIED_CHECKPOINTS_DIRECTORY: &str = "applied";
+const MAX_APPLIED_CHECKPOINT_BYTES: u64 = 64 * 1024;
 const SQLITE_SIDECARS: &[&str] = &["-wal", "-shm", "-journal"];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +99,17 @@ pub(crate) struct TransactionJournal {
 pub(crate) struct PreparedTransaction {
     pub journal: TransactionJournal,
     pub journal_path: PathBuf,
+    applied_checkpoints: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AppliedCheckpoint {
+    operation_index: usize,
+    package_source: String,
+    target: PathBuf,
+    applied_hash: Option<String>,
+    applied_state: AppliedState,
+    applied_database_hash: Option<String>,
 }
 
 pub(crate) fn prepare_transaction(
@@ -140,6 +153,12 @@ pub(crate) fn prepare_transaction(
     let objects = transaction_backup.join("objects");
     fs::create_dir(&objects)
         .map_err(|error| restore_failed(format!("could not create backup objects: {error}")))?;
+    let applied_checkpoints = transaction_backup.join(APPLIED_CHECKPOINTS_DIRECTORY);
+    fs::create_dir(&applied_checkpoints).map_err(|error| {
+        restore_failed(format!(
+            "could not create applied checkpoint directory: {error}"
+        ))
+    })?;
     sync_directory(&transaction_backup)
         .map_err(|error| restore_failed(format!("could not sync backup directory: {error}")))?;
 
@@ -219,6 +238,7 @@ pub(crate) fn prepare_transaction(
     Ok(PreparedTransaction {
         journal,
         journal_path,
+        applied_checkpoints,
     })
 }
 
@@ -262,7 +282,7 @@ pub(crate) fn record_applied_mutation(
                 .map(|(index, _)| index),
         );
     }
-    for index in indices {
+    for &index in &indices {
         let operation = &prepared.journal.operations[index];
         let applied_state = inspect_applied_state(operation)?;
         prepared.journal.operations[index].applied_hash = match &applied_state {
@@ -285,7 +305,54 @@ pub(crate) fn record_applied_mutation(
             }
         }
     }
-    write_journal(&prepared.journal_path, &prepared.journal)
+    for index in indices {
+        write_applied_checkpoint(&prepared.applied_checkpoints, &prepared.journal, index)?;
+    }
+    Ok(())
+}
+
+fn write_applied_checkpoint(
+    directory: &Path,
+    journal: &TransactionJournal,
+    operation_index: usize,
+) -> Result<(), RehomeError> {
+    let operation = journal
+        .operations
+        .get(operation_index)
+        .ok_or_else(|| restore_failed("applied checkpoint operation is missing"))?;
+    let applied_state = operation
+        .applied_state
+        .clone()
+        .ok_or_else(|| restore_failed("applied checkpoint has no applied state"))?;
+    let checkpoint = AppliedCheckpoint {
+        operation_index,
+        package_source: operation.package_source.clone(),
+        target: operation.target.clone(),
+        applied_hash: operation.applied_hash.clone(),
+        applied_state,
+        applied_database_hash: operation.applied_database_hash.clone(),
+    };
+    let mut bytes = serde_json::to_vec(&checkpoint)
+        .map_err(|error| restore_failed(format!("could not encode applied checkpoint: {error}")))?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_APPLIED_CHECKPOINT_BYTES {
+        return Err(restore_failed(
+            "applied checkpoint exceeds the safety limit",
+        ));
+    }
+    validate_directory_entry(directory)?;
+    let pinned = PinnedParent::open(directory).map_err(|error| {
+        restore_failed(format!(
+            "could not pin applied checkpoint directory: {error}"
+        ))
+    })?;
+    let name = format!("{operation_index:08}.json");
+    pinned
+        .replace_bytes(std::ffi::OsStr::new(&name), &bytes)
+        .map_err(|error| restore_failed(format!("could not write applied checkpoint: {error}")))?;
+    pinned
+        .sync()
+        .map_err(|error| restore_failed(format!("could not sync applied checkpoint: {error}")))
 }
 
 pub(crate) fn ensure_applied_states(prepared: &PreparedTransaction) -> Result<(), RehomeError> {
@@ -1424,7 +1491,7 @@ fn load_validated_journal(
     }
     let bytes = fs::read(path)
         .map_err(|error| rollback_failed(format!("could not read transaction journal: {error}")))?;
-    let journal: TransactionJournal = serde_json::from_slice(&bytes)
+    let mut journal: TransactionJournal = serde_json::from_slice(&bytes)
         .map_err(|error| rollback_failed(format!("transaction journal is invalid: {error}")))?;
     if expected_id.is_some_and(|expected| journal.transaction_id != expected) {
         return Err(rollback_failed(
@@ -1438,7 +1505,105 @@ fn load_validated_journal(
         ));
     }
     validate_journal(&journal)?;
+    load_applied_checkpoints(&mut journal)?;
     Ok(journal)
+}
+
+fn load_applied_checkpoints(journal: &mut TransactionJournal) -> Result<(), RehomeError> {
+    let directory = journal
+        .backup_root
+        .join(journal.transaction_id.to_string())
+        .join(APPLIED_CHECKPOINTS_DIRECTORY);
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(rollback_failed(format!(
+                "could not inspect applied checkpoint directory: {error}"
+            )))
+        }
+    };
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(rollback_failed("applied checkpoint directory is unsafe"));
+    }
+    let canonical = fs::canonicalize(&directory).map_err(|error| {
+        rollback_failed(format!(
+            "could not resolve applied checkpoint directory: {error}"
+        ))
+    })?;
+    let transaction_root = fs::canonicalize(
+        journal.backup_root.join(journal.transaction_id.to_string()),
+    )
+    .map_err(|error| rollback_failed(format!("could not resolve transaction backup: {error}")))?;
+    if !canonical.starts_with(&transaction_root) {
+        return Err(rollback_failed(
+            "applied checkpoint directory escapes the transaction backup",
+        ));
+    }
+
+    for entry in fs::read_dir(&directory).map_err(|error| {
+        rollback_failed(format!("could not enumerate applied checkpoints: {error}"))
+    })? {
+        let entry = entry.map_err(|error| {
+            rollback_failed(format!("could not inspect applied checkpoint: {error}"))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            rollback_failed(format!("could not inspect applied checkpoint: {error}"))
+        })?;
+        if metadata_is_link_or_reparse(&metadata)
+            || !metadata.is_file()
+            || metadata.len() > MAX_APPLIED_CHECKPOINT_BYTES
+        {
+            return Err(rollback_failed("applied checkpoint is unsafe"));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| rollback_failed("applied checkpoint name is invalid"))?;
+        let index_text = file_name
+            .strip_suffix(".json")
+            .filter(|value| value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .ok_or_else(|| rollback_failed("applied checkpoint name is invalid"))?;
+        let operation_index = index_text
+            .parse::<usize>()
+            .map_err(|_| rollback_failed("applied checkpoint index is invalid"))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            rollback_failed(format!("could not read applied checkpoint: {error}"))
+        })?;
+        let checkpoint: AppliedCheckpoint = serde_json::from_slice(&bytes)
+            .map_err(|error| rollback_failed(format!("applied checkpoint is invalid: {error}")))?;
+        if checkpoint.operation_index != operation_index {
+            return Err(rollback_failed(
+                "applied checkpoint index does not match its name",
+            ));
+        }
+        let operation = journal
+            .operations
+            .get_mut(operation_index)
+            .ok_or_else(|| rollback_failed("applied checkpoint operation is out of range"))?;
+        if checkpoint.package_source != operation.package_source
+            || checkpoint.target != operation.target
+        {
+            return Err(rollback_failed(
+                "applied checkpoint does not match its transaction operation",
+            ));
+        }
+        let expected_hash = match &checkpoint.applied_state {
+            AppliedState::File { hash, .. } => Some(hash.clone()),
+            AppliedState::Absent => None,
+        };
+        if checkpoint.applied_hash != expected_hash {
+            return Err(rollback_failed("applied checkpoint hash is inconsistent"));
+        }
+        // A checkpoint is written after the corresponding mutation. It can be
+        // newer than the last phase-level journal snapshot, especially when
+        // SQLite creates or refreshes WAL sidecars during verification.
+        operation.applied_hash = checkpoint.applied_hash;
+        operation.applied_state = Some(checkpoint.applied_state);
+        operation.applied_database_hash = checkpoint.applied_database_hash;
+    }
+    Ok(())
 }
 
 fn validate_journal(journal: &TransactionJournal) -> Result<(), RehomeError> {

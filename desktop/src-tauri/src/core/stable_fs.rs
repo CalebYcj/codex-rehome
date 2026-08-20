@@ -129,6 +129,33 @@ mod tests {
         assert_eq!(fs::read(outside.join("remove")).unwrap(), b"outside");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_replace_supports_paths_longer_than_max_path() {
+        let root = tempfile::tempdir().unwrap();
+        let long_component = "a".repeat(170);
+        let parent = root.path().join(long_component);
+        fs::create_dir(&parent).unwrap();
+        let target_name = format!("{}-target.txt", "b".repeat(80));
+        let target = parent.join(&target_name);
+        assert!(target.as_os_str().to_string_lossy().len() > 260);
+        let pinned = PinnedParent::open(&parent).unwrap();
+
+        pinned
+            .replace_bytes(OsStr::new(&target_name), b"long path works")
+            .unwrap();
+
+        assert_eq!(
+            pinned
+                .open_file(OsStr::new(&target_name))
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .len(),
+            15
+        );
+    }
+
     #[cfg(unix)]
     fn swap_parent(
         parent: &std::path::Path,
@@ -163,13 +190,6 @@ struct DirectoryIdentity {
 
 impl PinnedParent {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() || is_reparse_point(&metadata) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "mutation parent is not a regular directory",
-            ));
-        }
         let directory = open_directory(path)?;
         let identity = directory_identity(&directory)?;
         let pinned = Self {
@@ -304,10 +324,6 @@ impl PinnedParent {
     }
 
     fn verify_location(&self) -> io::Result<()> {
-        let metadata = fs::symlink_metadata(&self.path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() || is_reparse_point(&metadata) {
-            return Err(io::Error::other("mutation parent changed identity"));
-        }
         let current = open_directory_for_verification(&self.path)?;
         if directory_identity(&current)? != self.identity {
             return Err(io::Error::other("mutation parent changed identity"));
@@ -354,7 +370,7 @@ fn open_directory_for_verification(path: &Path) -> io::Result<fs::File> {
 
 #[cfg(windows)]
 fn open_windows_directory(path: &Path, share_delete: bool) -> io::Result<fs::File> {
-    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::{
         Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
@@ -363,11 +379,7 @@ fn open_windows_directory(path: &Path, share_delete: bool) -> io::Result<fs::Fil
         },
     };
 
-    let path = path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let path = windows_api_path(path);
     let mut sharing = FILE_SHARE_READ | FILE_SHARE_WRITE;
     if share_delete {
         sharing |= FILE_SHARE_DELETE;
@@ -420,16 +432,38 @@ fn directory_identity(directory: &fs::File) -> io::Result<DirectoryIdentity> {
 
 #[cfg(windows)]
 fn create_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        },
+    };
+
     parent.verify_location()?;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(parent.path.join(name))
+    let path = windows_api_path(&parent.path.join(name));
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { fs::File::from_raw_handle(handle) })
+    }
 }
 
 #[cfg(windows)]
 fn open_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
-    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::{
         Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
@@ -439,13 +473,7 @@ fn open_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
     };
 
     parent.verify_location()?;
-    let path = parent
-        .path
-        .join(name)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let path = windows_api_path(&parent.path.join(name));
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
@@ -466,17 +494,28 @@ fn open_file_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
 
 #[cfg(windows)]
 fn child_exists_at(parent: &PinnedParent, name: &OsStr) -> io::Result<bool> {
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND},
+        Storage::FileSystem::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES},
+    };
+
     parent.verify_location()?;
-    match fs::symlink_metadata(parent.path.join(name)) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+    let path = windows_api_path(&parent.path.join(name));
+    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+    if attributes != INVALID_FILE_ATTRIBUTES {
+        return Ok(true);
+    }
+    let error = unsafe { GetLastError() };
+    if matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+        Ok(false)
+    } else {
+        Err(io::Error::from_raw_os_error(error as i32))
     }
 }
 
 #[cfg(windows)]
 fn open_file_for_write_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs::File> {
-    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::{
         Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
@@ -486,13 +525,7 @@ fn open_file_for_write_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs:
     };
 
     parent.verify_location()?;
-    let path = parent
-        .path
-        .join(name)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let path = windows_api_path(&parent.path.join(name));
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
@@ -513,26 +546,13 @@ fn open_file_for_write_at(parent: &PinnedParent, name: &OsStr) -> io::Result<fs:
 
 #[cfg(windows)]
 fn replace_at(parent: &PinnedParent, source: &OsStr, destination: &OsStr) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
     parent.verify_location()?;
-    let source = parent
-        .path
-        .join(source)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = parent
-        .path
-        .join(destination)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let source = windows_api_path(&parent.path.join(source));
+    let destination = windows_api_path(&parent.path.join(destination));
     let moved = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -553,24 +573,11 @@ fn rename_noreplace_at(
     source: &OsStr,
     destination: &OsStr,
 ) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
     parent.verify_location()?;
-    let source = parent
-        .path
-        .join(source)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = parent
-        .path
-        .join(destination)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let source = windows_api_path(&parent.path.join(source));
+    let destination = windows_api_path(&parent.path.join(destination));
     let moved = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -587,16 +594,37 @@ fn rename_noreplace_at(
 
 #[cfg(windows)]
 fn remove_at(parent: &PinnedParent, name: &OsStr) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::DeleteFileW;
+
     parent.verify_location()?;
-    fs::remove_file(parent.path.join(name))
+    let path = windows_api_path(&parent.path.join(name));
+    if unsafe { DeleteFileW(path.as_ptr()) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.file_attributes()
-        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
-        != 0
+fn windows_api_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let raw = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    if raw.starts_with(&[BACKSLASH, BACKSLASH, QUESTION, BACKSLASH]) {
+        return raw.into_iter().chain(Some(0)).collect();
+    }
+    let mut extended = Vec::with_capacity(raw.len() + 9);
+    if raw.starts_with(&[BACKSLASH, BACKSLASH]) {
+        extended.extend(r"\\?\UNC\".encode_utf16());
+        extended.extend_from_slice(&raw[2..]);
+    } else {
+        extended.extend(r"\\?\".encode_utf16());
+        extended.extend_from_slice(&raw);
+    }
+    extended.push(0);
+    extended
 }
 
 #[cfg(unix)]
@@ -803,9 +831,4 @@ fn unix_name(name: &OsStr) -> io::Result<std::ffi::CString> {
             "mutation target name contains NUL",
         )
     })
-}
-
-#[cfg(unix)]
-fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
-    false
 }
