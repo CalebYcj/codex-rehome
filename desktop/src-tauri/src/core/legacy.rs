@@ -23,9 +23,12 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 const LEGACY_SCHEMA: u32 = 3;
-const MAX_ENTRIES: usize = 10_000;
-const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ENTRIES: usize = 100_000;
+const MAX_CONTROL_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_TOTAL_BYTES;
 const THREAD_COLUMNS: &[&str] = &[
     "id",
     "cwd",
@@ -77,9 +80,7 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
         .map_err(|error| invalid(format!("could not rewind package: {error}")))?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| invalid(format!("invalid ZIP container: {error}")))?;
-    if archive.len() > MAX_ENTRIES {
-        return Err(invalid("ZIP entry count exceeds the inspection limit"));
-    }
+    ensure_legacy_entry_count(archive.len())?;
 
     let manifest_candidates = (0..archive.len())
         .filter_map(|index| {
@@ -101,7 +102,8 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
     let prefix = manifest_name
         .strip_suffix("MANIFEST.json")
         .unwrap_or_default();
-    let manifest_bytes = read_archive_entry(&mut archive, manifest_name)?;
+    let manifest_bytes =
+        read_archive_entry_limited(&mut archive, manifest_name, MAX_CONTROL_BYTES, "manifest")?;
     let manifest: LegacyManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| invalid(format!("legacy MANIFEST.json is invalid: {error}")))?;
     if manifest.package_schema_version != LEGACY_SCHEMA {
@@ -403,8 +405,13 @@ fn read_project_sources(
     let Some(file) = files.get("metadata/path_map.json") else {
         return Ok(Vec::new());
     };
-    let value: Value = serde_json::from_slice(&read_archive_entry(archive, &file.archive_name)?)
-        .map_err(|error| invalid(format!("legacy path_map.json is invalid: {error}")))?;
+    let value: Value = serde_json::from_slice(&read_archive_entry_limited(
+        archive,
+        &file.archive_name,
+        MAX_METADATA_BYTES,
+        "path map",
+    )?)
+    .map_err(|error| invalid(format!("legacy path_map.json is invalid: {error}")))?;
     Ok(value
         .get("projects")
         .and_then(Value::as_array)
@@ -437,7 +444,12 @@ fn build_session_index(
         .collect::<HashSet<_>>();
     let mut rows = BTreeMap::<Uuid, Value>::new();
     if let Some(file) = files.get("home/.codex/session_index.jsonl") {
-        let bytes = read_archive_entry(archive, &file.archive_name)?;
+        let bytes = read_archive_entry_limited(
+            archive,
+            &file.archive_name,
+            MAX_METADATA_BYTES,
+            "session index",
+        )?;
         for line in bytes.split(|byte| *byte == b'\n') {
             let Ok(value) = serde_json::from_slice::<Value>(line) else {
                 continue;
@@ -480,12 +492,17 @@ fn build_thread_metadata(
     let Some(file) = files.get("metadata/thread_index_export.json") else {
         return Ok(None);
     };
-    let value: Value = serde_json::from_slice(&read_archive_entry(archive, &file.archive_name)?)
-        .map_err(|error| {
-            invalid(format!(
-                "legacy thread_index_export.json is invalid: {error}"
-            ))
-        })?;
+    let value: Value = serde_json::from_slice(&read_archive_entry_limited(
+        archive,
+        &file.archive_name,
+        MAX_METADATA_BYTES,
+        "thread metadata",
+    )?)
+    .map_err(|error| {
+        invalid(format!(
+            "legacy thread_index_export.json is invalid: {error}"
+        ))
+    })?;
     let selected = conversations
         .iter()
         .map(|conversation| conversation.task_id.to_string())
@@ -572,7 +589,12 @@ fn verify_legacy_checksums(
     let checksum = files
         .get("SHA256SUMS.txt")
         .ok_or_else(|| invalid("legacy SHA256SUMS.txt is missing"))?;
-    let bytes = read_archive_entry(archive, &checksum.archive_name)?;
+    let bytes = read_archive_entry_limited(
+        archive,
+        &checksum.archive_name,
+        MAX_METADATA_BYTES,
+        "checksum manifest",
+    )?;
     if bytes.starts_with(&[0xef, 0xbb, 0xbf]) || bytes.contains(&b'\r') {
         return Err(RehomeError::new(
             ErrorCode::ChecksumMismatch,
@@ -646,20 +668,55 @@ fn normalize_zip_name(raw: &str, directory: bool) -> Result<String, RehomeError>
     normalize_entry(Path::new(candidate))
 }
 
+fn ensure_legacy_entry_count(count: usize) -> Result<(), RehomeError> {
+    if count > MAX_ENTRIES {
+        return Err(invalid(format!(
+            "legacy package contains {count} entries and exceeds the {MAX_ENTRIES} entry limit"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_legacy_archive_size(size: u64) -> Result<(), RehomeError> {
+    if size > MAX_ARCHIVE_FILE_BYTES {
+        return Err(invalid(format!(
+            "legacy package file is {size} bytes and exceeds the {MAX_ARCHIVE_FILE_BYTES} byte inspection limit"
+        )));
+    }
+    Ok(())
+}
+
 fn read_archive_entry(
     archive: &mut ZipArchive<fs::File>,
     name: &str,
 ) -> Result<Vec<u8>, RehomeError> {
-    let mut entry = archive
+    read_archive_entry_limited(archive, name, MAX_ENTRY_BYTES, "planning payload")
+}
+
+fn read_archive_entry_limited(
+    archive: &mut ZipArchive<fs::File>,
+    name: &str,
+    limit: u64,
+    kind: &str,
+) -> Result<Vec<u8>, RehomeError> {
+    let entry = archive
         .by_name(name)
         .map_err(|error| invalid(format!("could not read legacy ZIP entry {name}: {error}")))?;
-    if entry.is_dir() || entry.size() > MAX_ENTRY_BYTES {
-        return Err(invalid("legacy ZIP entry is not a supported file"));
+    if entry.is_dir() || entry.size() > limit {
+        return Err(invalid(format!(
+            "legacy ZIP {kind} exceeds the {limit} byte limit: {name}"
+        )));
     }
     let mut bytes = Vec::new();
     entry
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| invalid(format!("could not read legacy ZIP entry: {error}")))?;
+    if bytes.len() as u64 > limit {
+        return Err(invalid(format!(
+            "legacy ZIP {kind} exceeds the {limit} byte limit: {name}"
+        )));
+    }
     Ok(bytes)
 }
 
@@ -667,9 +724,7 @@ fn hash_file(file: &mut fs::File) -> Result<String, RehomeError> {
     let metadata = file
         .metadata()
         .map_err(|error| invalid(format!("could not inspect package: {error}")))?;
-    if metadata.len() > 2 * MAX_TOTAL_BYTES {
-        return Err(invalid("package file exceeds the inspection limit"));
-    }
+    ensure_legacy_archive_size(metadata.len())?;
     hash_reader(file)
 }
 
@@ -690,4 +745,23 @@ fn hash_reader(reader: &mut impl Read) -> Result<String, RehomeError> {
 
 fn invalid(message: impl Into<String>) -> RehomeError {
     RehomeError::new(ErrorCode::PackageInvalid, message)
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_legacy_packages_larger_than_the_old_two_gib_limit() {
+        ensure_legacy_archive_size(2 * 1024 * 1024 * 1024 + 128 * 1024 * 1024).unwrap();
+        ensure_legacy_archive_size(MAX_ARCHIVE_FILE_BYTES).unwrap();
+        ensure_legacy_archive_size(MAX_ARCHIVE_FILE_BYTES + 1).unwrap_err();
+    }
+
+    #[test]
+    fn accepts_large_legacy_project_entry_counts() {
+        ensure_legacy_entry_count(50_000).unwrap();
+        ensure_legacy_entry_count(MAX_ENTRIES).unwrap();
+        ensure_legacy_entry_count(MAX_ENTRIES + 1).unwrap_err();
+    }
 }

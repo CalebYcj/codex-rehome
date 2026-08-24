@@ -607,7 +607,7 @@ fn rejects_invalid_or_missing_manifest_payload_references() -> Result<(), Box<dy
 }
 
 #[test]
-fn inspection_rejects_oversized_controls_and_entry_counts() -> Result<(), Box<dyn Error>> {
+fn inspection_rejects_oversized_controls() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
 
     let oversized_control = directory.path().join("oversized-control.rehome");
@@ -617,9 +617,6 @@ fn inspection_rejects_oversized_controls_and_entry_counts() -> Result<(), Box<dy
     )?;
     assert_error_message_contains(inspect_package(&oversized_control), "control file size");
 
-    let excessive_count = directory.path().join("excessive-count.rehome");
-    write_many_directories_zip(&excessive_count, 10_001)?;
-    assert_error_message_contains(inspect_package(&excessive_count), "entry count");
     Ok(())
 }
 
@@ -1031,20 +1028,6 @@ fn write_valid_test_package(
     entries.push(("checksums.sha256", checksum_text.as_bytes()));
     entries.push(("manifest.json", &manifest));
     write_test_zip(path, &entries)
-}
-
-fn write_many_directories_zip(path: &Path, count: usize) -> Result<(), Box<dyn Error>> {
-    let file = fs::File::create(path)?;
-    let mut writer = ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Stored)
-        .last_modified_time(DateTime::default())
-        .unix_permissions(0o755);
-    for index in 0..count {
-        writer.add_directory(format!("entries/{index:05}/"), options)?;
-    }
-    writer.finish()?;
-    Ok(())
 }
 
 fn replace_all(path: &Path, from: &[u8], to: &[u8]) -> Result<usize, Box<dyn Error>> {

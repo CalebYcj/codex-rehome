@@ -30,7 +30,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 
 const FORMAT: &str = "codex-rehome";
 const SCHEMA_VERSION: u32 = 1;
-const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 // Keep the planning limit aligned with the package's existing per-file and
 // total-size safety ceiling. This lets a large Codex conversation be checked
@@ -366,11 +366,7 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         .map_err(|error| package_invalid(format!("could not rewind package: {error}")))?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| package_invalid(format!("invalid ZIP container: {error}")))?;
-    if archive.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(package_invalid(
-            "ZIP entry count exceeds the inspection limit",
-        ));
-    }
+    ensure_archive_entry_count(archive.len())?;
 
     let mut names = Vec::with_capacity(archive.len());
     let mut paths = PortablePathRegistry::default();
@@ -1269,6 +1265,15 @@ fn format_package_bytes(bytes: u64) -> String {
     }
 }
 
+fn ensure_archive_entry_count(count: usize) -> Result<(), RehomeError> {
+    if count > MAX_ARCHIVE_ENTRIES {
+        return Err(package_invalid(format!(
+            "package contains {count} entries and exceeds the {MAX_ARCHIVE_ENTRIES} entry limit; deselect generated or dependency files and try again"
+        )));
+    }
+    Ok(())
+}
+
 fn checked_staged_total_bytes(current: u64, next: u64) -> Result<u64, RehomeError> {
     let total = current.checked_add(next).ok_or_else(|| {
         package_invalid(format!(
@@ -1335,11 +1340,7 @@ fn staged_archive_entries(
             return Err(package_invalid("staging contains a non-regular entry"));
         }
     }
-    if entries.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(package_invalid(
-            "staged package entry count exceeds the limit",
-        ));
-    }
+    ensure_archive_entry_count(entries.len())?;
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(entries)
 }
@@ -1565,6 +1566,13 @@ mod authenticated_payload_tests {
         let total = checked_staged_total_bytes(nine_gib, one_gib).unwrap();
 
         assert_eq!(total, 10_u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn package_entry_limit_accepts_large_real_projects() {
+        ensure_archive_entry_count(50_000).unwrap();
+        ensure_archive_entry_count(MAX_ARCHIVE_ENTRIES).unwrap();
+        ensure_archive_entry_count(MAX_ARCHIVE_ENTRIES + 1).unwrap_err();
     }
 
     #[test]
