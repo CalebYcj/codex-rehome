@@ -22,7 +22,7 @@ The installer and a migration package are different files. The EXE or DMG instal
 
 - Selected projects and their files
 - Selected conversations and the local indexes needed for Codex to rediscover them
-- Skills, Plugins, and generated images
+- Skills (including `.codex/skills` and shared `.agents/skills`), Plugins, and generated images
 - Relevant local state and path mappings for selected content
 
 Project files and conversation history are separate. Selecting a conversation does not automatically include source files. Selecting a project includes its child conversations by default, while still allowing individual conversations to be deselected.

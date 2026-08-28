@@ -334,6 +334,37 @@ fn nested_skills_are_grouped_under_their_outer_skill_bundle() -> Result<(), Box<
 }
 
 #[test]
+fn global_agent_skills_are_discovered_alongside_codex_skills() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("user");
+    let codex_home = home.join(".codex");
+    let codex_skill = codex_home.join("skills").join("codex-only");
+    let agent_skill = home.join(".agents").join("skills").join("shared-agent");
+    fs::create_dir_all(&codex_skill)?;
+    fs::create_dir_all(&agent_skill)?;
+    fs::write(codex_skill.join("SKILL.md"), b"codex")?;
+    fs::write(agent_skill.join("SKILL.md"), b"shared")?;
+    let context = DiscoveryContext {
+        codex_home_env: None,
+        user_profile: Some(home.clone()),
+        home: Some(home),
+    };
+
+    let inventory = discover_codex_with_context(Some(codex_home), &context)?;
+
+    assert_eq!(inventory.skills.len(), 2);
+    let shared = inventory
+        .skills
+        .iter()
+        .find(|skill| skill.name == "shared-agent")
+        .expect("global agent skill");
+    assert_eq!(shared.relative_path, ".agents/skills/shared-agent");
+    assert_eq!(shared.source_path, agent_skill.join("SKILL.md"));
+    assert!(inventory.skill_paths.contains(&shared.source_path));
+    Ok(())
+}
+
+#[test]
 fn generated_image_inventory_contains_a_small_embedded_thumbnail() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let codex_home = temp.path().join(".codex");
