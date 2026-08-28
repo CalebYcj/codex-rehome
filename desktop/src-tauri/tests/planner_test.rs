@@ -105,6 +105,59 @@ fn classifies_project_files_from_target_state() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn restores_global_agent_skills_to_the_target_user_home() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = fs::canonicalize(temp.path())?;
+    let package_path = root.join("agent-skill.rehome");
+    let codex_home = root.join("target-user").join(".codex");
+    let projects_root = root.join("restored-projects");
+    fs::create_dir_all(&codex_home)?;
+    let manifest = PackageManifest {
+        format: "codex-rehome".into(),
+        schema_version: 1,
+        package_id: Uuid::parse_str(PACKAGE_ID)?,
+        created_at: "2026-08-28T00:00:00Z".into(),
+        source_os: SourceOs::Windows,
+        source_arch: "x86_64".into(),
+        source_device_id: Uuid::nil(),
+        mode: PackageMode::Full,
+        parent_checkpoint: None,
+        counts: ContentCounts {
+            skills: 1,
+            ..ContentCounts::default()
+        },
+        projects: vec![],
+        conversations: vec![],
+        exclusions: ExclusionSummary::default(),
+    };
+    let source = "agents/skills/shared-agent/SKILL.md";
+    write_package(&package_path, &manifest, &[(source, b"# Shared\n")])?;
+    let preview = inspect_package(&package_path)?;
+    let target = TargetInventory {
+        codex_home: codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+
+    let plan = build_restore_plan(&preview, &target, &projects_root)?;
+    let operation = operation_for(&plan.operations, source);
+    assert_eq!(
+        operation.target,
+        codex_home
+            .parent()
+            .unwrap()
+            .join(".agents")
+            .join("skills")
+            .join("shared-agent")
+            .join("SKILL.md")
+    );
+    Ok(())
+}
+
+#[test]
 fn resolves_regular_file_conflicts_with_an_explicit_policy() -> Result<(), Box<dyn Error>> {
     for (resolution, expected_action, rollback_required) in [
         (

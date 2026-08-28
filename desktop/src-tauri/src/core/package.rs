@@ -162,13 +162,11 @@ fn create_package_with_overwrite(
     }
 
     if !request.skill_paths.is_empty() {
-        counts.skills = stage_discovered_trees(
+        counts.skills = stage_selected_skill_trees(
             &request.skill_paths,
-            &request.codex_home.join("skills"),
-            "codex/skills",
+            &request.codex_home,
             staging.path(),
             &mut payloads,
-            false,
         )?;
     }
     if !request.plugin_paths.is_empty() {
@@ -976,6 +974,61 @@ fn stage_discovered_files(
     Ok(count)
 }
 
+fn stage_selected_skill_trees(
+    marker_files: &[PathBuf],
+    codex_home: &Path,
+    staging_root: &Path,
+    payloads: &mut PayloadCollection,
+) -> Result<u64, RehomeError> {
+    let codex_skills_root = codex_home.join("skills");
+    let mut codex_markers = Vec::new();
+    let mut agent_markers: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    for marker in marker_files {
+        if marker.starts_with(&codex_skills_root) {
+            codex_markers.push(marker.clone());
+            continue;
+        }
+        let root = global_agent_skills_root(marker).ok_or_else(|| {
+            package_invalid("selected skill is outside supported Codex and global agent roots")
+        })?;
+        agent_markers.entry(root).or_default().push(marker.clone());
+    }
+
+    let mut count = stage_discovered_trees(
+        &codex_markers,
+        &codex_skills_root,
+        "codex/skills",
+        staging_root,
+        payloads,
+        false,
+    )?;
+    for (root, markers) in agent_markers {
+        count = count
+            .checked_add(stage_discovered_trees(
+                &markers,
+                &root,
+                "agents/skills",
+                staging_root,
+                payloads,
+                false,
+            )?)
+            .ok_or_else(|| package_invalid("selected skill count exceeds the supported range"))?;
+    }
+    Ok(count)
+}
+
+fn global_agent_skills_root(marker: &Path) -> Option<PathBuf> {
+    marker.ancestors().find_map(|ancestor| {
+        (ancestor.file_name().and_then(|name| name.to_str()) == Some("skills")
+            && ancestor
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some(".agents"))
+        .then(|| ancestor.to_path_buf())
+    })
+}
+
 fn stage_discovered_trees(
     marker_files: &[PathBuf],
     source_root: &Path,
@@ -1297,48 +1350,49 @@ fn staged_archive_entries(
 ) -> Result<Vec<ArchiveEntry>, RehomeError> {
     let mut entries = Vec::new();
     let mut total_bytes = 0_u64;
-    for entry in WalkDir::new(staging_root).sort_by_file_name() {
-        let entry = entry.map_err(|error| {
-            package_invalid(format!("could not enumerate package staging: {error}"))
+    let mut files = payloads.entries.keys().cloned().collect::<Vec<_>>();
+    files.extend(["checksums.sha256".to_owned(), "manifest.json".to_owned()]);
+    files.sort();
+    let mut directories = std::collections::BTreeSet::new();
+    for name in &files {
+        for ancestor in portable_ancestors(name) {
+            directories.insert(ancestor.to_owned());
+        }
+    }
+    for name in directories {
+        entries.push(ArchiveEntry {
+            name: format!("{name}/"),
+            is_directory: true,
+            permissions: 0o755,
+            size: 0,
+        });
+    }
+    for name in files {
+        let source = staging_root.join(Path::new(&name));
+        let metadata = fs::symlink_metadata(&source).map_err(|error| {
+            package_invalid(format!(
+                "could not inspect tracked package staging: {error}"
+            ))
         })?;
-        if entry.path() == staging_root {
-            continue;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(package_invalid(
+                "tracked package staging contains a non-regular entry",
+            ));
         }
-        let relative = entry
-            .path()
-            .strip_prefix(staging_root)
-            .map_err(|_| package_invalid("staged package entry escapes staging"))?;
-        let name = normalize_entry(relative)?;
-        if entry.file_type().is_dir() {
-            entries.push(ArchiveEntry {
-                name: format!("{name}/"),
-                is_directory: true,
-                permissions: 0o755,
-                size: 0,
-            });
-        } else if entry.file_type().is_file() {
-            let size = entry
-                .metadata()
-                .map_err(|error| {
-                    package_invalid(format!("could not inspect package staging: {error}"))
-                })?
-                .len();
-            ensure_archive_entry_size(&name, size)?;
-            total_bytes = checked_staged_total_bytes(total_bytes, size)?;
-            let executable = payloads
-                .entries
-                .get(&name)
-                .map(|payload| payload.executable)
-                .unwrap_or(false);
-            entries.push(ArchiveEntry {
-                name,
-                is_directory: false,
-                permissions: if executable { 0o755 } else { 0o644 },
-                size,
-            });
-        } else {
-            return Err(package_invalid("staging contains a non-regular entry"));
-        }
+        let size = metadata.len();
+        ensure_archive_entry_size(&name, size)?;
+        total_bytes = checked_staged_total_bytes(total_bytes, size)?;
+        let executable = payloads
+            .entries
+            .get(&name)
+            .map(|payload| payload.executable)
+            .unwrap_or(false);
+        entries.push(ArchiveEntry {
+            name,
+            is_directory: false,
+            permissions: if executable { 0o755 } else { 0o644 },
+            size,
+        });
     }
     ensure_archive_entry_count(entries.len())?;
     entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -2004,6 +2058,44 @@ fn package_invalid(message: impl Into<String>) -> RehomeError {
 
 fn io_package_error(error: io::Error) -> RehomeError {
     package_invalid(format!("package I/O failed: {error}"))
+}
+
+#[cfg(test)]
+mod archive_entry_tests {
+    use super::*;
+
+    #[test]
+    fn archive_writer_ignores_untracked_staging_files() -> Result<(), Box<dyn std::error::Error>> {
+        let staging = tempfile::tempdir()?;
+        write_staged_bytes(staging.path(), "tracked.txt", b"tracked")?;
+        write_staged_bytes(staging.path(), "orphan.txt", b"orphan")?;
+        write_staged_bytes(staging.path(), "checksums.sha256", b"")?;
+        write_staged_bytes(staging.path(), "manifest.json", b"{}")?;
+        let mut payloads = PayloadCollection::new()?;
+        payloads.insert(
+            "tracked.txt".into(),
+            Payload {
+                hash: sha256_hex(b"tracked"),
+                executable: false,
+            },
+        )?;
+
+        let names = staged_archive_entries(staging.path(), &payloads)?
+            .into_iter()
+            .filter(|entry| !entry.is_directory)
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "checksums.sha256".to_owned(),
+                "manifest.json".to_owned(),
+                "tracked.txt".to_owned(),
+            ]
+        );
+        Ok(())
+    }
 }
 
 fn zip_package_error(error: zip::result::ZipError) -> RehomeError {

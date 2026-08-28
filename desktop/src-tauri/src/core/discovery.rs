@@ -48,10 +48,7 @@ pub fn resolve_codex_home_for_os(
     context: &DiscoveryContext,
     source_os: SourceOs,
 ) -> Result<PathBuf, RehomeError> {
-    let platform_default = match source_os {
-        SourceOs::Windows => nonempty_path(context.user_profile.clone()),
-        SourceOs::Macos => nonempty_path(context.home.clone()),
-    };
+    let platform_default = platform_user_home(context, source_os);
 
     override_home
         .or_else(|| nonempty_path(context.codex_home_env.clone()))
@@ -62,6 +59,13 @@ pub fn resolve_codex_home_for_os(
                 "Codex home could not be resolved from the environment",
             )
         })
+}
+
+fn platform_user_home(context: &DiscoveryContext, source_os: SourceOs) -> Option<PathBuf> {
+    match source_os {
+        SourceOs::Windows => nonempty_path(context.user_profile.clone()),
+        SourceOs::Macos => nonempty_path(context.home.clone()),
+    }
 }
 
 pub fn discover_codex(override_home: Option<PathBuf>) -> Result<CodexInventory, RehomeError> {
@@ -98,12 +102,28 @@ pub fn discover_codex_with_context(
     ));
     conversation_paths.sort();
 
-    let skill_paths = collect_files(
+    let mut skill_paths = collect_files(
         &codex_home.join("skills"),
         |path| file_name_is(path, "SKILL.md"),
         "skills",
         &mut warnings,
     );
+    let user_home = platform_user_home(context, current_source_os())
+        .or_else(|| codex_home.parent().map(Path::to_path_buf));
+    let agent_skills_root = user_home.map(|home| home.join(".agents").join("skills"));
+    let agent_skill_paths = agent_skills_root
+        .as_deref()
+        .map(|root| {
+            collect_files(
+                root,
+                |path| file_name_is(path, "SKILL.md"),
+                "global agent skills",
+                &mut warnings,
+            )
+        })
+        .unwrap_or_default();
+    skill_paths.extend(agent_skill_paths.iter().cloned());
+    skill_paths.sort();
     let plugin_paths = collect_files(
         &codex_home.join("plugins").join("cache"),
         |path| file_name_is(path, "plugin.json") || file_name_is(path, "manifest.json"),
@@ -159,7 +179,30 @@ pub fn discover_codex_with_context(
 
     dedupe_warnings(&mut warnings);
 
-    let skills = optional_tree_entries(&skill_paths, &codex_home.join("skills"), "skill", false);
+    let codex_skill_paths = skill_paths
+        .iter()
+        .filter(|path| path.starts_with(codex_home.join("skills")))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut skills = optional_tree_entries(
+        &codex_skill_paths,
+        &codex_home.join("skills"),
+        "skill",
+        false,
+    );
+    if let Some(agent_skills_root) = agent_skills_root.as_deref() {
+        let mut agent_skills =
+            optional_tree_entries(&agent_skill_paths, agent_skills_root, "agent-skill", false);
+        for skill in &mut agent_skills {
+            skill.relative_path = format!(".agents/skills/{}", skill.relative_path);
+        }
+        skills.extend(agent_skills);
+        skills.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.relative_path.cmp(&right.relative_path))
+        });
+    }
     let plugins = optional_tree_entries(
         &plugin_paths,
         &codex_home.join("plugins").join("cache"),

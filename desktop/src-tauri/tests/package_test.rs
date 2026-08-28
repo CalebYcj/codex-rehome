@@ -216,6 +216,124 @@ fn package_collapses_overlapping_plugin_roots() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn package_preserves_global_agent_skill_namespace() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let agent_skill = fixture
+        .codex_home
+        .parent()
+        .unwrap()
+        .join(".agents")
+        .join("skills")
+        .join("shared-agent");
+    fs::create_dir_all(&agent_skill)?;
+    fs::write(agent_skill.join("SKILL.md"), b"# Shared agent skill\n")?;
+    let output_dir = tempfile::tempdir()?;
+    let output = output_dir.path().join("agent-skill.rehome");
+
+    let report = create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home,
+        project_paths: vec![],
+        conversation_ids: vec![],
+        output_path: output.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![agent_skill.join("SKILL.md")],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+
+    assert_eq!(report.counts.skills, 1);
+    let preview = inspect_package(&output)?;
+    assert!(preview
+        .entries
+        .iter()
+        .any(|entry| entry == "agents/skills/shared-agent/SKILL.md"));
+    Ok(())
+}
+
+#[test]
+fn parent_and_subagent_sessions_create_a_self_verifying_package() -> Result<(), Box<dyn Error>> {
+    const CHILD_ID: &str = "55555555-5555-4555-8555-555555555555";
+    let fixture = synthetic_codex_fixture()?;
+    let child_path = fixture
+        .session_path
+        .parent()
+        .unwrap()
+        .join(format!("rollout-2026-07-22T00-10-00-{CHILD_ID}.jsonl"));
+    fs::write(
+        &child_path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-07-22T00:10:00Z",
+                "payload": {
+                    "id": CHILD_ID,
+                    "thread_source": "subagent",
+                    "parent_thread_id": THREAD_ID,
+                    "agent_path": "/root/review",
+                    "source": { "subagent": { "thread_spawn": { "depth": 1 } } }
+                }
+            }))?
+        ),
+    )?;
+    OpenOptions::new()
+        .append(true)
+        .open(&fixture.session_index_path)?
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::to_string(&serde_json::json!({
+                    "id": CHILD_ID,
+                    "thread_name": "Review subagent",
+                    "updated_at": "2026-07-22T00:10:00Z",
+                    "rollout_path": child_path.to_string_lossy(),
+                }))?
+            )
+            .as_bytes(),
+        )?;
+    Connection::open(&fixture.state_db_path)?.execute(
+        "INSERT INTO threads (id, cwd, rollout_path, title, updated_at, archived, has_user_event, preview) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6)",
+        params![
+            CHILD_ID,
+            fixture.project_path.to_string_lossy(),
+            child_path.to_string_lossy(),
+            "Review subagent",
+            "2026-07-22T00:10:00Z",
+            "Subagent preview",
+        ],
+    )?;
+    let output_dir = tempfile::tempdir()?;
+    let output = output_dir.path().join("subagents.rehome");
+
+    let report = create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home,
+        project_paths: vec![],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?, Uuid::parse_str(CHILD_ID)?],
+        output_path: output.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+
+    assert_eq!(report.counts.conversations, 2);
+    let preview = inspect_package(&output)?;
+    assert!(preview.checksum_valid);
+    let child = preview
+        .manifest
+        .conversations
+        .iter()
+        .find(|conversation| conversation.task_id == Uuid::parse_str(CHILD_ID).unwrap())
+        .expect("subagent conversation");
+    assert_eq!(
+        child.classification.as_ref().unwrap().parent_task_id,
+        Some(Uuid::parse_str(THREAD_ID)?)
+    );
+    Ok(())
+}
+
+#[test]
 fn package_deduplicates_selected_index_rows_with_a_stable_last_row_winner(
 ) -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;

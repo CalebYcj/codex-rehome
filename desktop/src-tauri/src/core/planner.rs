@@ -81,6 +81,19 @@ pub fn build_restore_plan_with_conflict_resolution(
         ));
     }
     let payloads = &verified.payloads;
+    if payloads
+        .keys()
+        .any(|source| source.starts_with("agents/skills/"))
+    {
+        validate_root_ancestry(
+            &join_target(
+                &target_parent(&target.codex_home, target.target_os)?,
+                ".agents/skills",
+                target.target_os,
+            )?,
+            target.target_os,
+        )?;
+    }
     let plugin_root_decisions =
         plugin_root_decisions(payloads, &target.codex_home, target.target_os)?;
 
@@ -713,10 +726,30 @@ fn codex_target_path(
     source: &str,
     target_os: SourceOs,
 ) -> Result<PathBuf, RehomeError> {
-    let relative = source
-        .strip_prefix("codex/")
-        .ok_or_else(|| package_invalid("Codex payload is outside the codex package prefix"))?;
-    join_target(codex_home, relative, target_os)
+    if let Some(relative) = source.strip_prefix("codex/") {
+        return join_target(codex_home, relative, target_os);
+    }
+    if let Some(relative) = source.strip_prefix("agents/skills/") {
+        let user_home = target_parent(codex_home, target_os)?;
+        return join_target(&user_home, &format!(".agents/skills/{relative}"), target_os);
+    }
+    Err(package_invalid(
+        "payload is outside the supported Codex and global agent package prefixes",
+    ))
+}
+
+fn target_parent(path: &Path, target_os: SourceOs) -> Result<PathBuf, RehomeError> {
+    let raw = target_path_text(path)?.trim_end_matches(['/', '\\']);
+    let separator = match target_os {
+        SourceOs::Windows => '\\',
+        SourceOs::Macos => '/',
+    };
+    let parent = raw
+        .rfind(separator)
+        .map(|index| &raw[..index])
+        .filter(|parent| !parent.is_empty())
+        .ok_or_else(|| restore_failed("target Codex home has no user-home parent"))?;
+    Ok(PathBuf::from(parent))
 }
 
 fn join_target(root: &Path, relative: &str, target_os: SourceOs) -> Result<PathBuf, RehomeError> {
