@@ -334,6 +334,89 @@ fn parent_and_subagent_sessions_create_a_self_verifying_package() -> Result<(), 
 }
 
 #[test]
+fn package_uses_the_sqlite_rollout_path_when_a_thread_has_multiple_rollouts(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let active_path = fixture.session_path.parent().unwrap().join(format!(
+        "rollout-2026-08-29T00-00-00-{THREAD_ID}_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+    ));
+    fs::write(
+        &active_path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "payload": {
+                    "id": THREAD_ID,
+                    "cwd": fixture.project_path.to_string_lossy(),
+                }
+            }))?,
+            serde_json::to_string(&serde_json::json!({
+                "type": "event_msg",
+                "payload": { "type": "user_message", "message": "active reverted rollout" }
+            }))?
+        ),
+    )?;
+    Connection::open(&fixture.state_db_path)?.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        params![active_path.to_string_lossy(), THREAD_ID],
+    )?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("multi-rollout.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let preview = inspect_package(&package)?;
+    assert_eq!(preview.manifest.conversations.len(), 1);
+    let active_archive_path = format!(
+        "codex/{}",
+        active_path
+            .strip_prefix(&fixture.codex_home)?
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+    assert_eq!(
+        preview.manifest.conversations[0].archive_path,
+        active_archive_path
+    );
+    assert!(preview.entries.contains(&active_archive_path));
+    assert!(!preview.entries.iter().any(|entry| {
+        entry.ends_with(
+            fixture
+                .session_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn package_rejects_multiple_rollouts_when_sqlite_does_not_identify_one(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let second_path = fixture.session_path.parent().unwrap().join(format!(
+        "rollout-2026-08-29T00-00-00-{THREAD_ID}_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"
+    ));
+    fs::copy(&fixture.session_path, second_path)?;
+    Connection::open(&fixture.state_db_path)?.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        params!["C:/missing/active-rollout.jsonl", THREAD_ID],
+    )?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("ambiguous-rollouts.rehome");
+
+    assert_error_message_contains(
+        create_package(package_request(&fixture, package)),
+        "none uniquely matches",
+    );
+    Ok(())
+}
+
+#[test]
 fn package_deduplicates_selected_index_rows_with_a_stable_last_row_winner(
 ) -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
@@ -684,6 +767,34 @@ fn creation_rejects_unicode_portable_path_collisions() -> Result<(), Box<dyn Err
         create_package(package_request(&fixture, package)),
         "collision",
     );
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn creation_accepts_portably_equivalent_directories_with_distinct_files(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let composed = fixture.project_path.join("caf\u{e9}");
+    let decomposed = fixture.project_path.join("cafe\u{301}");
+    fs::create_dir_all(&composed)?;
+    fs::create_dir_all(&decomposed)?;
+    fs::write(composed.join("first.txt"), b"first")?;
+    fs::write(decomposed.join("second.txt"), b"second")?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("equivalent-directories.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let preview = inspect_package(&package)?;
+    assert!(preview
+        .entries
+        .iter()
+        .any(|entry| entry.ends_with("/caf\u{e9}/first.txt")));
+    assert!(preview
+        .entries
+        .iter()
+        .any(|entry| entry.ends_with("/cafe\u{301}/second.txt")));
     Ok(())
 }
 

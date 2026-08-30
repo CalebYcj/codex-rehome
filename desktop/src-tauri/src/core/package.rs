@@ -124,6 +124,11 @@ fn create_package_with_overwrite(
         inventory.session_index_path.as_deref(),
         &request.conversation_ids,
     )?;
+    let thread_export = inventory
+        .state_db_path
+        .as_deref()
+        .map(|state_db| export_selected_threads(state_db, &request.conversation_ids))
+        .transpose()?;
     let conversations = stage_conversations(
         ConversationSelection {
             paths: &inventory.conversation_paths,
@@ -131,6 +136,7 @@ fn create_package_with_overwrite(
             selected_ids: &request.conversation_ids,
             index: &index_metadata,
             projects: &projects,
+            active_rollout_paths: thread_export.as_ref().map(|export| &export.rollout_paths),
         },
         staging.path(),
         &mut payloads,
@@ -147,18 +153,16 @@ fn create_package_with_overwrite(
         )?;
     }
 
-    if let Some(state_db) = inventory.state_db_path.as_deref() {
-        let (metadata, selected_rows) =
-            export_selected_threads(state_db, &request.conversation_ids)?;
-        if selected_rows > 0 {
+    if let Some(thread_export) = thread_export {
+        if thread_export.count > 0 {
             stage_generated(
                 staging.path(),
                 &mut payloads,
                 "codex/metadata/threads.json",
-                &metadata,
+                &thread_export.bytes,
             )?;
         }
-        counts.sqlite_threads = selected_rows;
+        counts.sqlite_threads = thread_export.count;
     }
 
     if !request.skill_paths.is_empty() {
@@ -533,6 +537,9 @@ impl PortablePathRegistry {
     fn insert(&mut self, path: &str, kind: ArchivePathKind) -> Result<(), RehomeError> {
         let key = portable_collision_key(path);
         if let Some(existing) = self.entries.get(&key) {
+            if *existing == ArchivePathKind::Directory && kind == ArchivePathKind::Directory {
+                return Ok(());
+            }
             return Err(package_invalid(format!(
                 "portable archive path collision at {path}: {kind:?} conflicts with {existing:?}"
             )));
@@ -595,6 +602,13 @@ struct ConversationSelection<'a> {
     selected_ids: &'a [Uuid],
     index: &'a SessionIndexMetadata,
     projects: &'a [ProjectEntry],
+    active_rollout_paths: Option<&'a BTreeMap<Uuid, PathBuf>>,
+}
+
+struct SelectedThreadExport {
+    bytes: Vec<u8>,
+    count: u64,
+    rollout_paths: BTreeMap<Uuid, PathBuf>,
 }
 
 fn complete_session_index(
@@ -739,7 +753,7 @@ fn stage_conversations(
     if selected.len() != selection.selected_ids.len() {
         return Err(package_invalid("selected conversation ID is duplicated"));
     }
-    let mut found = HashSet::new();
+    let mut candidates = BTreeMap::<Uuid, Vec<(PathBuf, Value)>>::new();
     let mut conversations = Vec::new();
 
     for source in selection.paths {
@@ -750,19 +764,28 @@ fn stage_conversations(
         if !selected.contains(&task_id) {
             continue;
         }
-        if !found.insert(task_id) {
-            return Err(package_invalid(
-                "selected conversation has multiple session files",
-            ));
-        }
+        candidates
+            .entry(task_id)
+            .or_default()
+            .push((source.clone(), session.fields));
+    }
 
+    for task_id in selected.iter().copied() {
+        let task_candidates = candidates
+            .remove(&task_id)
+            .ok_or_else(|| package_invalid("one or more selected conversations were not found"))?;
+        let (source, session_value) = select_conversation_rollout(
+            task_id,
+            task_candidates,
+            selection.active_rollout_paths,
+            selection.codex_home,
+        )?;
         let relative = source
             .strip_prefix(selection.codex_home)
             .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
         let archive_path = format!("codex/{}", normalize_entry(relative)?);
         let archive_path = normalize_entry(Path::new(&archive_path))?;
-        let staged_payload = copy_source_to_staging(source, staging_root, &archive_path)?;
-        let session_value = session.fields;
+        let staged_payload = copy_source_to_staging(&source, staging_root, &archive_path)?;
         let content_hash = staged_payload.hash.clone();
         payloads.insert(archive_path.clone(), staged_payload)?;
         let metadata = selection
@@ -785,14 +808,55 @@ fn stage_conversations(
         });
     }
 
-    if found != selected {
-        return Err(package_invalid(
-            "one or more selected conversations were not found",
-        ));
-    }
     conversations.sort_by_key(|conversation| conversation.task_id);
     counts.conversations = conversations.len() as u64;
     Ok(conversations)
+}
+
+fn select_conversation_rollout(
+    task_id: Uuid,
+    mut candidates: Vec<(PathBuf, Value)>,
+    active_rollout_paths: Option<&BTreeMap<Uuid, PathBuf>>,
+    codex_home: &Path,
+) -> Result<(PathBuf, Value), RehomeError> {
+    if candidates.len() == 1 {
+        return Ok(candidates.pop().expect("single rollout candidate"));
+    }
+
+    let active_path = active_rollout_paths
+        .and_then(|paths| paths.get(&task_id))
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            package_invalid(
+                "selected conversation has multiple rollout files but Codex metadata does not identify the active rollout",
+            )
+        })?;
+    let active_path = if active_path.is_absolute() {
+        active_path.clone()
+    } else {
+        codex_home.join(active_path)
+    };
+    let matching = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (candidate, _))| {
+            rollout_paths_match(candidate, &active_path).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(package_invalid(
+            "selected conversation has multiple rollout files but none uniquely matches the active Codex rollout_path",
+        ));
+    }
+    Ok(candidates.swap_remove(matching[0]))
+}
+
+fn rollout_paths_match(candidate: &Path, active: &Path) -> bool {
+    candidate == active
+        || match (candidate.canonicalize(), active.canonicalize()) {
+            (Ok(candidate), Ok(active)) => candidate == active,
+            _ => false,
+        }
 }
 
 fn read_selected_session_index(
@@ -842,7 +906,7 @@ fn read_selected_session_index_once(
 fn export_selected_threads(
     database: &Path,
     selected_ids: &[Uuid],
-) -> Result<(Vec<u8>, u64), RehomeError> {
+) -> Result<SelectedThreadExport, RehomeError> {
     let snapshot = StateDatabaseSnapshot::create(database).map_err(|error| {
         package_invalid(format!("could not snapshot Codex state metadata: {error}"))
     })?;
@@ -870,6 +934,7 @@ fn export_selected_threads(
         .map_err(|error| package_invalid(format!("could not query Codex threads: {error}")))?;
     let mut bytes = vec![b'[', b'\n'];
     let mut count = 0_u64;
+    let mut rollout_paths = BTreeMap::new();
     while let Some(row) = rows
         .next()
         .map_err(|error| package_invalid(format!("could not read Codex thread row: {error}")))?
@@ -879,15 +944,24 @@ fn export_selected_threads(
             .ok()
             .and_then(|value| value.as_str().ok())
             .map(str::to_owned);
-        if !id.as_ref().is_some_and(|id| selected.contains(id)) {
+        let Some(id) = id.filter(|id| selected.contains(id)) else {
             continue;
-        }
+        };
         let mut object = Map::new();
         for (index, column) in columns.iter().enumerate() {
             let value = row.get_ref(index).map_err(|error| {
                 package_invalid(format!("could not read Codex thread field: {error}"))
             })?;
             object.insert((*column).to_owned(), sqlite_json_value(value)?);
+        }
+        if let Some(rollout_path) = object
+            .get("rollout_path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+        {
+            let task_id = Uuid::parse_str(&id)
+                .map_err(|_| package_invalid("Codex threads table contains an invalid id"))?;
+            rollout_paths.insert(task_id, PathBuf::from(rollout_path));
         }
         let encoded = serde_json::to_vec(&Value::Object(object))
             .map_err(|error| package_invalid(format!("could not encode Codex thread: {error}")))?;
@@ -909,7 +983,11 @@ fn export_selected_threads(
     }
     bytes.extend_from_slice(b"\n]\n");
     ensure_planning_payload_size("codex/metadata/threads.json", bytes.len() as u64)?;
-    Ok((bytes, count))
+    Ok(SelectedThreadExport {
+        bytes,
+        count,
+        rollout_paths,
+    })
 }
 
 fn thread_table_columns(connection: &Connection) -> Result<HashSet<String>, RehomeError> {
@@ -1353,13 +1431,15 @@ fn staged_archive_entries(
     let mut files = payloads.entries.keys().cloned().collect::<Vec<_>>();
     files.extend(["checksums.sha256".to_owned(), "manifest.json".to_owned()]);
     files.sort();
-    let mut directories = std::collections::BTreeSet::new();
+    let mut directories = BTreeMap::new();
     for name in &files {
         for ancestor in portable_ancestors(name) {
-            directories.insert(ancestor.to_owned());
+            directories
+                .entry(portable_collision_key(ancestor))
+                .or_insert_with(|| ancestor.to_owned());
         }
     }
-    for name in directories {
+    for name in directories.into_values() {
         entries.push(ArchiveEntry {
             name: format!("{name}/"),
             is_directory: true,
