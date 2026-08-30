@@ -83,7 +83,13 @@ export default function ReceivePage({
       if (inspected) {
         setPreview(inspected);
         clearRestoreSelection();
-        setLocations(null);
+        if (inspected.manifest.counts.projects === 0) {
+          const selected = await selectRestoreDestinations(inspected.selection_id);
+          if (generation !== requestGeneration.current) return;
+          setLocations(selected);
+        } else {
+          setLocations(null);
+        }
       }
     } catch (caught) {
       if (generation !== requestGeneration.current) return;
@@ -187,6 +193,7 @@ export default function ReceivePage({
   }
 
   const canPlan = Boolean(preview && locations && phase === "idle");
+  const projectLocationRequired = Boolean(preview && preview.manifest.counts.projects > 0);
   const canRestore = Boolean(
     plan && plan.conflict_count === 0 && codexClosed && phase === "idle" && !report,
   );
@@ -225,14 +232,25 @@ export default function ReceivePage({
       <section className="workflow-section" aria-labelledby="receive-target-title">
         <div className="section-title-row"><div><span className="step-number">2</span><h2 id="receive-target-title">{t("选择保存位置")}</h2></div></div>
         <PathPicker icon={HardDrive} label={t("Codex 数据位置")} value={locations?.target_codex_home ?? inventory?.codex_home ?? t("未检测")} />
-        <PathPicker icon={FolderOpen} label={t("项目保存位置")} value={locations?.projects_root ?? t("尚未选择")} buttonLabel={t("选择项目保存位置")} onClick={chooseLocations} disabled={!preview || phase !== "idle"} />
+        <PathPicker
+          icon={FolderOpen}
+          label={t("项目保存位置")}
+          value={projectLocationRequired
+            ? locations?.projects_root ?? t("尚未选择")
+            : preview
+              ? t("迁移包不含项目文件，无需选择")
+              : t("尚未选择")}
+          buttonLabel={projectLocationRequired ? t("选择项目保存位置") : undefined}
+          onClick={projectLocationRequired ? chooseLocations : undefined}
+          disabled={!preview || phase !== "idle"}
+        />
         <div className="command-row"><p>{t("安全备份由 ReHome 自动管理")}</p><button className="command-button" type="button" disabled={!canPlan} onClick={() => void handlePlan()}>{phase === "planning" ? <LoaderCircle className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}{t("预览导入内容")}</button></div>
       </section>
 
       {plan && (
         <section className="workflow-section" aria-labelledby="restore-plan-title">
           <div className="section-title-row"><div><span className="step-number">3</span><h2 id="restore-plan-title">{t("确认导入内容")}</h2></div><div className="plan-badges"><span>{t("需要 {size}", { size: formatBytes(plan.required_bytes) })}</span><span className={plan.conflict_count ? "status status-error" : "status status-success"}>{plan.conflict_count ? <AlertTriangle aria-hidden="true" /> : <CheckCircle2 aria-hidden="true" />}{t("冲突 {count}", { count: plan.conflict_count })}</span></div></div>
-          <div className="destination-line"><span>{t("目标项目目录")}</span><code>{plan.projects_root}</code></div>
+          {projectLocationRequired && <div className="destination-line"><span>{t("目标项目目录")}</span><code>{plan.projects_root}</code></div>}
           <div className="table-wrap">
             <table className="conflict-table">
               <thead><tr><th>{t("包内来源")}</th><th>{t("目标位置")}</th><th>{t("变更")}</th></tr></thead>

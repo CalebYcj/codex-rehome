@@ -81,7 +81,18 @@ export default function HistoryPage({
       </header>
 
       {error && <p className="inline-state status-error" role="alert"><AlertTriangle aria-hidden="true" />{error}</p>}
-      {warnings.map((warning) => <p className="inline-state status-warning" role="status" key={warning}><AlertTriangle aria-hidden="true" />{warning}</p>)}
+      {warnings.length > 0 && (
+        <details className="history-warnings">
+          <summary className="inline-state status-warning" role="status">
+            <AlertTriangle aria-hidden="true" />
+            {t("有 {count} 条旧迁移记录无法读取，已安全跳过。", { count: warnings.length })}
+          </summary>
+          <div className="history-warning-details">
+            <strong>{t("技术详情")}</strong>
+            {warnings.map((warning) => <code key={warning}>{warning}</code>)}
+          </div>
+        </details>
+      )}
       {loading && !transactions.length && <p className="inline-state" role="status">{t("正在读取迁移记录...")}</p>}
       {!loading && !transactions.length && <div className="history-empty"><Clock3 aria-hidden="true" /><strong>{t("暂无导入记录")}</strong><span>{t("完成一次导入后，记录会显示在这里。")}</span></div>}
 

@@ -446,6 +446,77 @@ describe("ReHome Desktop workflows", () => {
     });
   });
 
+  it("does not misreport deferred project file counts as zero files", async () => {
+    const user = userEvent.setup();
+    api.discoverCodex.mockResolvedValue({
+      ...inventory,
+      projects: inventory.projects.map((project) =>
+        project.name === "rehome-app" ? { ...project, file_count: 0 } : project,
+      ),
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
+
+    expect(screen.getByText("1 个对话 · 项目文件将在打包时统计")).toBeVisible();
+  });
+
+  it("prepares a conversation-only import without asking for a project folder", async () => {
+    const user = userEvent.setup();
+    const conversationOnlyPreview = {
+      ...preview,
+      manifest: {
+        ...preview.manifest,
+        counts: {
+          ...preview.manifest.counts,
+          projects: 0,
+          project_files: 0,
+          conversations: 1,
+        },
+        projects: [],
+      },
+    };
+    const automaticLocations = {
+      selection_id: "91919191-9191-4191-8191-919191919191",
+      target_codex_home: inventory.codex_home,
+      projects_root: "C:\\Users\\Me\\ReHome Projects",
+      backup_root: "C:\\ReHome Backups",
+    };
+    api.inspectPackage.mockResolvedValue(conversationOnlyPreview);
+    api.selectRestoreDestinations.mockResolvedValue(automaticLocations);
+    api.buildRestorePlan.mockResolvedValue({
+      ...basePlan,
+      projects_root: automaticLocations.projects_root,
+      operations: [{
+        package_source: "codex/session_index.jsonl",
+        target: `${inventory.codex_home}\\session_index.jsonl`,
+        expected_previous_hash: null,
+        action: "update",
+        rollback_required: true,
+      }],
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    await user.click(screen.getByRole("button", { name: "前往导入" }));
+    await user.click(screen.getByRole("button", { name: "选择迁移包" }));
+
+    expect(await screen.findByText("迁移包不含项目文件，无需选择")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "选择项目保存位置" })).toBeNull();
+    expect(api.selectRestoreDestinations).toHaveBeenCalledWith(conversationOnlyPreview.selection_id);
+
+    await user.click(screen.getByRole("button", { name: "预览导入内容" }));
+
+    expect(api.buildRestorePlan).toHaveBeenCalledWith(
+      conversationOnlyPreview.selection_id,
+      automaticLocations.selection_id,
+      undefined,
+    );
+    expect(await screen.findByText("codex/session_index.jsonl")).toBeVisible();
+    expect(screen.queryByText("目标项目目录")).toBeNull();
+  });
+
   it("reveals a newly created package so the user can find it", async () => {
     const user = userEvent.setup();
     api.createPackage.mockResolvedValue({
@@ -902,6 +973,30 @@ describe("ReHome Desktop workflows", () => {
     await user.click(await screen.findByRole("button", { name: "显示备份" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("无法显示备份");
+  });
+
+  it("summarizes unreadable legacy migration records and keeps details available", async () => {
+    const user = userEvent.setup();
+    api.listTransactions.mockResolvedValue({
+      transactions: [committedTransaction],
+      warnings: [
+        "skipped transaction journal old-a.json: backup root cannot be resolved",
+        "skipped transaction journal old-b.json: backup root cannot be resolved",
+      ],
+    });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    await user.click(screen.getByRole("button", { name: "前往迁移记录" }));
+
+    const summary = await screen.findByText("有 2 条旧迁移记录无法读取，已安全跳过。");
+    expect(summary).toBeVisible();
+    expect(screen.getByText(/old-a\.json/)).not.toBeVisible();
+
+    await user.click(summary);
+
+    expect(screen.getByText(/old-a\.json/)).toBeVisible();
+    expect(screen.getByText(/old-b\.json/)).toBeVisible();
   });
 
   it("moves focus to the page heading after navigation", async () => {

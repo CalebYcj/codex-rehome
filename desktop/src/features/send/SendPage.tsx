@@ -347,7 +347,7 @@ function ProjectChoice({ name, path, fileCount, sourceAvailable = true, conversa
           <span className="project-copy project-copy-unassociated"><strong>{name}</strong><small>{path}</small></span>
         )}
         <button className="project-expand" type="button" aria-expanded={expanded} aria-label={t(expanded ? "收起项目 {name}" : "展开项目 {name}", { name })} onClick={onToggleExpanded}>
-          <span>{t("{count} 个对话", { count: conversations.length })}{fileCount !== null && (sourceAvailable ? ` · ${fileCount ? t("{count} 个文件", { count: fileCount }) : t("已检测 个文件")}` : ` · ${t("项目文件缺失")}`)}</span>
+          <span>{t("{count} 个对话", { count: conversations.length })}{fileCount !== null && (sourceAvailable ? ` · ${fileCount ? t("{count} 个文件", { count: fileCount }) : t("项目文件将在打包时统计")}` : ` · ${t("项目文件缺失")}`)}</span>
           {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         </button>
       </div>

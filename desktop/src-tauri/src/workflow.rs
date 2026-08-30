@@ -532,18 +532,24 @@ pub async fn build_restore_plan(
         BuildRestorePlanRequest::SelectDestinations {
             package_selection_id,
         } => {
-            state.resolve_package(package_selection_id)?;
+            let package_path = state.resolve_package(package_selection_id)?;
+            let package = core_inspect_package(&package_path)?;
+            state.validate_package_grant(package_selection_id, &package.archive_hash)?;
             let inventory = core_discover_codex(None)?;
-            let Some(projects) = app
-                .dialog()
-                .file()
-                .set_parent(&window)
-                .set_title("选择项目目录")
-                .blocking_pick_folder()
-            else {
-                return Ok(None);
+            let projects_root = if package.manifest.projects.is_empty() {
+                default_unused_projects_root(&inventory.codex_home)?
+            } else {
+                let Some(projects) = app
+                    .dialog()
+                    .file()
+                    .set_parent(&window)
+                    .set_title("选择项目目录")
+                    .blocking_pick_folder()
+                else {
+                    return Ok(None);
+                };
+                canonical_existing_directory(&selected_path(projects)?)?
             };
-            let projects_root = canonical_existing_directory(&selected_path(projects)?)?;
             let backup_root = managed_backup_root()?;
             validate_restore_location_separation(&projects_root, &backup_root)?;
             let selection_id = state.grant_restore_locations(
@@ -961,6 +967,16 @@ fn validate_restore_location_separation(
     Ok(())
 }
 
+fn default_unused_projects_root(codex_home: &Path) -> Result<PathBuf, RehomeError> {
+    let parent = codex_home.parent().ok_or_else(|| {
+        selection_failed(
+            ErrorCode::RestoreFailed,
+            "could not derive an unused project location from the Codex data path",
+        )
+    })?;
+    Ok(parent.join("ReHome Projects"))
+}
+
 fn canonical_existing(path: &Path) -> Result<PathBuf, RehomeError> {
     validate_local_dialog_path(path)?;
     let metadata = fs::symlink_metadata(path)
@@ -1191,6 +1207,17 @@ mod grant_tests {
             &root.join("backups")
         )
         .is_ok());
+    }
+
+    #[test]
+    fn conversation_only_restore_uses_a_non_overlapping_placeholder_project_root() {
+        let parent = PathBuf::from("root").join("user");
+        let codex_home = parent.join(".codex");
+        let projects_root = default_unused_projects_root(&codex_home).unwrap();
+
+        assert_eq!(projects_root, parent.join("ReHome Projects"));
+        assert!(!projects_root.starts_with(&codex_home));
+        assert!(!codex_home.starts_with(&projects_root));
     }
 
     #[cfg(windows)]
