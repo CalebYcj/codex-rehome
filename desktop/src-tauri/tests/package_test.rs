@@ -1054,6 +1054,30 @@ fn package_synthesizes_a_missing_selected_session_index_row() -> Result<(), Box<
 }
 
 #[test]
+fn package_skips_malformed_optional_session_index_rows() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let valid_row = fs::read_to_string(&fixture.session_index_path)?;
+    fs::write(
+        &fixture.session_index_path,
+        format!("not-json\n{valid_row}[]\n"),
+    )?;
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("malformed-index.rehome");
+
+    create_package(package_request(&fixture, package.clone()))?;
+
+    let index = String::from_utf8(read_zip_entry(&package, "codex/session_index.jsonl")?)?;
+    let rows = index
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], THREAD_ID);
+    assert_eq!(rows[0]["thread_name"], "Synthetic migration thread");
+    Ok(())
+}
+
+#[test]
 fn symbolic_links_in_selected_projects_are_safely_excluded() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let outside = fixture.root.join("outside-secret.txt");

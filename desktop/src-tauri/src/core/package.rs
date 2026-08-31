@@ -887,8 +887,14 @@ fn read_selected_session_index_once(
         if line.trim().is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|_| package_invalid("session index contains malformed JSONL"))?;
+        // The index is optional metadata and Codex can leave stale or partial rows.
+        // Discovery already ignores those rows, so packing must remain equally tolerant.
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if !value.is_object() {
+            continue;
+        }
         let Some(id) = metadata_uuid(&value, &["id", "thread_id"]) else {
             continue;
         };
