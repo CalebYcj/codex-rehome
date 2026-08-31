@@ -76,18 +76,16 @@ pub fn discover_codex_with_context(
     override_home: Option<PathBuf>,
     context: &DiscoveryContext,
 ) -> Result<CodexInventory, RehomeError> {
-    let codex_home = resolve_codex_home(override_home, context)?;
-    let codex_home_is_real_directory = fs::symlink_metadata(&codex_home)
-        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-        .unwrap_or(false);
-    if !codex_home_is_real_directory {
-        return Err(RehomeError::new(
-            ErrorCode::CodexNotFound,
-            "Codex home does not exist, is not a directory, or is a symbolic link",
+    let requested_codex_home = resolve_codex_home(override_home, context)?;
+    let (codex_home, linked_home_resolved) = resolve_existing_codex_home(&requested_codex_home)?;
+    let mut warnings = Vec::new();
+    if linked_home_resolved {
+        warnings.push(format!(
+            "Codex home link was resolved from {} to {}",
+            requested_codex_home.display(),
+            codex_home.display()
         ));
     }
-
-    let mut warnings = Vec::new();
     let mut conversation_paths = collect_files(
         &codex_home.join("sessions"),
         |path| extension_is(path, "jsonl"),
@@ -243,6 +241,69 @@ pub fn discover_codex_with_context(
         generated_images,
         warnings,
     })
+}
+
+fn resolve_existing_codex_home(path: &Path) -> Result<(PathBuf, bool), RehomeError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| codex_home_not_found())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        return Ok((path.to_path_buf(), false));
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err(codex_home_not_found())
+    }
+
+    #[cfg(windows)]
+    {
+        let canonical = fs::canonicalize(path).map_err(|_| codex_home_not_found())?;
+        let canonical = local_canonical_codex_home(canonical)?;
+        let target_metadata =
+            fs::symlink_metadata(&canonical).map_err(|_| codex_home_not_found())?;
+        if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
+            return Err(codex_home_not_found());
+        }
+        Ok((canonical, true))
+    }
+}
+
+#[cfg(windows)]
+fn local_canonical_codex_home(path: PathBuf) -> Result<PathBuf, RehomeError> {
+    let raw = path.to_string_lossy();
+    if raw.starts_with(r"\\?\UNC\") {
+        return Err(RehomeError::new(
+            ErrorCode::CodexNotFound,
+            "Linked Codex home must resolve to a local disk",
+        ));
+    }
+    let Some(local) = raw.strip_prefix(r"\\?\") else {
+        if raw.starts_with(r"\\") {
+            return Err(RehomeError::new(
+                ErrorCode::CodexNotFound,
+                "Linked Codex home must resolve to a local disk",
+            ));
+        }
+        return Ok(path);
+    };
+    let bytes = local.as_bytes();
+    if bytes.len() < 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'\\' | b'/')
+    {
+        return Err(RehomeError::new(
+            ErrorCode::CodexNotFound,
+            "Linked Codex home must resolve to a local disk",
+        ));
+    }
+    Ok(PathBuf::from(local))
+}
+
+fn codex_home_not_found() -> RehomeError {
+    RehomeError::new(
+        ErrorCode::CodexNotFound,
+        "Codex home does not exist or does not resolve to a directory",
+    )
 }
 
 fn discovered_projects(paths: &[PathBuf]) -> Vec<ProjectEntry> {

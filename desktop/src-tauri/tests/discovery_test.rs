@@ -654,8 +654,9 @@ fn missing_or_non_directory_codex_home_has_stable_error_code() -> Result<(), Box
     Ok(())
 }
 
+#[cfg(windows)]
 #[test]
-fn symlinked_codex_home_is_rejected() -> Result<(), Box<dyn Error>> {
+fn symlinked_codex_home_resolves_to_its_real_directory() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let real_home = temp.path().join("real-codex-home");
     let linked_home = temp.path().join("linked-codex-home");
@@ -667,6 +668,28 @@ fn symlinked_codex_home_is_rejected() -> Result<(), Box<dyn Error>> {
         }
         return Err(error.into());
     }
+
+    let inventory =
+        discover_codex_with_context(Some(linked_home.clone()), &DiscoveryContext::default())?;
+    assert_eq!(
+        fs::canonicalize(&inventory.codex_home)?,
+        fs::canonicalize(&real_home)?
+    );
+    assert!(inventory.warnings.iter().any(|warning| {
+        warning.contains("Codex home link was resolved")
+            && warning.contains(&linked_home.to_string_lossy().to_string())
+    }));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[test]
+fn symlinked_codex_home_is_rejected() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let real_home = temp.path().join("real-codex-home");
+    let linked_home = temp.path().join("linked-codex-home");
+    fs::create_dir(&real_home)?;
+    create_dir_symlink(&real_home, &linked_home)?;
 
     let error =
         discover_codex_with_context(Some(linked_home), &DiscoveryContext::default()).unwrap_err();
@@ -777,16 +800,43 @@ fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 #[test]
-fn junctioned_codex_home_is_rejected_without_symlink_privileges() -> Result<(), Box<dyn Error>> {
+fn junctioned_codex_home_resolves_without_symlink_privileges() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let real_home = temp.path().join("real-codex-home");
     let junction_home = temp.path().join("junction-codex-home");
-    fs::create_dir(&real_home)?;
+    let task_id = Uuid::new_v4();
+    let sessions = real_home.join("sessions");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join(format!("{task_id}.jsonl")),
+        format!(
+            "{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": task_id,
+                    "timestamp": "2026-08-31T10:00:00Z",
+                    "cwd": r"D:\Codex\Linked Project"
+                }
+            })
+        ),
+    )?;
     create_junction(&real_home, &junction_home)?;
 
-    let error =
-        discover_codex_with_context(Some(junction_home), &DiscoveryContext::default()).unwrap_err();
-    assert_eq!(error.code, ErrorCode::CodexNotFound);
+    let inventory =
+        discover_codex_with_context(Some(junction_home.clone()), &DiscoveryContext::default())?;
+    assert_eq!(
+        fs::canonicalize(&inventory.codex_home)?,
+        fs::canonicalize(&real_home)?
+    );
+    assert!(inventory.warnings.iter().any(|warning| {
+        warning.contains("Codex home link was resolved")
+            && warning.contains(&junction_home.to_string_lossy().to_string())
+    }));
+    assert_eq!(inventory.conversations.len(), 1);
+    assert_eq!(inventory.conversations[0].task_id, task_id);
+    assert!(fs::canonicalize(&inventory.conversation_paths[0])?
+        .starts_with(fs::canonicalize(&real_home)?));
     Ok(())
 }
 
