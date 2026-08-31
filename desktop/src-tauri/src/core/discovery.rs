@@ -251,7 +251,7 @@ fn resolve_existing_codex_home(path: &Path) -> Result<(PathBuf, bool), RehomeErr
 
     #[cfg(not(windows))]
     {
-        return Err(codex_home_not_found());
+        Err(codex_home_not_found())
     }
 
     #[cfg(windows)]
