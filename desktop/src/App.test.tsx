@@ -688,6 +688,38 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByText("冲突 0")).toBeVisible();
   });
 
+  it("puts blocking conflicts first and labels unresolved structural conflicts", async () => {
+    const user = userEvent.setup();
+    const conflictPlan = {
+      ...basePlan,
+      conflict_count: 1,
+      operations: [
+        basePlan.operations[0],
+        {
+          ...basePlan.operations[0],
+          package_source: "projects/project/files/blocked.txt",
+          target: "C:\\Restored Projects\\project\\blocked.txt",
+          action: "conflict",
+          expected_previous_hash: null,
+        },
+      ],
+    };
+    api.buildRestorePlan.mockResolvedValue(conflictPlan);
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+
+    await openReceive(user);
+
+    const rows = within(screen.getByRole("table")).getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("projects/project/files/blocked.txt");
+    expect(rows[2]).toHaveTextContent("projects/rehome-app/README.md");
+
+    await user.click(screen.getByRole("button", { name: "保留新电脑文件（推荐）" }));
+
+    expect(await screen.findByText("结构冲突")).toBeVisible();
+    expect(screen.getByRole("button", { name: "导入到 Codex" })).toBeDisabled();
+  });
+
   it("offers the same conflict choices in English", async () => {
     const user = userEvent.setup();
     api.buildRestorePlan.mockResolvedValue({

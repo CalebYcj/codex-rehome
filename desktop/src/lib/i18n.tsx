@@ -124,6 +124,7 @@ const english: Record<string, string> = {
   "冲突 {count}": "Conflicts {count}",
   "发现 {count} 个同名但内容不同的文件。": "Same-name files with different content: {count}.",
   "仍有 {count} 个无法自动处理的结构冲突。": "{count} structural conflicts still require manual action.",
+  "结构冲突": "Structural conflict",
   "请选择如何处理这些普通文件冲突。": "Choose how ReHome should handle these regular file conflicts.",
   "请查看上表中的冲突路径，移开对应文件或目录，或重新选择一个空的项目保存位置后再预览。": "Review the conflict paths above, move the matching file or folder aside, or choose an empty project location and preview again.",
   "冲突处理方式": "Conflict resolution",

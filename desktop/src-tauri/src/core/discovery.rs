@@ -151,7 +151,7 @@ pub fn discover_codex_with_context(
         &mut warnings,
     );
 
-    let sqlite_threads = state_db_path
+    let (sqlite_threads, active_rollout_paths) = state_db_path
         .as_deref()
         .map(|path| {
             read_state_database_roots(
@@ -164,7 +164,7 @@ pub fn discover_codex_with_context(
                 &mut warnings,
             )
         })
-        .unwrap_or(0);
+        .unwrap_or_else(|| (0, BTreeMap::new()));
 
     let projects = discovered_projects(&project_paths);
     let conversations = discovered_conversations(
@@ -172,6 +172,7 @@ pub fn discover_codex_with_context(
         &conversation_paths,
         session_index_path.as_deref(),
         &projects,
+        &active_rollout_paths,
         &mut warnings,
     );
 
@@ -336,6 +337,7 @@ fn discovered_conversations(
     paths: &[PathBuf],
     session_index_path: Option<&Path>,
     projects: &[ProjectEntry],
+    active_rollout_paths: &BTreeMap<Uuid, PathBuf>,
     warnings: &mut Vec<String>,
 ) -> Vec<ConversationEntry> {
     let index = read_session_index_entries(session_index_path, warnings);
@@ -405,8 +407,66 @@ fn discovered_conversations(
             classification,
         });
     }
-    conversations.sort_by_key(|conversation| conversation.task_id);
-    conversations
+    let mut grouped = BTreeMap::<Uuid, Vec<ConversationEntry>>::new();
+    for conversation in conversations {
+        grouped
+            .entry(conversation.task_id)
+            .or_default()
+            .push(conversation);
+    }
+    let mut selected = Vec::new();
+    for (task_id, mut candidates) in grouped {
+        if candidates.len() == 1 {
+            selected.push(candidates.pop().expect("single conversation candidate"));
+            continue;
+        }
+        let matching = active_rollout_paths
+            .get(&task_id)
+            .map(|active| {
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, candidate)| {
+                        discovered_rollout_matches(codex_home, candidate, active).then_some(index)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if matching.len() == 1 {
+            selected.push(candidates.swap_remove(matching[0]));
+            continue;
+        }
+        push_warning_unique(
+            warnings,
+            format!(
+                "Conversation {task_id} has multiple rollout files but no unique active SQLite rollout_path"
+            ),
+        );
+        selected.extend(candidates);
+    }
+    selected.sort_by_key(|conversation| conversation.task_id);
+    selected
+}
+
+fn discovered_rollout_matches(
+    codex_home: &Path,
+    conversation: &ConversationEntry,
+    active: &Path,
+) -> bool {
+    let Some(relative) = conversation.archive_path.strip_prefix("codex/") else {
+        return false;
+    };
+    let candidate = codex_home.join(Path::new(relative));
+    let active = if active.is_absolute() {
+        active.to_path_buf()
+    } else {
+        codex_home.join(active)
+    };
+    candidate == active
+        || match (candidate.canonicalize(), active.canonicalize()) {
+            (Ok(candidate), Ok(active)) => candidate == active,
+            _ => false,
+        }
 }
 
 fn read_session_metadata_file(path: &Path) -> io::Result<Option<SessionMetadata>> {
@@ -791,14 +851,14 @@ fn read_state_database_roots(
     path: &Path,
     mut fallback_projects: Option<(&mut Vec<PathBuf>, &mut HashSet<ProjectPathKey>)>,
     warnings: &mut Vec<String>,
-) -> u64 {
+) -> (u64, BTreeMap<Uuid, PathBuf>) {
     let snapshot = match StateDatabaseSnapshot::create(path) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             warnings.push(format!(
                 "Could not snapshot the newest Codex state database: {error}"
             ));
-            return 0;
+            return (0, BTreeMap::new());
         }
     };
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -806,7 +866,7 @@ fn read_state_database_roots(
         Ok(connection) => connection,
         Err(_) => {
             warnings.push("Could not open the newest Codex state database read-only".to_owned());
-            return 0;
+            return (0, BTreeMap::new());
         }
     };
 
@@ -814,9 +874,11 @@ fn read_state_database_roots(
         Ok(count) => count,
         Err(_) => {
             warnings.push("Could not count threads in the newest Codex state database".to_owned());
-            return 0;
+            return (0, BTreeMap::new());
         }
     };
+
+    let active_rollout_paths = read_active_rollout_paths(&connection, warnings);
 
     let mut statement = match connection.prepare("SELECT cwd FROM threads ORDER BY rowid") {
         Ok(statement) => statement,
@@ -824,7 +886,7 @@ fn read_state_database_roots(
             warnings.push(
                 "Could not read project roots from the newest Codex state database".to_owned(),
             );
-            return count;
+            return (count, active_rollout_paths);
         }
     };
     let rows = match statement.query_map([], |row| row.get::<_, Option<String>>(0)) {
@@ -833,7 +895,7 @@ fn read_state_database_roots(
             warnings.push(
                 "Could not read project roots from the newest Codex state database".to_owned(),
             );
-            return count;
+            return (count, active_rollout_paths);
         }
     };
     for row in rows {
@@ -847,7 +909,52 @@ fn read_state_database_roots(
             Err(_) => warnings.push("Ignored an unreadable thread project root".to_owned()),
         }
     }
-    count
+    (count, active_rollout_paths)
+}
+
+fn read_active_rollout_paths(
+    connection: &Connection,
+    warnings: &mut Vec<String>,
+) -> BTreeMap<Uuid, PathBuf> {
+    let mut statement =
+        match connection.prepare("SELECT id, rollout_path FROM threads ORDER BY rowid") {
+            Ok(statement) => statement,
+            Err(_) => {
+                warnings.push(
+                    "Could not read active rollout paths from the newest Codex state database"
+                        .to_owned(),
+                );
+                return BTreeMap::new();
+            }
+        };
+    let rows = match statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => {
+            warnings.push(
+                "Could not read active rollout paths from the newest Codex state database"
+                    .to_owned(),
+            );
+            return BTreeMap::new();
+        }
+    };
+    let mut paths = BTreeMap::new();
+    for row in rows {
+        match row {
+            Ok((Some(id), Some(path))) if !path.is_empty() => {
+                if let Ok(id) = Uuid::parse_str(&id) {
+                    paths.insert(id, PathBuf::from(path));
+                }
+            }
+            Ok(_) => {}
+            Err(_) => warnings.push("Ignored an unreadable active rollout path".to_owned()),
+        }
+    }
+    paths
 }
 
 fn push_unique_path(raw: &str, projects: &mut Vec<PathBuf>, seen: &mut HashSet<ProjectPathKey>) {

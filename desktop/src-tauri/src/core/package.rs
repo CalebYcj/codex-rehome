@@ -32,6 +32,7 @@ const FORMAT: &str = "codex-rehome";
 const SCHEMA_VERSION: u32 = 1;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CHECKSUM_FILE_BYTES: u64 = 64 * 1024 * 1024;
 // Keep the planning limit aligned with the package's existing per-file and
 // total-size safety ceiling. This lets a large Codex conversation be checked
 // and path-rewritten instead of being rejected by a smaller legacy limit.
@@ -1630,7 +1631,7 @@ fn validate_manifest_archive_path(path: &str) -> Result<String, RehomeError> {
 fn read_control_entry<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, RehomeError> {
     let mut bytes = Vec::new();
     reader
-        .take(MAX_CONTROL_FILE_BYTES + 1)
+        .take(control_file_limit(name) + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| package_invalid(format!("could not read ZIP control file: {error}")))?;
     ensure_control_size(name, bytes.len() as u64)?;
@@ -1716,6 +1717,23 @@ mod authenticated_payload_tests {
     }
 
     #[test]
+    fn checksum_control_file_accepts_more_than_the_legacy_limit() {
+        ensure_control_size("checksums.sha256", MAX_CONTROL_FILE_BYTES + 1).unwrap();
+        ensure_control_size("checksums.sha256", MAX_CHECKSUM_FILE_BYTES).unwrap();
+        ensure_control_size("checksums.sha256", MAX_CHECKSUM_FILE_BYTES + 1).unwrap_err();
+        ensure_control_size("manifest.json", MAX_CONTROL_FILE_BYTES + 1).unwrap_err();
+
+        let bytes = vec![b'x'; (MAX_CONTROL_FILE_BYTES + 1) as usize];
+        let mut reader = bytes.as_slice();
+        assert_eq!(
+            read_control_entry(&mut reader, "checksums.sha256")
+                .unwrap()
+                .len(),
+            bytes.len()
+        );
+    }
+
+    #[test]
     fn staged_total_size_error_reports_the_actual_size_and_limit() {
         let actual = MAX_INSPECTION_BYTES + 1;
 
@@ -1779,12 +1797,20 @@ fn hash_archive_file(file: &mut fs::File) -> Result<String, RehomeError> {
 }
 
 fn ensure_control_size(name: &str, size: u64) -> Result<(), RehomeError> {
-    if size > MAX_CONTROL_FILE_BYTES {
+    if size > control_file_limit(name) {
         return Err(package_invalid(format!(
             "ZIP control file size exceeds the inspection limit: {name}"
         )));
     }
     Ok(())
+}
+
+fn control_file_limit(name: &str) -> u64 {
+    if name == "checksums.sha256" {
+        MAX_CHECKSUM_FILE_BYTES
+    } else {
+        MAX_CONTROL_FILE_BYTES
+    }
 }
 
 fn ensure_planning_payload_size(name: &str, size: u64) -> Result<(), RehomeError> {
