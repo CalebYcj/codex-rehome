@@ -197,6 +197,11 @@ export default function ReceivePage({
   const canRestore = Boolean(
     plan && plan.conflict_count === 0 && codexClosed && phase === "idle" && !report,
   );
+  const planOperations = plan
+    ? [...plan.operations].sort(
+        (left, right) => Number(right.action === "conflict") - Number(left.action === "conflict"),
+      )
+    : [];
   const manualRegistration = report?.registrations.some(
     (registration) => !registrationIsComplete(registration.status),
   );
@@ -254,7 +259,7 @@ export default function ReceivePage({
           <div className="table-wrap">
             <table className="conflict-table">
               <thead><tr><th>{t("包内来源")}</th><th>{t("目标位置")}</th><th>{t("变更")}</th></tr></thead>
-              <tbody>{plan.operations.map((operation) => <tr key={`${operation.package_source}-${operation.target}`}><td><code>{operation.package_source}</code></td><td><code>{operation.target}</code></td><td><span className={`change change-${operation.action}`}>{changeLabel(operation.action, t)}</span></td></tr>)}</tbody>
+              <tbody>{planOperations.map((operation) => <tr key={`${operation.package_source}-${operation.target}`}><td><code>{operation.package_source}</code></td><td><code>{operation.target}</code></td><td><span className={`change change-${operation.action}`}>{changeLabel(operation.action, t, conflictResolution !== null)}</span></td></tr>)}</tbody>
             </table>
           </div>
           {plan.conflict_count > 0 && (
@@ -364,7 +369,12 @@ function sourceOsLabel(os: "windows" | "macos"): string {
   return os === "macos" ? "macOS" : "Windows";
 }
 
-function changeLabel(change: RestorePlan["operations"][number]["action"], t: (key: string) => string): string {
+function changeLabel(
+  change: RestorePlan["operations"][number]["action"],
+  t: (key: string) => string,
+  structuralConflict: boolean,
+): string {
+  if (change === "conflict" && structuralConflict) return t("结构冲突");
   return t({ add: "新增", update: "更新", unchanged: "不变", preserve: "保留本机", conflict: "冲突" }[change]);
 }
 

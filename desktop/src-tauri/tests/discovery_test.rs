@@ -503,6 +503,47 @@ fn discovery_reports_fixture_without_modifying_it() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+fn discovery_uses_sqlite_active_rollout_for_duplicate_thread_files() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let older_rollout = fixture
+        .session_path
+        .parent()
+        .ok_or("session has no parent")?
+        .join(format!("rollout-2026-07-21T00-00-00-{THREAD_ID}.jsonl"));
+    fs::copy(&fixture.session_path, &older_rollout)?;
+    let connection = Connection::open(&fixture.state_db_path)?;
+    connection.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        params![fixture.session_path.to_string_lossy().as_ref(), THREAD_ID],
+    )?;
+    drop(connection);
+
+    let inventory = discover_codex_with_context(
+        Some(fixture.codex_home.clone()),
+        &DiscoveryContext::default(),
+    )?;
+
+    assert_eq!(inventory.conversation_paths.len(), 2);
+    assert_eq!(inventory.conversations.len(), 1);
+    assert_eq!(
+        inventory.conversations[0].task_id,
+        Uuid::parse_str(THREAD_ID)?
+    );
+    assert_eq!(
+        inventory.conversations[0].archive_path,
+        format!(
+            "codex/{}",
+            fixture
+                .session_path
+                .strip_prefix(&fixture.codex_home)?
+                .to_string_lossy()
+                .replace('\\', "/")
+        )
+    );
+    Ok(())
+}
+
+#[test]
 fn discovery_combines_global_state_and_sqlite_roots_in_stable_order() -> Result<(), Box<dyn Error>>
 {
     let fixture = synthetic_codex_fixture()?;
