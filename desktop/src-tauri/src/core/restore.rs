@@ -172,11 +172,13 @@ fn apply_transaction(
     update_status(transaction, RecoveryStatus::Committed)?;
     let registrations = register_projects(plan, options, verified, registrar);
     verification.app_registration_valid = options.register_projects
+        && !registrations.is_empty()
         && registrations
             .iter()
             .all(|result| result.status == RegistrationStatus::Registered);
-    verification.app_visible_ready =
-        data_verification_passed(&verification) && verification.app_registration_valid;
+    // Opening a project does not verify that Codex lists or can resume its
+    // conversations. Keep this unverified until an application-level check exists.
+    verification.app_visible_ready = false;
 
     Ok(RestoreReport {
         transaction_id: transaction.journal.transaction_id,

@@ -156,6 +156,8 @@ const english: Record<string, string> = {
   "项目文件": "Project files",
   "Codex 项目登记": "Codex project registration",
   "Codex 可见状态": "Codex visibility",
+  "对话可见性待确认": "Conversation visibility not yet verified",
+  "文件和索引已导入。请重启 Codex，打开原对话并继续发送一条消息，确认可以使用。": "Files and indexes have been imported. Restart Codex, open the original conversation, and send another message to confirm it works.",
   "项目文件已导入，需要在 Codex 中手动打开": "Project files were imported and must be opened manually in Codex",
   "在 Codex 中打开": "Open in Codex",
   "检查": "Inspect",

@@ -1416,7 +1416,8 @@ fn apply_rejects_a_hardlink_added_after_planning() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn registration_runs_after_commit_and_sets_app_visible_ready() -> Result<(), Box<dyn Error>> {
+fn registration_runs_after_commit_but_does_not_prove_conversation_visibility(
+) -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let mut options = harness.options();
     options.register_projects = true;
@@ -1441,7 +1442,7 @@ fn registration_runs_after_commit_and_sets_app_visible_ready() -> Result<(), Box
         RegistrationStatus::Registered
     );
     assert!(report.verification.app_registration_valid);
-    assert!(report.verification.app_visible_ready);
+    assert!(!report.verification.app_visible_ready);
     Ok(())
 }
 

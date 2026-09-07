@@ -275,6 +275,7 @@ pub struct VerificationReport {
     pub forbidden_files_absent: bool,
     pub project_files_valid: bool,
     pub app_registration_valid: bool,
+    /// True only after application-level visibility verification, not registration.
     pub app_visible_ready: bool,
 }
 
