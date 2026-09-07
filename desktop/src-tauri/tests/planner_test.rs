@@ -476,7 +476,9 @@ fn project_bound_conversation_rewrites_a_stale_cross_platform_cwd() -> Result<()
     fixture.preview = inspect_package(&fixture.preview.package_path)?;
 
     let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
-    let target = fixture.projects_root.join("visual");
+    let target = PathBuf::from(rehome_desktop_lib::core::paths::codex_project_path(
+        &fixture.projects_root.join("visual"),
+    )?);
     for source in [THREADS_SOURCE, INDEX_SOURCE, SESSION_SOURCE] {
         assert!(plan.reference_rewrites.iter().any(|rewrite| {
             rewrite.kind == ReferenceRewriteKind::ProjectPath
@@ -1700,7 +1702,7 @@ fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
             &serde_json::json!({
                 "id": id.to_string(),
                 "title": title,
-                "cwd": cwd.to_string_lossy(),
+                "cwd": rehome_desktop_lib::core::paths::codex_project_path(cwd)?,
                 "rollout_path": rollout_path.to_string_lossy(),
             }),
         )?;
@@ -1710,7 +1712,7 @@ fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
             params![
                 id.to_string(),
                 title,
-                cwd.to_string_lossy().as_ref(),
+                rehome_desktop_lib::core::paths::codex_project_path(cwd)?,
                 rollout_path.to_string_lossy().as_ref()
             ],
         )?;
@@ -1804,7 +1806,7 @@ fn write_ready_bridge_metadata(
     let ready_index = serde_json::to_vec(&serde_json::json!({
         "id": task_id.to_string(),
         "title": title,
-        "cwd": project_path.to_string_lossy(),
+        "cwd": rehome_desktop_lib::core::paths::codex_project_path(&project_path)?,
         "rollout_path": rollout_path.to_string_lossy(),
         "target_only": "preserve me",
     }))?;
@@ -1820,7 +1822,7 @@ fn write_ready_bridge_metadata(
         params![
             task_id.to_string(),
             title,
-            project_path.to_string_lossy().as_ref(),
+            rehome_desktop_lib::core::paths::codex_project_path(&project_path)?,
             rollout_path.to_string_lossy().as_ref()
         ],
     )?;
@@ -1954,7 +1956,7 @@ fn rewritten_session_bytes(task_id: Uuid, title: &str, project_path: &Path) -> V
     let mut bytes = serde_json::to_vec(&serde_json::json!({
         "id": task_id.to_string(),
         "title": title,
-        "cwd": project_path.to_string_lossy(),
+        "cwd": rehome_desktop_lib::core::paths::codex_project_path(project_path).unwrap(),
     }))
     .unwrap();
     bytes.push(b'\n');

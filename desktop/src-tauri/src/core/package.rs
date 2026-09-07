@@ -1175,9 +1175,10 @@ fn stage_discovered_trees(
                 continue;
             }
             if entry.file_type().is_symlink() {
-                return Err(package_invalid(
-                    "symbolic links are not allowed in selected Codex bundles",
-                ));
+                return Err(package_invalid(format!(
+                    "symbolic links are not allowed in selected Codex bundles: {}",
+                    entry.path().display()
+                )));
             }
             if !entry.file_type().is_file() {
                 continue;
@@ -2137,18 +2138,28 @@ fn validate_staging_location(
     codex_home: &Path,
 ) -> Result<(), RehomeError> {
     let mut forbidden_roots = Vec::with_capacity(project_paths.len() + 2);
-    forbidden_roots.push(output_parent.canonicalize().map_err(io_package_error)?);
-    forbidden_roots.push(codex_home.canonicalize().map_err(io_package_error)?);
+    forbidden_roots.push((
+        "package output directory",
+        output_parent.canonicalize().map_err(io_package_error)?,
+    ));
+    forbidden_roots.push((
+        "Codex home",
+        codex_home.canonicalize().map_err(io_package_error)?,
+    ));
     for project in project_paths {
-        forbidden_roots.push(project.canonicalize().map_err(io_package_error)?);
-    }
-    if forbidden_roots
-        .iter()
-        .any(|root| staging_root.starts_with(root))
-    {
-        return Err(package_invalid(
-            "private staging cannot be inside a source project or package output directory",
+        forbidden_roots.push((
+            "source project",
+            project.canonicalize().map_err(io_package_error)?,
         ));
+    }
+    if let Some((kind, root)) = forbidden_roots
+        .iter()
+        .find(|(_, root)| staging_root.starts_with(root))
+    {
+        return Err(package_invalid(format!(
+            "private staging cannot be inside a source project or package output directory; staging: {}; conflicting {kind}: {}",
+            staging_root.display(), root.display()
+        )));
     }
     Ok(())
 }
@@ -2175,6 +2186,39 @@ fn io_package_error(error: io::Error) -> RehomeError {
 #[cfg(test)]
 mod archive_entry_tests {
     use super::*;
+
+    #[test]
+    fn staging_overlap_error_identifies_the_conflicting_selection(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let codex = root.join("codex");
+        let project = root.join("project");
+        let output = root.join("output");
+        for path in [&codex, &project, &output] {
+            fs::create_dir(path)?;
+        }
+        for (parent, label) in [
+            (&codex, "Codex home"),
+            (&project, "source project"),
+            (&output, "package output directory"),
+        ] {
+            let staging = parent.join("private-stage");
+            let error = validate_staging_location(
+                &staging,
+                &output,
+                std::slice::from_ref(&project),
+                &codex,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::PackageInvalid);
+            assert!(error.message.contains(label));
+            assert!(error.message.contains(&parent.display().to_string()));
+            assert!(error.message.contains(&staging.display().to_string()));
+        }
+        validate_staging_location(&root.join("separate-stage"), &output, &[project], &codex)?;
+        Ok(())
+    }
 
     #[test]
     fn archive_writer_ignores_untracked_staging_files() -> Result<(), Box<dyn std::error::Error>> {

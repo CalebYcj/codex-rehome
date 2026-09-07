@@ -36,6 +36,244 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+#[ignore = "set REHOME_UI_FIXTURE_ROOT to a new directory for isolated desktop acceptance"]
+fn prepare_synthetic_desktop_acceptance_fixture() -> Result<(), Box<dyn Error>> {
+    let output = PathBuf::from(
+        env::var_os("REHOME_UI_FIXTURE_ROOT").ok_or("REHOME_UI_FIXTURE_ROOT is required")?,
+    );
+    if !output.is_absolute() || output.exists() {
+        return Err("acceptance output must be a new absolute directory".into());
+    }
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, _| {
+        add_forbidden_payload(
+            package,
+            "agents/skills/shared/SKILL.md",
+            b"# Synthetic shared skill\n",
+        )
+    })?;
+    fs::create_dir_all(output.join(".codex"))?;
+    fs::create_dir(output.join("projects"))?;
+    fs::copy(&harness.plan.package_path, output.join("synthetic.rehome"))?;
+    for file in ["session_index.jsonl", "state_5.sqlite"] {
+        fs::copy(
+            harness.plan.target_codex_home.join(file),
+            output.join(".codex").join(file),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn shared_skills_backup_must_not_overlap_its_restore_root() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, _| {
+        add_forbidden_payload(package, "agents/skills/shared/SKILL.md", b"incoming\n")
+    })?;
+    let mut options = harness.options();
+    options.backup_root = harness
+        .plan
+        .target_codex_home
+        .parent()
+        .unwrap()
+        .join(".agents/skills");
+    let error = apply_restore(harness.plan.clone(), options).unwrap_err();
+    assert!(error.message.contains("overlap"), "{}", error.message);
+    assert!(!harness.transactions_dir().exists());
+    Ok(())
+}
+
+#[test]
+fn shared_skill_link_added_after_preview_is_rejected() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, _| {
+        add_forbidden_payload(package, "agents/skills/shared/SKILL.md", b"incoming\n")
+    })?;
+    let skill = harness
+        .plan
+        .target_codex_home
+        .parent()
+        .unwrap()
+        .join(".agents/skills/shared/SKILL.md");
+    let outside = harness._fixture.root.join("outside-skill.md");
+    fs::write(&outside, b"do not touch\n")?;
+    fs::create_dir_all(skill.parent().unwrap())?;
+    if let Err(error) = create_file_symlink(&outside, &skill) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    assert!(apply_restore(harness.plan.clone(), harness.options()).is_err());
+    assert_eq!(fs::read(outside)?, b"do not touch\n");
+    Ok(())
+}
+
+#[test]
+fn legacy_journals_still_identify_restored_projects() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let mut journal = harness.read_journal(report.transaction_id)?;
+    journal.as_object_mut().unwrap().remove("project_paths");
+    fs::write(
+        harness.journal_path(report.transaction_id),
+        serde_json::to_vec(&journal)?,
+    )?;
+    assert_eq!(
+        transaction_summary(report.transaction_id)?
+            .unwrap()
+            .restored_project_paths,
+        vec![fs::canonicalize(harness.plan.projects_root.join("visual"))?]
+    );
+    assert!(rollback(report.transaction_id)?.success);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_project_metadata_uses_the_same_path_as_manual_codex_open() -> Result<(), Box<dyn Error>>
+{
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let project = harness.plan.projects_root.join("visual");
+    let expected = project.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
+    apply_restore(harness.plan.clone(), harness.options())?;
+    let session: Value = serde_json::from_str(
+        fs::read_to_string(&harness.plan.sessions[0].target)?
+            .lines()
+            .next()
+            .unwrap(),
+    )?;
+    assert_eq!(session["payload"]["cwd"], expected);
+    let connection = Connection::open(harness.plan.target_codex_home.join("state_5.sqlite"))?;
+    let cwd: String = connection.query_row(
+        "SELECT cwd FROM threads WHERE id = ?1",
+        [THREAD_ID],
+        |row| row.get(0),
+    )?;
+    assert_eq!(cwd, expected);
+    let index: Value =
+        fs::read_to_string(harness.plan.target_codex_home.join("session_index.jsonl"))?
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|row| row["id"] == THREAD_ID)
+            .unwrap();
+    assert_eq!(index["cwd"], expected);
+    Ok(())
+}
+
+#[test]
+fn shared_agent_skill_replacement_is_backed_up_and_restored() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, target| {
+        add_forbidden_payload(package, "agents/skills/shared/SKILL.md", b"incoming\n")?;
+        fs::create_dir_all(target.join(".agents/skills/shared"))?;
+        fs::write(target.join(".agents/skills/shared/SKILL.md"), b"original\n")?;
+        Ok(())
+    })?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan_with_conflict_resolution(
+        &inspect_package(&harness.plan.package_path)?,
+        &target,
+        &harness.plan.projects_root,
+        Some(FileConflictResolution::UsePackage),
+    )?;
+    let skill = target
+        .codex_home
+        .parent()
+        .unwrap()
+        .join(".agents/skills/shared/SKILL.md");
+    let report = apply_restore(plan, harness.options())?;
+    assert_eq!(fs::read(&skill)?, b"incoming\n");
+    rollback(report.transaction_id)?;
+    assert_eq!(fs::read(skill)?, b"original\n");
+    Ok(())
+}
+
+#[test]
+fn shared_agent_skills_are_removed_if_the_later_bridge_fails() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(
+        DatabaseSchema::RequiredColumnWithoutDefault,
+        |package, _| add_forbidden_payload(package, "agents/skills/shared/SKILL.md", b"incoming\n"),
+    )?;
+    let skill = harness
+        .plan
+        .target_codex_home
+        .parent()
+        .unwrap()
+        .join(".agents/skills/shared/SKILL.md");
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+    assert!(error.message.contains("SQLite"), "{}", error.message);
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    assert!(!skill.exists());
+    Ok(())
+}
+
+#[test]
+fn shared_agent_skills_restore_and_rollback_without_touching_siblings() -> Result<(), Box<dyn Error>>
+{
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, target| {
+        add_forbidden_payload(
+            package,
+            "agents/skills/faster-whisper/.clawdhubignore",
+            b"new skill\n",
+        )?;
+        fs::create_dir_all(target.join(".agents/skills/faster-whisper"))?;
+        fs::write(target.join(".agents/settings.json"), b"keep settings\n")?;
+        Ok(())
+    })?;
+    let target = harness
+        .plan
+        .target_codex_home
+        .parent()
+        .unwrap()
+        .join(".agents/skills/faster-whisper/.clawdhubignore");
+    let sibling = harness
+        .plan
+        .target_codex_home
+        .parent()
+        .unwrap()
+        .join(".agents/settings.json");
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    assert_eq!(fs::read(&target)?, b"new skill\n");
+    assert!(report.verification.files_valid);
+    rollback(report.transaction_id)?;
+    assert!(!target.exists());
+    assert_eq!(fs::read(sibling)?, b"keep settings\n");
+    Ok(())
+}
+
+#[test]
+fn unchanged_project_files_remain_owned_by_the_new_transaction() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    apply_restore(harness.plan.clone(), harness.options())?;
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+    assert!(plan
+        .operations
+        .iter()
+        .filter(|op| op.package_source.starts_with("projects/"))
+        .all(|op| op.action == ChangeKind::Unchanged));
+    let report = apply_restore(plan, harness.options())?;
+    let summary = transaction_summary(report.transaction_id)?.unwrap();
+    assert_eq!(
+        summary.restored_project_paths,
+        vec![fs::canonicalize(harness.plan.projects_root.join("visual"))?]
+    );
+    Ok(())
+}
+
+#[test]
 fn successful_restore_commits_with_layered_verification() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let before = snapshot_mutable_targets(&harness.plan)?;

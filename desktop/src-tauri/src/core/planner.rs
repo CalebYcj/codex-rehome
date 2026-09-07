@@ -85,14 +85,14 @@ pub fn build_restore_plan_with_conflict_resolution(
         .keys()
         .any(|source| source.starts_with("agents/skills/"))
     {
-        validate_root_ancestry(
-            &join_target(
-                &target_parent(&target.codex_home, target.target_os)?,
-                ".agents/skills",
-                target.target_os,
-            )?,
+        let skills_root = join_target(
+            &target_parent(&target.codex_home, target.target_os)?,
+            ".agents/skills",
             target.target_os,
         )?;
+        validate_root_ancestry(&skills_root, target.target_os)?;
+        validate_root_separation(&skills_root, projects_root, target.target_os)?;
+        validate_root_separation(&skills_root, &target.codex_home, target.target_os)?;
     }
     let plugin_root_decisions =
         plugin_root_decisions(payloads, &target.codex_home, target.target_os)?;
@@ -1339,7 +1339,11 @@ fn normalize_target_component(component: &str, target_os: SourceOs) -> String {
 }
 
 fn target_path_key(path: &Path, target_os: SourceOs) -> Result<Vec<String>, RehomeError> {
-    Ok(target_path_text(path)?
+    let text = match target_os {
+        SourceOs::Windows => crate::core::paths::codex_project_path(path)?,
+        SourceOs::Macos => target_path_text(path)?.to_owned(),
+    };
+    Ok(text
         .replace('\\', "/")
         .split('/')
         .filter(|component| !component.is_empty())
@@ -1488,9 +1492,7 @@ fn add_project_path_rewrites(
     let target = project_targets
         .get(&project_id)
         .ok_or_else(|| package_invalid("conversation project target is missing"))?;
-    let target = target.to_str().ok_or_else(|| {
-        restore_failed("target project path cannot be represented in Codex JSON metadata")
-    })?;
+    let target = crate::core::paths::codex_project_path(target)?;
     for source in reference_sources(payloads, &conversation.archive_path) {
         let mut source_paths = BTreeSet::new();
         for source_path in windows_source_path_variants(&project.source_path) {
@@ -1772,6 +1774,28 @@ fn restore_failed(message: impl Into<String>) -> RehomeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_separation_recognizes_verbatim_windows_aliases() {
+        for (first, second) in [
+            (
+                r"C:\User\.agents\skills",
+                r"\\?\C:\User\.agents\skills\projects",
+            ),
+            (r"\\?\C:\User\.codex", r"C:\User\.codex\projects"),
+            (
+                r"\\?\UNC\server\share\codex",
+                r"\\server\share\codex\projects",
+            ),
+        ] {
+            assert!(validate_root_separation(
+                Path::new(first),
+                Path::new(second),
+                SourceOs::Windows
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn final_target_registry_rejects_file_descendant_conflicts() {

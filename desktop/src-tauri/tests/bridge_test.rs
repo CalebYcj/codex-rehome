@@ -795,6 +795,25 @@ fn project_registration_reports_every_outcome_without_launching_codex() -> Resul
 }
 
 #[test]
+fn project_registration_passes_a_normal_windows_path_to_codex() {
+    let runner = FakeRunner::succeeds();
+    let cli = Path::new(r"C:\Codex\codex.exe");
+    assert_eq!(
+        register_project(
+            SourceOs::Windows,
+            Some(cli),
+            Path::new(r"\\?\C:\Dev\论文"),
+            &runner
+        ),
+        RegistrationStatus::Registered
+    );
+    assert_eq!(
+        runner.calls.borrow()[0].1,
+        vec![OsString::from("app"), OsString::from(r"C:\Dev\论文")]
+    );
+}
+
+#[test]
 fn bridge_applies_task_six_session_index_and_sqlite_plan() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let source_project = align_fixture_project_metadata(&fixture)?;
@@ -850,7 +869,8 @@ fn bridge_applies_task_six_session_index_and_sqlite_plan() -> Result<(), Box<dyn
     assert_eq!(report.sqlite_threads_imported, 1);
     let planned = &plan.sessions[0];
     let restored_jsonl = std::fs::read_to_string(&planned.target)?;
-    let target_project = projects_root.join("visual").to_string_lossy().into_owned();
+    let target_project =
+        rehome_desktop_lib::core::paths::codex_project_path(&projects_root.join("visual"))?;
     let restored_row = serde_json::from_str::<Value>(restored_jsonl.trim())?;
     assert_eq!(restored_row["payload"]["cwd"], target_project);
     assert_ne!(restored_row["payload"]["cwd"], source_project);

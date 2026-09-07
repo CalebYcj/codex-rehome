@@ -124,7 +124,15 @@ pub fn register_project(
             SourceOs::Windows => RegistrationStatus::ManualOpenRequired,
         };
     };
-    let arguments = [OsString::from("app"), project.as_os_str().to_owned()];
+    let project = match crate::core::paths::codex_project_path(project) {
+        Ok(path) => path,
+        Err(error) => {
+            return RegistrationStatus::InvocationFailed {
+                message: error.message,
+            }
+        }
+    };
+    let arguments = [OsString::from("app"), OsString::from(project)];
     match runner.run(command, &arguments) {
         Ok(()) => RegistrationStatus::Registered,
         Err(CommandRunError::Unavailable) => RegistrationStatus::CommandUnavailable,

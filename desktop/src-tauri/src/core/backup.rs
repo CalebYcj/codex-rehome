@@ -5,6 +5,7 @@ use crate::core::{
         PendingRecovery, RecoveryStatus, RestorePlan, RollbackReport, TransactionHistory,
         TransactionSummary,
     },
+    paths::{agents_skills_root, restore_target_root},
     stable_fs::PinnedParent,
 };
 use chrono::{SecondsFormat, Utc};
@@ -92,6 +93,9 @@ pub(crate) struct TransactionJournal {
     pub backup_root: PathBuf,
     pub target_codex_home: PathBuf,
     pub projects_root: PathBuf,
+    // Includes verified unchanged files; mutation-only journals lose these projects.
+    #[serde(default)]
+    pub project_paths: Vec<PathBuf>,
     #[serde(default)]
     pub locks: Vec<JournalLock>,
 }
@@ -136,6 +140,21 @@ pub(crate) fn prepare_transaction(
             "transaction backup directory must not overlap the project directory or Codex home",
         ));
     }
+    if plan
+        .operations
+        .iter()
+        .any(|op| op.package_source.starts_with("agents/skills/"))
+    {
+        let skills_root = agents_skills_root(&codex_home)?;
+        if paths_overlap(&backup_root, &skills_root)
+            || paths_overlap(&projects_root, &skills_root)
+            || paths_overlap(&codex_home, &skills_root)
+        {
+            return Err(restore_failed(
+                "shared skills root must not overlap the backup, project directory or Codex home",
+            ));
+        }
+    }
     let app_data = app_data_root()?;
     let transactions = create_and_canonicalize_directory(
         &app_data.join(TRANSACTIONS_DIRECTORY),
@@ -165,8 +184,13 @@ pub(crate) fn prepare_transaction(
     let targets = mutable_targets(plan)?;
     let mut operations = Vec::with_capacity(targets.len());
     for (index, (package_source, target, expected_hash)) in targets.into_iter().enumerate() {
-        let root = operation_root(plan, &target)?;
-        validate_restore_target(root, &target)?;
+        let root = restore_target_root(
+            &plan.target_codex_home,
+            &plan.projects_root,
+            &package_source,
+            &target,
+        )?;
+        validate_restore_target(&root, &target)?;
         let operation = if package_source == "codex/metadata/threads.json" {
             backup_sqlite_database(
                 &objects,
@@ -231,6 +255,19 @@ pub(crate) fn prepare_transaction(
         backup_root,
         target_codex_home: plan.target_codex_home.clone(),
         projects_root: plan.projects_root.clone(),
+        project_paths: plan
+            .operations
+            .iter()
+            .filter_map(|operation| {
+                project_path_from_operation(
+                    &plan.projects_root,
+                    &operation.package_source,
+                    &operation.target,
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         locks,
     };
     let journal_path = transactions.join(format!("{transaction_id}.json"));
@@ -582,35 +619,23 @@ fn restored_project_paths(journal: &TransactionJournal) -> Vec<PathBuf> {
     };
     let mut restored = Vec::new();
 
-    for operation in &journal.operations {
-        let mut source_components = Path::new(&operation.package_source).components();
-        if source_components.next() != Some(Component::Normal("projects".as_ref())) {
+    // Retain support for journals written before project_paths was introduced.
+    let candidates = journal
+        .project_paths
+        .iter()
+        .cloned()
+        .chain(journal.operations.iter().filter_map(|operation| {
+            project_path_from_operation(
+                &journal.projects_root,
+                &operation.package_source,
+                &operation.target,
+            )
+        }))
+        .collect::<std::collections::BTreeSet<_>>();
+    for candidate in candidates {
+        if candidate.parent() != Some(journal.projects_root.as_path()) {
             continue;
         }
-        let Some(Component::Normal(project_id)) = source_components.next() else {
-            continue;
-        };
-        if project_id
-            .to_str()
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .is_none()
-            || source_components.next() != Some(Component::Normal("files".as_ref()))
-            || source_components.next().is_none()
-        {
-            continue;
-        }
-        let Ok(relative_target) = operation.target.strip_prefix(&journal.projects_root) else {
-            continue;
-        };
-        let mut target_components = relative_target.components();
-        let Some(Component::Normal(project_name)) = target_components.next() else {
-            continue;
-        };
-        if target_components.next().is_none() {
-            continue;
-        }
-
-        let candidate = journal.projects_root.join(project_name);
         let Ok(metadata) = fs::symlink_metadata(&candidate) else {
             continue;
         };
@@ -628,6 +653,27 @@ fn restored_project_paths(journal: &TransactionJournal) -> Vec<PathBuf> {
     restored.sort();
     restored.dedup();
     restored
+}
+
+fn project_path_from_operation(root: &Path, source: &str, target: &Path) -> Option<PathBuf> {
+    let mut components = Path::new(source).components();
+    if components.next()? != Component::Normal("projects".as_ref()) {
+        return None;
+    }
+    let Component::Normal(project_id) = components.next()? else {
+        return None;
+    };
+    Uuid::parse_str(project_id.to_str()?).ok()?;
+    if components.next()? != Component::Normal("files".as_ref()) {
+        return None;
+    }
+    components.next()?;
+    let mut relative = target.strip_prefix(root).ok()?.components();
+    let Component::Normal(name) = relative.next()? else {
+        return None;
+    };
+    relative.next()?;
+    Some(root.join(name))
 }
 
 pub fn recover_incomplete_transactions() -> Result<Vec<PendingRecovery>, RehomeError> {
@@ -1161,8 +1207,8 @@ fn quarantine_target(
     operation: &BackupOperation,
     quarantine: &str,
 ) -> Result<(), RehomeError> {
-    let root = operation_root_from_journal(journal, &operation.target)?;
-    validate_rollback_target_ancestry(root, &operation.target)?;
+    let root = operation_root_from_journal(journal, operation)?;
+    validate_rollback_target_ancestry(&root, &operation.target)?;
     let parent = operation
         .target
         .parent()
@@ -1292,8 +1338,8 @@ fn inspect_current_file(operation: &BackupOperation) -> Result<(String, String),
 fn validate_rollback_inputs(journal: &TransactionJournal) -> Result<(), RehomeError> {
     validate_journal(journal)?;
     for (index, operation) in journal.operations.iter().enumerate() {
-        let root = operation_root_from_journal(journal, &operation.target)?;
-        validate_rollback_target_ancestry(root, &operation.target)?;
+        let root = operation_root_from_journal(journal, operation)?;
+        validate_rollback_target_ancestry(&root, &operation.target)?;
         if operation.backup_kind == BackupKind::File {
             let backup = backup_file_path(journal, operation)?;
             let expected = operation
@@ -1415,8 +1461,8 @@ fn restore_backup_file(
     journal: &TransactionJournal,
     operation: &BackupOperation,
 ) -> Result<(), RehomeError> {
-    let root = operation_root_from_journal(journal, &operation.target)?;
-    validate_rollback_target_ancestry(root, &operation.target)?;
+    let root = operation_root_from_journal(journal, operation)?;
+    validate_rollback_target_ancestry(&root, &operation.target)?;
     let parent = operation
         .target
         .parent()
@@ -1424,11 +1470,11 @@ fn restore_backup_file(
     fs::create_dir_all(parent).map_err(|error| {
         rollback_failed(format!("could not create rollback directory: {error}"))
     })?;
-    validate_rollback_target_ancestry(root, &operation.target)?;
+    validate_rollback_target_ancestry(&root, &operation.target)?;
     let pinned = PinnedParent::open(parent).map_err(|error| {
         rollback_failed(format!("could not pin rollback target parent: {error}"))
     })?;
-    validate_rollback_target_ancestry(root, &operation.target)?;
+    validate_rollback_target_ancestry(&root, &operation.target)?;
     let backup = backup_file_path(journal, operation)?;
     let name = operation
         .target
@@ -1632,7 +1678,7 @@ fn validate_journal(journal: &TransactionJournal) -> Result<(), RehomeError> {
         ));
     }
     for operation in &journal.operations {
-        operation_root_from_journal(journal, &operation.target)?;
+        operation_root_from_journal(journal, operation)?;
         match operation.backup_kind {
             BackupKind::File => {
                 let _ = backup_file_path(journal, operation)?;
@@ -1654,8 +1700,15 @@ fn validate_journal(journal: &TransactionJournal) -> Result<(), RehomeError> {
             BackupKind::Absent => {}
         }
     }
+    let owned_targets = journal
+        .operations
+        .iter()
+        .map(|op| &op.target)
+        .collect::<HashSet<_>>();
     for lock in &journal.locks {
-        operation_root_from_journal(journal, &lock.target)?;
+        if !owned_targets.contains(&lock.target) {
+            return Err(rollback_failed("transaction lock has no owned operation"));
+        }
         if lock.path != target_lock_path(&lock.target)?
             || lock.token != journal.transaction_id.to_string()
         {
@@ -1679,8 +1732,16 @@ fn target_lock_path(target: &Path) -> Result<PathBuf, RehomeError> {
 }
 
 fn remove_owned_stale_locks(journal: &TransactionJournal) -> Result<(), RehomeError> {
+    let operations = journal
+        .operations
+        .iter()
+        .map(|op| (&op.target, op))
+        .collect::<std::collections::HashMap<_, _>>();
     for lock in &journal.locks {
-        operation_root_from_journal(journal, &lock.target)?;
+        let operation = operations
+            .get(&lock.target)
+            .ok_or_else(|| rollback_failed("transaction lock has no owned operation"))?;
+        operation_root_from_journal(journal, operation)?;
         if lock.path != target_lock_path(&lock.target)? {
             return Err(rollback_failed("transaction lock path is unsafe"));
         }
@@ -1759,33 +1820,17 @@ fn backup_file_path(
     Ok(canonical)
 }
 
-fn operation_root<'a>(plan: &'a RestorePlan, target: &Path) -> Result<&'a Path, RehomeError> {
-    choose_root(&plan.target_codex_home, &plan.projects_root, target)
-}
-
-fn operation_root_from_journal<'a>(
-    journal: &'a TransactionJournal,
-    target: &Path,
-) -> Result<&'a Path, RehomeError> {
-    choose_root(&journal.target_codex_home, &journal.projects_root, target)
-        .map_err(|error| rollback_failed(error.message))
-}
-
-fn choose_root<'a>(
-    codex_home: &'a Path,
-    projects_root: &'a Path,
-    target: &Path,
-) -> Result<&'a Path, RehomeError> {
-    if target.starts_with(codex_home) {
-        Ok(codex_home)
-    } else if target.starts_with(projects_root) {
-        Ok(projects_root)
-    } else {
-        Err(restore_failed(format!(
-            "restore target escapes the planned roots: {}",
-            target.display()
-        )))
-    }
+fn operation_root_from_journal(
+    journal: &TransactionJournal,
+    operation: &BackupOperation,
+) -> Result<PathBuf, RehomeError> {
+    restore_target_root(
+        &journal.target_codex_home,
+        &journal.projects_root,
+        &operation.package_source,
+        &operation.target,
+    )
+    .map_err(|error| rollback_failed(error.message))
 }
 
 fn validate_relative_path(path: &Path) -> Result<(), RehomeError> {

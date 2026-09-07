@@ -165,11 +165,15 @@ export default function SendPage({
       }
     } catch (caught) {
       const message = errorMessage(caught);
-      setError(
-        message.includes("source file kept changing while being copied")
-          ? t("有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n{message}", { message })
-          : message,
-      );
+      if (message.includes("source file kept changing while being copied")) {
+        setError(t("有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n{message}", { message }));
+      } else if (message.includes("private staging cannot be inside")) {
+        setError(t("临时目录与所选目录重叠。请根据下方路径，缩小所选项目范围或更换迁移包保存文件夹；不要选择整个用户目录或磁盘。\n{message}", { message }));
+      } else if (message.includes("symbolic links are not allowed in selected Codex bundles")) {
+        setError(t("所选 Skill 或插件包含符号链接。请取消选择对应的 Skill 或插件后重试；不要删除链接指向的原文件。\n{message}", { message }));
+      } else {
+        setError(message);
+      }
     } finally {
       setBusy(false);
       onOperationEnd();

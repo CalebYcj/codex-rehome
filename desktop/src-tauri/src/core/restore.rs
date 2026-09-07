@@ -14,6 +14,7 @@ use crate::core::{
         TransactionHistory, TransactionSummary, VerificationReport,
     },
     package::{inspect_package_for_planning, VerifiedPackage},
+    paths::restore_target_root,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags};
@@ -270,9 +271,14 @@ fn apply_regular_files(
         staged.as_file().sync_all().map_err(|error| {
             restore_failed(format!("could not flush restored payload: {error}"))
         })?;
-        let root = operation_root(plan, &operation.target)?;
+        let root = restore_target_root(
+            &plan.target_codex_home,
+            &plan.projects_root,
+            &operation.package_source,
+            &operation.target,
+        )?;
         apply_file_source_for_transaction(
-            root,
+            &root,
             operation,
             staged.path(),
             transaction.journal.transaction_id,
@@ -648,19 +654,6 @@ fn data_verification_passed(report: &VerificationReport) -> bool {
         && report.path_mapping_valid
         && report.forbidden_files_absent
         && report.project_files_valid
-}
-
-fn operation_root<'a>(plan: &'a RestorePlan, target: &Path) -> Result<&'a Path, RehomeError> {
-    if target.starts_with(&plan.target_codex_home) {
-        Ok(&plan.target_codex_home)
-    } else if target.starts_with(&plan.projects_root) {
-        Ok(&plan.projects_root)
-    } else {
-        Err(restore_failed(format!(
-            "restore target escapes the planned roots: {}",
-            target.display()
-        )))
-    }
 }
 
 fn hash_optional_file(path: &Path) -> Result<Option<String>, RehomeError> {
