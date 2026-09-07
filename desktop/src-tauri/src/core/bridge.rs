@@ -137,7 +137,9 @@ pub fn register_project(
         Ok(()) => RegistrationStatus::Registered,
         Err(CommandRunError::Unavailable) => RegistrationStatus::CommandUnavailable,
         Err(CommandRunError::InvocationFailed { message }) => {
-            RegistrationStatus::InvocationFailed { message }
+            RegistrationStatus::InvocationFailed {
+                message: format!("{} app: {message}", command.display()),
+            }
         }
     }
 }
@@ -146,18 +148,104 @@ pub fn register_project_with_detected_cli(
     target_os: SourceOs,
     project: &Path,
 ) -> RegistrationStatus {
-    let command = detect_registration_cli(target_os);
-    register_project(target_os, command.as_deref(), project, &SystemCommandRunner)
+    let candidates = registration_cli_candidates(target_os);
+    let command = candidates.iter().find(|candidate| candidate.is_file());
+    if command.is_none() && target_os == SourceOs::Macos {
+        return RegistrationStatus::InvocationFailed {
+            message: format!(
+                "Codex CLI not found. Checked: {}",
+                candidates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+    }
+    register_project(
+        target_os,
+        command.map(PathBuf::as_path),
+        project,
+        &SystemCommandRunner,
+    )
 }
 
 pub fn detect_registration_cli(target_os: SourceOs) -> Option<PathBuf> {
-    let candidates = match target_os {
-        SourceOs::Macos => vec![PathBuf::from(
-            "/Applications/Codex.app/Contents/Resources/codex",
-        )],
+    registration_cli_candidates(target_os)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+fn registration_cli_candidates(target_os: SourceOs) -> Vec<PathBuf> {
+    match target_os {
+        SourceOs::Macos => {
+            let mut roots = vec![];
+            if let Some(home) = env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                if home.is_absolute() {
+                    roots.push(home.join("Applications"));
+                }
+            }
+            roots.push(PathBuf::from("/Applications"));
+            macos_cli_candidates(&roots, &running_macos_executables())
+        }
         SourceOs::Windows => windows_cli_candidates(),
+    }
+}
+
+fn macos_cli_candidates(application_dirs: &[PathBuf], running_exes: &[PathBuf]) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for exe in running_exes {
+        let Some(macos) = exe.parent().filter(|path| path.ends_with("MacOS")) else {
+            continue;
+        };
+        let Some(contents) = macos.parent().filter(|path| path.ends_with("Contents")) else {
+            continue;
+        };
+        let Some(bundle) = contents.parent() else {
+            continue;
+        };
+        if bundle.ends_with("ChatGPT.app") || bundle.ends_with("Codex.app") {
+            candidates.push(contents.join("Resources/codex"));
+        }
+    }
+    for root in application_dirs {
+        for app in ["ChatGPT.app", "Codex.app"] {
+            candidates.push(root.join(app).join("Contents/Resources/codex"));
+        }
+    }
+    let mut seen = HashSet::new();
+    candidates.retain(|path| seen.insert(path.clone()));
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn running_macos_executables() -> Vec<PathBuf> {
+    // Inspect only this user's processes. `comm` omits command-line arguments;
+    // wide output avoids truncating application paths. Never use a shell.
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-xww", "-o", "comm="])
+        .output()
+    else {
+        return vec![];
     };
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    if !output.status.success() {
+        return vec![];
+    }
+    let mut paths: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(not(target_os = "macos"))]
+fn running_macos_executables() -> Vec<PathBuf> {
+    vec![]
 }
 
 fn windows_cli_candidates() -> Vec<PathBuf> {
@@ -1322,4 +1410,48 @@ fn package_invalid(message: impl Into<String>) -> RehomeError {
 
 fn restore_failed(message: impl Into<String>) -> RehomeError {
     RehomeError::new(ErrorCode::RestoreFailed, message)
+}
+
+#[cfg(test)]
+mod registration_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn macos_supports_chatgpt_and_codex_in_system_and_user_applications() {
+        let candidates = macos_cli_candidates(
+            &[
+                PathBuf::from("/Applications"),
+                PathBuf::from("/Users/test/Applications"),
+            ],
+            &[],
+        );
+        for root in ["/Applications", "/Users/test/Applications"] {
+            for app in ["ChatGPT.app", "Codex.app"] {
+                assert!(candidates
+                    .contains(&Path::new(root).join(app).join("Contents/Resources/codex")));
+            }
+        }
+    }
+
+    #[test]
+    fn macos_prefers_running_app_and_ignores_unrelated_bundles() {
+        let active = PathBuf::from("/Volumes/Test Apps/ChatGPT.app/Contents/MacOS/ChatGPT");
+        let candidates = macos_cli_candidates(
+            &[PathBuf::from("/Applications")],
+            &[
+                active.clone(),
+                active,
+                PathBuf::from("/Applications/Other.app/Contents/MacOS/Other"),
+            ],
+        );
+        let expected = PathBuf::from("/Volumes/Test Apps/ChatGPT.app/Contents/Resources/codex");
+        assert_eq!(candidates.first(), Some(&expected));
+        assert_eq!(
+            candidates.iter().filter(|path| **path == expected).count(),
+            1
+        );
+        assert!(!candidates
+            .iter()
+            .any(|path| path.to_string_lossy().contains("Other.app")));
+    }
 }

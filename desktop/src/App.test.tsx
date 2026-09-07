@@ -891,6 +891,22 @@ describe("ReHome Desktop workflows", () => {
     expect(api.applyRestore).toHaveBeenLastCalledWith("fresh-plan", expect.any(Object));
   });
 
+  it("keeps conversation visibility unverified after successful project registration", async () => {
+    const user = userEvent.setup();
+    const report = restoreReportWithRegistration("registered");
+    report.verification.app_registration_valid = true;
+    report.verification.app_visible_ready = false;
+    api.applyRestore.mockResolvedValue(report);
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+    expect(await screen.findByText("对话可见性待确认")).toBeInTheDocument();
+    expect(screen.getByText("文件和索引已导入。请重启 Codex，打开原对话并继续发送一条消息，确认可以使用。")).toBeInTheDocument();
+    expect(screen.queryByText("项目文件已导入，需要在 Codex 中手动打开")).toBeNull();
+  });
+
   it("uses the exact manual-open status when registration is incomplete", async () => {
     const user = userEvent.setup();
     api.applyRestore.mockResolvedValue({
@@ -946,6 +962,19 @@ describe("ReHome Desktop workflows", () => {
     await user.click(screen.getByRole("button", { name: "在 Codex 中打开" }));
 
     expect(await screen.findByText("Codex 命令调用失败")).toBeInTheDocument();
+  });
+
+  it("shows the initial registration command failure without requiring another click", async () => {
+    const user = userEvent.setup();
+    const message = "/Applications/ChatGPT.app/Contents/Resources/codex app: exit code 7";
+    api.applyRestore.mockResolvedValue(restoreReportWithRegistration({ invocation_failed: { message } }));
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(api.openRestoredThread).not.toHaveBeenCalled();
   });
 
   it("shows the exact manual status returned while opening a restored project", async () => {
