@@ -299,9 +299,11 @@ export default function ReceivePage({
           </div>
           {!report.verification.app_visible_ready && <p className="manual-status" role="status"><AlertTriangle aria-hidden="true" />{t("文件和索引已导入。请重启 Codex，打开原对话并继续发送一条消息，确认可以使用。")}</p>}
           {manualRegistration && <p className="manual-status" role="status"><AlertTriangle aria-hidden="true" />{t("项目文件已导入，需要在 Codex 中手动打开")}</p>}
-          {report.registrations.map((registration) => (
-            <div className="registration-row" key={registration.project_id}><code>{registration.project_path}</code><button className="secondary-button" type="button" onClick={() => void handleOpenRestored(registration)}><FolderOpen aria-hidden="true" />{t("在 Codex 中打开")}</button>{registrationStatuses[registration.project_id] && <span role="status">{registrationStatuses[registration.project_id]}</span>}</div>
-          ))}
+          {report.registrations.map((registration) => {
+            const message = registrationStatuses[registration.project_id]
+              ?? (typeof registration.status === "object" ? registration.status.invocation_failed.message : null);
+            return <div className="registration-row" key={registration.project_id}><code>{registration.project_path}</code><button className="secondary-button" type="button" onClick={() => void handleOpenRestored(registration)}><FolderOpen aria-hidden="true" />{t("在 Codex 中打开")}</button>{message && <span role="status">{message}</span>}</div>;
+          })}
         </section>
       )}
     </div>

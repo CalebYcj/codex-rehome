@@ -788,7 +788,7 @@ fn project_registration_reports_every_outcome_without_launching_codex() -> Resul
     assert_eq!(
         register_project(SourceOs::Macos, Some(cli), project, &failed),
         RegistrationStatus::InvocationFailed {
-            message: "exit code 7".into()
+            message: format!("{} app: exit code 7", cli.display())
         }
     );
     Ok(())
