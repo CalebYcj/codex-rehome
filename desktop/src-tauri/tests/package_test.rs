@@ -1078,6 +1078,34 @@ fn package_skips_malformed_optional_session_index_rows() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn selected_bundle_symlink_error_identifies_the_blocked_entry() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let outside = fixture.root.join("outside-secret.txt");
+    fs::write(&outside, b"must not enter the package\n")?;
+    let linked = fixture
+        .skill_path
+        .parent()
+        .unwrap()
+        .join("linked-secret.txt");
+    if let Err(error) = create_file_symlink(&outside, &linked) {
+        if windows_symlink_privilege_is_unavailable(&error) {
+            eprintln!("skipping bundle symlink test: Windows symlink privilege unavailable");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    let directory = tempfile::tempdir()?;
+    let package = directory.path().join("blocked.rehome");
+    let error = create_package(package_request(&fixture, package.clone())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::PackageInvalid);
+    assert!(error.message.contains("symbolic links are not allowed"));
+    assert!(error.message.contains("linked-secret.txt"));
+    assert!(!package.exists());
+    assert_eq!(fs::read(&outside)?, b"must not enter the package\n");
+    Ok(())
+}
+
+#[test]
 fn symbolic_links_in_selected_projects_are_safely_excluded() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     let outside = fixture.root.join("outside-secret.txt");

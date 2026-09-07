@@ -517,6 +517,24 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.queryByText("目标项目目录")).toBeNull();
   });
 
+  it.each([
+    ["private staging cannot be inside a source project or package output directory; conflicting source project: C:\\Users\\Me", "临时目录与所选目录重叠"],
+    ["symbolic links are not allowed in selected Codex bundles: C:\\Skills\\linked.txt", "所选 Skill 或插件包含符号链接"],
+  ])("explains export safety failures without hiding the original path: %s", async (message, guidance) => {
+    const user = userEvent.setup();
+    api.createPackage.mockRejectedValue({ code: "package_invalid", message });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    await user.click(screen.getByRole("button", { name: "创建迁移包" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(guidance);
+    expect(alert).toHaveTextContent(message);
+    expect(screen.getByRole("button", { name: "创建迁移包" })).toBeEnabled();
+    expect(api.openPath).not.toHaveBeenCalled();
+  });
+
   it("reveals a newly created package so the user can find it", async () => {
     const user = userEvent.setup();
     api.createPackage.mockResolvedValue({
@@ -853,6 +871,24 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.queryByText("projects/rehome-app/README.md")).toBeNull();
     await user.click(screen.getByRole("button", { name: "预览导入内容" }));
     expect(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" })).not.toBeChecked();
+  });
+
+  it("requires a fresh preview and confirmation after a failed restore", async () => {
+    const user = userEvent.setup();
+    api.applyRestore.mockRejectedValueOnce({ code: "restore_failed", message: "restore target escapes the planned roots" });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await openReceive(user);
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("restore target escapes the planned roots");
+    expect(screen.queryByRole("button", { name: "导入到 Codex" })).toBeNull();
+    api.buildRestorePlan.mockResolvedValueOnce({ ...basePlan, plan_id: "fresh-plan" });
+    await user.click(screen.getByRole("button", { name: "预览导入内容" }));
+    expect(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" })).not.toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }));
+    await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+    expect(api.applyRestore).toHaveBeenLastCalledWith("fresh-plan", expect.any(Object));
   });
 
   it("uses the exact manual-open status when registration is incomplete", async () => {

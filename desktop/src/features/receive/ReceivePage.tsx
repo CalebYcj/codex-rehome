@@ -169,7 +169,10 @@ export default function ReceivePage({
         register_projects: true,
       }));
     } catch (caught) {
-      setError(errorMessage(caught));
+      // A failed attempt consumes its capability and may have rolled back writes.
+      // Re-plan against the current files instead of retrying the stale snapshot.
+      clearRestoreSelection();
+      setError(`${errorMessage(caught)} ${t("请重新预览导入内容后重试；如提示回滚失败，请先在迁移记录中恢复。")}`);
     } finally {
       setPhase("idle");
       onOperationEnd();
