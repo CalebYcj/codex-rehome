@@ -35,6 +35,45 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(windows)]
+#[test]
+fn windows_forward_slash_codex_home_restores_and_rolls_back() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let original = fs::read(harness.plan.target_codex_home.join("state_5.sqlite"))?;
+    let ordinary = harness
+        .plan
+        .target_codex_home
+        .to_str()
+        .unwrap()
+        .strip_prefix(r"\\?\")
+        .unwrap();
+    let target = TargetInventory {
+        codex_home: PathBuf::from(ordinary.replace('\\', "/")),
+        target_os: SourceOs::Windows,
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(
+        &inspect_package(&harness.plan.package_path)?,
+        &target,
+        &harness.plan.projects_root,
+    )?;
+    let report = apply_restore(plan, harness.options())?;
+    assert!(report.verification.files_valid);
+    assert!(report.verification.sessions_valid);
+    assert!(report.verification.sqlite_threads_valid);
+    assert!(report.verification.session_index_valid);
+    assert!(report.verification.path_mapping_valid);
+    assert!(rollback(report.transaction_id)?.success);
+    assert_eq!(
+        fs::read(target.codex_home.join("state_5.sqlite"))?,
+        original
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "set REHOME_UI_FIXTURE_ROOT to a new directory for isolated desktop acceptance"]
 fn prepare_synthetic_desktop_acceptance_fixture() -> Result<(), Box<dyn Error>> {

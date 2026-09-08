@@ -5,6 +5,79 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn pinned_mutations_preserve_literal_backslash_in_unix_names() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = PinnedParent::open(root.path()).unwrap();
+        pinned
+            .replace_bytes(OsStr::new(r"literal\name"), b"unchanged")
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join(r"literal\name")).unwrap(),
+            b"unchanged"
+        );
+        assert!(!root.path().join("literal/name").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_api_path_normalizes_only_native_separators() {
+        use std::path::Path;
+        for (input, expected) in [
+            (r"C:/用户/test folder", r"\\?\C:\用户\test folder"),
+            (r"C:\用户/test folder", r"\\?\C:\用户\test folder"),
+            (r"//server/share/folder", r"\\?\UNC\server\share\folder"),
+            (r"\\server\share/folder", r"\\?\UNC\server\share\folder"),
+            (r"\\?\C:\already\extended", r"\\?\C:\already\extended"),
+            (r"\\?\C:\literal/slash", r"\\?\C:\literal/slash"),
+            (
+                r"\\?\UNC\server\share\folder",
+                r"\\?\UNC\server\share\folder",
+            ),
+        ] {
+            let actual = super::windows_api_path(Path::new(input));
+            assert_eq!(actual.last(), Some(&0));
+            assert_eq!(
+                String::from_utf16(&actual[..actual.len() - 1]).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_mutations_support_forward_slash_parent() {
+        use std::{io::Read, path::PathBuf};
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("中文 space").join("long".repeat(55));
+        fs::create_dir_all(&parent).unwrap();
+        let slash_parent = PathBuf::from(parent.to_str().unwrap().replace('\\', "/"));
+        let pinned = PinnedParent::open(&slash_parent).unwrap();
+        pinned
+            .replace_bytes(OsStr::new("target"), b"original")
+            .unwrap();
+        pinned
+            .replace_bytes(OsStr::new("target"), b"replacement")
+            .unwrap();
+        let mut bytes = Vec::new();
+        pinned
+            .open_file(OsStr::new("target"))
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"replacement");
+        pinned
+            .rename_child_if_absent(OsStr::new("target"), OsStr::new("renamed"))
+            .unwrap();
+        assert!(pinned.child_exists(OsStr::new("renamed")).unwrap());
+        assert!(pinned
+            .replace_bytes(OsStr::new("../escape"), b"unsafe")
+            .is_err());
+        pinned.remove_file(OsStr::new("renamed")).unwrap();
+        assert!(!parent.join("renamed").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pinned_replace_never_writes_through_a_swapped_parent() {
         let root = tempfile::tempdir().unwrap();
         let parent = root.path().join("parent");
@@ -615,6 +688,13 @@ fn windows_api_path(path: &Path) -> Vec<u16> {
     if raw.starts_with(&[BACKSLASH, BACKSLASH, QUESTION, BACKSLASH]) {
         return raw.into_iter().chain(Some(0)).collect();
     }
+    // Ordinary Win32 paths accept both separators, but the verbatim prefix
+    // disables that conversion. Normalize only at this native API boundary;
+    // already-verbatim paths above retain their literal semantics.
+    let raw = raw
+        .into_iter()
+        .map(|unit| if unit == b'/' as u16 { BACKSLASH } else { unit })
+        .collect::<Vec<_>>();
     let mut extended = Vec::with_capacity(raw.len() + 9);
     if raw.starts_with(&[BACKSLASH, BACKSLASH]) {
         extended.extend(r"\\?\UNC\".encode_utf16());
