@@ -975,6 +975,8 @@ pub(crate) fn rewrite_jsonl_payload(
     rewrites: &[ReferenceRewrite],
     source: &str,
 ) -> Result<Vec<u8>, RehomeError> {
+    // 仅去掉文件开头的 UTF-8 编码标记，保留正文中的同一字符。
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     let selected = rewrites
         .iter()
         .filter(|rewrite| rewrite.package_source == source)
@@ -1626,6 +1628,7 @@ fn metadata_project_paths(
 fn session_project_paths(bytes: &[u8], source: &str) -> Result<Vec<String>, RehomeError> {
     let text =
         std::str::from_utf8(bytes).map_err(|_| package_invalid("session payload is not UTF-8"))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut paths = BTreeSet::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
         let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
@@ -1860,6 +1863,32 @@ mod tests {
     }
 
     #[test]
+    fn leading_bom_is_removed_even_without_session_rewrites() {
+        let source = "codex/sessions/thread.jsonl";
+        let bytes = "\u{feff}{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"C:/old\"}}\r\n{\"text\":\"keep \u{feff} inside text\"}\r\n";
+        let expected = bytes.strip_prefix('\u{feff}').unwrap().as_bytes();
+        assert_eq!(
+            rewrite_jsonl_payload(bytes.as_bytes(), &[], source).unwrap(),
+            expected
+        );
+        assert_eq!(
+            rewrite_jsonl_payload(expected, &[], source).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn leading_bom_does_not_hide_session_project_paths() {
+        let bytes = "\u{feff}{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"C:/old\"}}\n";
+        assert_eq!(
+            session_project_paths(bytes.as_bytes(), "thread.jsonl").unwrap(),
+            vec!["C:/old"]
+        );
+        let invalid = "{\"type\":\"session_meta\"}\n\u{feff}{\"cwd\":\"C:/old\"}\n";
+        assert!(session_project_paths(invalid.as_bytes(), "thread.jsonl").is_err());
+    }
+
+    #[test]
     fn session_rewrites_are_schema_aware_exact_and_deterministic() {
         let source = "codex/sessions/thread.jsonl";
         let old_id = "11111111-1111-4111-8111-111111111111";
@@ -1906,7 +1935,12 @@ mod tests {
             old_id = old_id,
         );
 
-        let rewritten = rewrite_jsonl_payload(bytes.as_bytes(), &rewrites, source).unwrap();
+        let bom_bytes = format!("\u{feff}{bytes}");
+        let rewritten = rewrite_jsonl_payload(bom_bytes.as_bytes(), &rewrites, source).unwrap();
+        assert_eq!(
+            rewritten,
+            rewrite_jsonl_payload(bytes.as_bytes(), &rewrites, source).unwrap()
+        );
         let rewritten = String::from_utf8(rewritten).unwrap();
         let lines = rewritten
             .lines()

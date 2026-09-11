@@ -860,6 +860,43 @@ fn apply_rejects_caller_forged_roots_before_any_write() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn leading_bom_session_restores_and_verifies() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, _| {
+        let preview = inspect_package(package)?;
+        let source = &preview.manifest.conversations[0].archive_path;
+        let mut archive = ZipArchive::new(fs::File::open(package)?)?;
+        let mut replacement = vec![0xef, 0xbb, 0xbf];
+        std::io::copy(&mut archive.by_name(source)?, &mut replacement)?;
+        drop(archive);
+        replace_selected_session_payload(package, &replacement)
+    })?;
+    let package_before = fs::read(&harness.plan.package_path)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    assert!(report.verification.files_valid);
+    assert!(report.verification.sessions_valid);
+    assert!(report.verification.sqlite_threads_valid);
+    assert!(report.verification.session_index_valid);
+    assert!(report.verification.path_mapping_valid);
+    for session in &harness.plan.sessions {
+        let restored = fs::read(&session.target)?;
+        assert!(!restored.starts_with(&[0xef, 0xbb, 0xbf]));
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&restored)),
+            session.expected_final_content_hash
+        );
+        for line in std::str::from_utf8(&restored)?
+            .lines()
+            .filter(|line| !line.is_empty())
+        {
+            serde_json::from_str::<Value>(line)?;
+        }
+    }
+    assert_eq!(fs::read(&harness.plan.package_path)?, package_before);
+    assert!(rollback(report.transaction_id)?.success);
+    Ok(())
+}
+
+#[test]
 fn opaque_plan_id_applies_the_server_held_plan() -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
 
