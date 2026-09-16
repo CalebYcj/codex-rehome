@@ -51,6 +51,8 @@ Each `.rehome` package, individual file, and single Codex conversation can curre
 
 Login sessions, browser state, running terminals, unsaved work, and native system dependencies are not fully portable. Different accounts or workspaces may require fresh sign-in or authorization for external services.
 
+If restored conversations are missing from a project, also compare the two computers' `model_provider` identifiers. Some Codex versions filter the default conversation list by the current provider, so restored files, indexes, and project paths alone do not guarantee visibility. ReHome's restore verification does not currently check this provider-based visibility. For `Model provider ... not found`, first confirm that the target computer has the corresponding service configured; configure credentials on the target separately. Keep the original package and local backups, and share versions and a redacted error screenshot for troubleshooting. Do not bulk-edit conversations or the database, or publish configuration files, keys, or migration packages.
+
 ## Need the Skill instead?
 
 [Codex ReHome Skill](https://github.com/CalebYcj/codex-rehome-skill) keeps the original Agent workflow, scripts, Red Skill, batch automation, and troubleshooting tools. It is for advanced users; ReHome Desktop is the recommended entry point for routine migration.
