@@ -2,8 +2,8 @@ use crate::core::{
     error::{ErrorCode, RehomeError},
     models::{
         BridgeVerificationRequirements, ChangeKind, FileConflictResolution, PackagePreview,
-        PlannedOperation, PlannedSession, ReferenceRewrite, ReferenceRewriteKind, RestorePlan,
-        SessionAction, SourceOs, TargetInventory,
+        PlannedOperation, PlannedSession, ProjectEntry, ReferenceRewrite, ReferenceRewriteKind,
+        RestorePlan, SessionAction, SourceOs, TargetInventory,
     },
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
@@ -102,9 +102,14 @@ pub fn build_restore_plan_with_conflict_resolution(
     let mut rewrites = BTreeMap::new();
     let mut consumed = HashSet::new();
     let mut project_targets = HashMap::new();
+    let directory_names = project_directory_names(&package.manifest.projects, target.target_os);
 
     for project in &package.manifest.projects {
-        let target_root = join_target(projects_root, &project.name, target.target_os)?;
+        let target_root = join_target(
+            projects_root,
+            &directory_names[&project.project_id],
+            target.target_os,
+        )?;
         project_targets.insert(project.project_id, target_root.clone());
         let prefix = format!("{}/", project.archive_path);
         for (source, payload) in payloads
@@ -416,7 +421,6 @@ fn validate_plan_inputs(
     }
 
     let mut project_ids = HashSet::new();
-    let mut project_target_names = HashSet::new();
     for project in &package.manifest.projects {
         if !project_ids.insert(project.project_id) {
             return Err(package_invalid("manifest contains duplicate project IDs"));
@@ -432,15 +436,6 @@ fn validate_plan_inputs(
         if normalized_name != project.name || normalized_name.contains('/') {
             return Err(package_invalid(
                 "manifest project name is not a portable path component",
-            ));
-        }
-        if !project_target_names.insert(normalize_target_component(
-            &normalized_name,
-            target.target_os,
-        )) {
-            return Err(RehomeError::new(
-                ErrorCode::ProjectConflict,
-                "multiple package projects map to the same target directory",
             ));
         }
     }
@@ -1326,6 +1321,43 @@ fn sqlite_value_as_json(value: ValueRef<'_>) -> serde_json::Value {
     }
 }
 
+/// Allocate from package identity only, so preview, registration and retries agree.
+/// Reserve every original name before adding suffixes, including names that look generated.
+pub(crate) fn project_directory_names(
+    projects: &[ProjectEntry],
+    target_os: SourceOs,
+) -> BTreeMap<Uuid, String> {
+    let mut counts = HashMap::new();
+    for project in projects {
+        *counts
+            .entry(normalize_target_component(&project.name, target_os))
+            .or_insert(0_usize) += 1;
+    }
+    let mut reserved = counts.keys().cloned().collect::<HashSet<_>>();
+    let mut ordered = projects.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|project| project.project_id);
+    let mut names = BTreeMap::new();
+    for project in ordered {
+        let key = normalize_target_component(&project.name, target_os);
+        let name = if counts[&key] == 1 {
+            project.name.clone()
+        } else {
+            // Limit the added component even when the original name is near the filesystem limit.
+            let prefix = project.name.chars().take(32).collect::<String>();
+            let base = format!("{prefix}-{}", project.project_id);
+            let mut candidate = base.clone();
+            let mut suffix = 2_u64;
+            while !reserved.insert(normalize_target_component(&candidate, target_os)) {
+                candidate = format!("{base}-{suffix}");
+                suffix += 1;
+            }
+            candidate
+        };
+        names.insert(project.project_id, name);
+    }
+    names
+}
+
 fn normalize_target_component(component: &str, target_os: SourceOs) -> String {
     let normalized = component.nfc().collect::<String>();
     if matches!(target_os, SourceOs::Windows | SourceOs::Macos) {
@@ -1777,6 +1809,51 @@ fn restore_failed(message: impl Into<String>) -> RehomeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_allocation_reserves_original_names_and_is_order_independent() {
+        let make_project = |id, name: String| ProjectEntry {
+            project_id: Uuid::from_u128(id),
+            name,
+            source_path: String::new(),
+            source_available: true,
+            archive_path: String::new(),
+            file_count: 0,
+            content_bytes: 0,
+            git_remote: None,
+            git_branch: None,
+            git_head: None,
+        };
+        let first_id = Uuid::from_u128(1);
+        let original = format!("work-{first_id}");
+        let projects = vec![
+            make_project(1, "work".into()),
+            make_project(2, "WORK".into()),
+            make_project(3, original.clone()),
+        ];
+        for os in [SourceOs::Windows, SourceOs::Macos] {
+            let names = project_directory_names(&projects, os);
+            assert_eq!(names[&Uuid::from_u128(3)], original);
+            assert_ne!(names[&first_id], original);
+            assert_eq!(
+                names
+                    .values()
+                    .map(|name| normalize_target_component(name, os))
+                    .collect::<HashSet<_>>()
+                    .len(),
+                3
+            );
+            let mut reversed = projects.clone();
+            reversed.reverse();
+            assert_eq!(names, project_directory_names(&reversed, os));
+        }
+        let long = "界".repeat(80);
+        let names = project_directory_names(
+            &[make_project(1, long.clone()), make_project(2, long)],
+            SourceOs::Windows,
+        );
+        assert!(names.values().all(|name| name.len() <= 255));
+    }
 
     #[test]
     fn root_separation_recognizes_verbatim_windows_aliases() {

@@ -18,6 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipWriter};
 
@@ -936,6 +937,56 @@ fn duplicate_target_index_rows_plan_a_repair() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn same_named_project_conversations_keep_separate_paths_in_all_metadata(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = shared_metadata_fixture_with_names(true)?;
+    let plan = build_restore_plan(&fixture.preview, &fixture.target, &fixture.projects_root)?;
+    apply_bridge_plan(&plan)?;
+    let database = Connection::open(fixture.target.codex_home.join("state_5.sqlite"))?;
+    let index = fs::read_to_string(fixture.target.codex_home.join("session_index.jsonl"))?;
+    let rows = index
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut roots = std::collections::HashSet::new();
+    for session in &plan.sessions {
+        let conversation = fixture
+            .preview
+            .manifest
+            .conversations
+            .iter()
+            .find(|c| c.task_id == session.source_task_id)
+            .unwrap();
+        let prefix = format!("projects/{}/files/", conversation.project_id.unwrap());
+        let file = plan
+            .operations
+            .iter()
+            .find(|op| op.package_source.starts_with(&prefix))
+            .unwrap();
+        let expected =
+            rehome_desktop_lib::core::paths::codex_project_path(file.target.parent().unwrap())?;
+        roots.insert(expected.clone());
+        let restored: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&session.target)?.trim())?;
+        let restored_cwd = restored
+            .get("cwd")
+            .or_else(|| restored.get("payload").and_then(|p| p.get("cwd")))
+            .unwrap();
+        assert_eq!(restored_cwd, &serde_json::Value::String(expected.clone()));
+        let id = session.target_task_id.to_string();
+        let row = rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["cwd"], expected);
+        let cwd: String =
+            database.query_row("SELECT cwd FROM threads WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(cwd, expected);
+    }
+    assert_eq!(roots.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn bridge_metadata_rewrites_are_scoped_before_shared_titles_and_paths() -> Result<(), Box<dyn Error>>
 {
     let fixture = shared_metadata_fixture()?;
@@ -1192,7 +1243,7 @@ fn maps_project_targets_with_the_target_operating_system_syntax() -> Result<(), 
 }
 
 #[test]
-fn package_projects_cannot_silently_share_a_target_directory() -> Result<(), Box<dyn Error>> {
+fn package_projects_receive_separate_target_directories() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let temp_root = fs::canonicalize(temp.path())?;
     let preview = project_preview(&temp_root, true)?;
@@ -1206,9 +1257,17 @@ fn package_projects_cannot_silently_share_a_target_directory() -> Result<(), Box
         conversations: vec![],
     };
 
-    let error = build_restore_plan(&preview, &target, &target_root.join("projects")).unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::ProjectConflict);
+    let plan = build_restore_plan(&preview, &target, &target_root.join("projects"))?;
+    let paths = plan
+        .operations
+        .iter()
+        .filter(|op| op.package_source.ends_with("/files/README.md"))
+        .map(|op| op.target.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 2);
+    assert_ne!(paths[0], paths[1]);
+    let repeated = build_restore_plan(&preview, &target, &target_root.join("projects"))?;
+    assert_eq!(plan.plan_id, repeated.plan_id);
     Ok(())
 }
 
@@ -1300,9 +1359,19 @@ fn project_target_names_use_unicode_normalized_collision_rules() -> Result<(), B
         conversations: vec![],
     };
 
-    let error = build_restore_plan(&preview, &target, &target_root.join("projects")).unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::ProjectConflict);
+    let plan = build_restore_plan(&preview, &target, &target_root.join("projects"))?;
+    let paths = plan
+        .operations
+        .iter()
+        .map(|op| {
+            op.target
+                .to_string_lossy()
+                .nfc()
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(paths.len(), plan.operations.len());
     Ok(())
 }
 
@@ -1326,18 +1395,23 @@ fn macos_project_target_names_use_case_insensitive_unicode_collision_rules(
             conversations: vec![],
         };
 
-        let error = build_restore_plan(
+        let plan = build_restore_plan(
             &preview,
             &target,
             Path::new("/Users/test/Codex-Restored-Projects"),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error.code,
-            ErrorCode::ProjectConflict,
-            "{first:?} / {second:?}"
-        );
+        )?;
+        let paths = plan
+            .operations
+            .iter()
+            .map(|op| {
+                op.target
+                    .to_string_lossy()
+                    .nfc()
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(paths.len(), plan.operations.len(), "{first:?} / {second:?}");
     }
     Ok(())
 }
@@ -1512,6 +1586,10 @@ fn planner_fixture(target_os: Option<SourceOs>) -> Result<PlannerFixture, Box<dy
 }
 
 fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
+    shared_metadata_fixture_with_names(false)
+}
+
+fn shared_metadata_fixture_with_names(same_names: bool) -> Result<PlannerFixture, Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let temp_root = fs::canonicalize(temp.path())?;
     let package_path = temp_root.join("shared-metadata.rehome");
@@ -1555,7 +1633,12 @@ fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
     let projects = vec![
         ProjectEntry {
             project_id: first_project_id,
-            name: "first-project".into(),
+            name: if same_names {
+                "shared"
+            } else {
+                "first-project"
+            }
+            .into(),
             source_path: source_project.into(),
             source_available: true,
             archive_path: format!("projects/{first_project_id}/files"),
@@ -1567,7 +1650,12 @@ fn shared_metadata_fixture() -> Result<PlannerFixture, Box<dyn Error>> {
         },
         ProjectEntry {
             project_id: second_project_id,
-            name: "second-project".into(),
+            name: if same_names {
+                "shared"
+            } else {
+                "second-project"
+            }
+            .into(),
             source_path: source_project.into(),
             source_available: true,
             archive_path: format!("projects/{second_project_id}/files"),

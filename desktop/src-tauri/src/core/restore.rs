@@ -630,13 +630,19 @@ fn register_projects(
     } else {
         SourceOs::Windows
     };
+    let directory_names = crate::core::planner::project_directory_names(
+        &verified.preview.manifest.projects,
+        target_os,
+    );
     verified
         .preview
         .manifest
         .projects
         .iter()
         .map(|project| {
-            let project_path = plan.projects_root.join(&project.name);
+            let project_path = plan
+                .projects_root
+                .join(&directory_names[&project.project_id]);
             let status = registrar(target_os, &project_path);
             ProjectRegistration {
                 project_id: project.project_id,

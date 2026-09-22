@@ -18,6 +18,8 @@
 
 安装程序和迁移文件不是同一件东西：EXE 或 DMG 用来安装 ReHome Desktop；`.rehome` 用来携带你的数据。
 
+从 0.1.26 起，同一个迁移包里的同名项目会自动恢复到带不同标识后缀的独立目录，对话路径和项目登记会同步指向各自目录。仅大小写不同或 Unicode 写法等价的名称也会处理；没有重名的项目保持原目录名。遇到旧版 `multiple package projects map to the same target directory` 报错时，在新电脑更新 ReHome 后重新导入原包即可。
+
 ## 可以迁移什么
 
 - 选定项目及其项目文件

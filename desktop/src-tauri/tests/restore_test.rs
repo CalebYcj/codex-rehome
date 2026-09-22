@@ -1523,6 +1523,76 @@ fn registration_runs_after_commit_but_does_not_prove_conversation_visibility(
 }
 
 #[test]
+fn same_named_projects_restore_register_and_roll_back_separately() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_second_name(
+        DatabaseSchema::Compatible,
+        Some("visual"),
+        |_, _| Ok(()),
+    )?;
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let mut options = harness.options();
+    options.register_projects = true;
+    let mut registered = Vec::new();
+    let report = apply_restore_with_registrar(harness.plan.clone(), options, |_, path| {
+        assert!(path.join("README.md").is_file());
+        registered.push(path.to_path_buf());
+        RegistrationStatus::Registered
+    })?;
+    assert_eq!(registered.len(), 2);
+    assert_ne!(registered[0], registered[1]);
+    assert!(report.verification.path_mapping_valid);
+    assert!(report.verification.files_valid);
+    assert!(report.verification.sqlite_threads_valid);
+    assert!(report.verification.session_index_valid);
+    let conversation_project = preview.manifest.conversations[0].project_id.unwrap();
+    let project_path = &report
+        .registrations
+        .iter()
+        .find(|r| r.project_id == conversation_project)
+        .unwrap()
+        .project_path;
+    let expected = rehome_desktop_lib::core::paths::codex_project_path(project_path)?;
+    let session: Value = serde_json::from_str(
+        fs::read_to_string(&harness.plan.sessions[0].target)?
+            .lines()
+            .next()
+            .unwrap(),
+    )?;
+    assert_eq!(session["payload"]["cwd"], expected);
+    let connection = Connection::open(harness.plan.target_codex_home.join("state_5.sqlite"))?;
+    let cwd: String = connection.query_row(
+        "SELECT cwd FROM threads WHERE id = ?1",
+        [THREAD_ID],
+        |row| row.get(0),
+    )?;
+    assert_eq!(cwd, expected);
+    drop(connection);
+    let payloads = registered
+        .iter()
+        .map(|p| fs::read(p.join("README.md")))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_ne!(payloads[0], payloads[1]);
+    assert!(payloads.iter().any(|bytes| bytes == b"# Second project\n"));
+    let repeated_target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let repeated = build_restore_plan(&preview, &repeated_target, &harness.plan.projects_root)?;
+    assert!(repeated
+        .operations
+        .iter()
+        .all(|op| op.action == ChangeKind::Unchanged));
+    assert_eq!(repeated.sessions[0].target, harness.plan.sessions[0].target);
+    assert!(rollback(report.transaction_id)?.success);
+    assert!(registered.iter().all(|p| !p.join("README.md").exists()));
+    Ok(())
+}
+
+#[test]
 fn registration_attempts_every_project_and_reports_partial_failure() -> Result<(), Box<dyn Error>> {
     let harness =
         RestoreHarness::new_with_projects(DatabaseSchema::Compatible, true, |_, _| Ok(()))?;
@@ -1630,6 +1700,14 @@ impl RestoreHarness {
         include_second_project: bool,
         setup: impl FnOnce(&Path, &Path) -> Result<(), Box<dyn Error>>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_second_name(schema, include_second_project.then_some("second"), setup)
+    }
+
+    fn new_with_second_name(
+        schema: DatabaseSchema,
+        second_name: Option<&str>,
+        setup: impl FnOnce(&Path, &Path) -> Result<(), Box<dyn Error>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let env_lock = APP_DATA_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1641,8 +1719,8 @@ impl RestoreHarness {
         align_fixture_project_metadata(&fixture)?;
         let package_path = fixture.root.join("handoff.rehome");
         let mut project_paths = vec![fixture.project_path.clone()];
-        if include_second_project {
-            let second = fixture.root.join("projects").join("second");
+        if let Some(name) = second_name {
+            let second = fixture.root.join("other-projects").join(name);
             fs::create_dir_all(&second)?;
             fs::write(second.join("README.md"), b"# Second project\n")?;
             project_paths.push(second);

@@ -18,6 +18,8 @@ Move selected Codex Desktop projects, conversations, Skills, Plugins, and genera
 
 The installer and a migration package are different files. The EXE or DMG installs ReHome Desktop; a `.rehome` file carries selected data between computers.
 
+Starting with 0.1.26, projects with colliding names in one package automatically restore into separate directories with identity suffixes. Conversation paths and project registration use the corresponding directories. This includes case-only and Unicode-equivalent names; unique names retain their original directory names. If an older version reports `multiple package projects map to the same target directory`, update ReHome on the target computer and import the original package again.
+
 ## What it can move
 
 - Selected projects and their files
