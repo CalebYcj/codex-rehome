@@ -20,6 +20,8 @@
 
 从 0.1.26 起，同一个迁移包里的同名项目会自动恢复到带不同标识后缀的独立目录，对话路径和项目登记会同步指向各自目录。仅大小写不同或 Unicode 写法等价的名称也会处理；没有重名的项目保持原目录名。遇到旧版 `multiple package projects map to the same target directory` 报错时，在新电脑更新 ReHome 后重新导入原包即可。
 
+从 0.1.27 起，导入时会保留 Codex 新版对话的历史格式标记，也能从旧迁移包中的对话文件补回这个标记，修复因标记丢失导致的 `list_turns is not supported yet`。已导入但打不开对话时，在目标电脑更新 ReHome，关闭 Codex 后重新导入原包，再打开 Codex 检查对话。
+
 ## 可以迁移什么
 
 - 选定项目及其项目文件

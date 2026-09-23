@@ -7,6 +7,7 @@ use crate::core::{
     },
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
+    session::session_history_mode,
 };
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -325,12 +326,23 @@ pub fn build_restore_plan_with_conflict_resolution(
                 .planning_payloads
                 .get(THREAD_METADATA_SOURCE)
                 .ok_or_else(|| package_invalid("verified thread metadata bytes are missing"))?;
+            let history_modes = sessions
+                .iter()
+                .filter_map(|session| {
+                    verified
+                        .planning_payloads
+                        .get(&session.package_source)
+                        .and_then(|bytes| session_history_mode(bytes))
+                        .map(|mode| (session.target_task_id.to_string(), mode.to_owned()))
+                })
+                .collect::<BTreeMap<_, _>>();
             if let Some(operation) = plan_thread_metadata_merge(
                 THREAD_METADATA_SOURCE,
                 target_path,
                 bytes,
                 &planned_rewrites,
                 &desired_thread_rollout_paths,
+                &history_modes,
                 all_sessions_skipped,
                 target.target_os,
             )? {
@@ -624,18 +636,26 @@ fn plan_index_merge(
     Ok(Some(classify_bridge_change(source, target, state)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_thread_metadata_merge(
     source: &str,
     target: PathBuf,
     bytes: &[u8],
     rewrites: &[ReferenceRewrite],
     desired_rollout_paths: &BTreeMap<String, String>,
+    history_modes: &BTreeMap<String, String>,
     all_sessions_skipped: bool,
     target_os: SourceOs,
 ) -> Result<Option<PlannedOperation>, RehomeError> {
     let state = target_state(&target, target_os)?;
     if let TargetState::File(hash) = &state {
-        let desired = rewrite_metadata_document(bytes, rewrites, source, desired_rollout_paths)?;
+        let desired = rewrite_metadata_document(
+            bytes,
+            rewrites,
+            source,
+            desired_rollout_paths,
+            history_modes,
+        )?;
         let metadata_ready = sqlite_threads_contain(&target, &desired)?;
         ensure_target_hash(&target, hash)?;
         if all_sessions_skipped && metadata_ready {
@@ -1084,6 +1104,7 @@ fn rewrite_metadata_document(
     rewrites: &[ReferenceRewrite],
     source: &str,
     desired_rollout_paths: &BTreeMap<String, String>,
+    history_modes: &BTreeMap<String, String>,
 ) -> Result<serde_json::Value, RehomeError> {
     let selected = rewrites
         .iter()
@@ -1096,15 +1117,32 @@ fn rewrite_metadata_document(
             for value in values {
                 rewrite_scoped_metadata_row(value, &selected);
                 set_desired_rollout_path(value, desired_rollout_paths);
+                set_desired_history_mode(value, history_modes);
             }
         }
         serde_json::Value::Object(_) => {
             rewrite_scoped_metadata_row(&mut value, &selected);
             set_desired_rollout_path(&mut value, desired_rollout_paths);
+            set_desired_history_mode(&mut value, history_modes);
         }
         _ => return Err(package_invalid("bridge metadata JSON has an invalid shape")),
     }
     Ok(value)
+}
+
+fn set_desired_history_mode(
+    value: &mut serde_json::Value,
+    history_modes: &BTreeMap<String, String>,
+) {
+    let desired = metadata_id(value)
+        .and_then(|id| history_modes.get(id))
+        .cloned();
+    if let (Some(object), Some(desired)) = (value.as_object_mut(), desired) {
+        object.insert(
+            "history_mode".to_owned(),
+            serde_json::Value::String(desired),
+        );
+    }
 }
 
 fn set_desired_rollout_path(
@@ -1245,6 +1283,14 @@ fn sqlite_threads_contain(
         let id = metadata_id(desired_row)
             .ok_or_else(|| package_invalid("thread metadata row is missing its conversation ID"))?;
         if object.contains_key("rollout_path") && !columns.contains("rollout_path") {
+            return Ok(false);
+        }
+        if object
+            .get("history_mode")
+            .and_then(serde_json::Value::as_str)
+            == Some("paginated")
+            && !columns.contains("history_mode")
+        {
             return Ok(false);
         }
         let compared_columns = object

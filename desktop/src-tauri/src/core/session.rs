@@ -15,6 +15,16 @@ pub(crate) fn parse_session_metadata(bytes: &[u8]) -> Option<SessionMetadata> {
     })
 }
 
+pub(crate) fn session_history_mode(bytes: &[u8]) -> Option<&'static str> {
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    let metadata = parse_session_metadata(bytes)?;
+    match metadata.fields.get("history_mode")?.as_str()? {
+        "legacy" => Some("legacy"),
+        "paginated" => Some("paginated"),
+        _ => None,
+    }
+}
+
 pub(crate) fn session_metadata_from_value(value: Value) -> Option<SessionMetadata> {
     match value.get("type").and_then(Value::as_str) {
         Some("session_meta") => {

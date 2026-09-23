@@ -6,6 +6,7 @@ use crate::core::{
     },
     package::inspect_package_for_planning,
     planner::rewrite_jsonl_payload,
+    session::session_history_mode,
     stable_fs::PinnedParent,
 };
 use chrono::DateTime;
@@ -64,6 +65,7 @@ const THREAD_IMPORT_FIELDS: &[&str] = &[
     "archived",
     "has_user_event",
     "preview",
+    "history_mode",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,12 +366,21 @@ fn apply_bridge_plan_with_lock_token(
         ensure_writable_change(operation)?;
         let package_bytes =
             verified.authenticated_planning_payload("codex/metadata/threads.json")?;
+        let history_modes = plan
+            .sessions
+            .iter()
+            .map(|session| {
+                let bytes = verified.authenticated_planning_payload(&session.package_source)?;
+                Ok((session.source_task_id, session_history_mode(bytes)))
+            })
+            .collect::<Result<HashMap<_, _>, RehomeError>>()?;
         let import_result = import_sqlite_threads_for_operation(
             &plan.target_codex_home,
             operation,
             package_bytes,
             &plan.sessions,
             &plan.reference_rewrites,
+            &history_modes,
             lock_token,
         );
         on_applied(&operation.target)?;
@@ -601,7 +612,15 @@ pub fn import_sqlite_threads(
         action: ChangeKind::Update,
         rollback_required: true,
     };
-    import_sqlite_threads_for_operation(parent, &operation, package_bytes, sessions, rewrites, None)
+    import_sqlite_threads_for_operation(
+        parent,
+        &operation,
+        package_bytes,
+        sessions,
+        rewrites,
+        &HashMap::new(),
+        None,
+    )
 }
 
 fn import_sqlite_threads_for_operation(
@@ -610,12 +629,13 @@ fn import_sqlite_threads_for_operation(
     package_bytes: &[u8],
     sessions: &[PlannedSession],
     rewrites: &[ReferenceRewrite],
+    history_modes: &HashMap<Uuid, Option<&'static str>>,
     lock_token: Option<&str>,
 ) -> Result<usize, RehomeError> {
     ensure_safe_codex_target(root, &operation.target)?;
     reject_hard_linked_sqlite(&operation.target)?;
     let identity = sqlite_file_identity(&operation.target)?;
-    let rows = package_thread_rows(package_bytes, sessions, rewrites)?;
+    let rows = package_thread_rows(package_bytes, sessions, rewrites, history_modes)?;
     let _guard = TargetReplacementGuard::acquire(root, operation, lock_token)?;
     reject_hard_linked_sqlite(&operation.target)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -664,6 +684,7 @@ fn package_thread_rows(
     package_bytes: &[u8],
     sessions: &[PlannedSession],
     rewrites: &[ReferenceRewrite],
+    history_modes: &HashMap<Uuid, Option<&'static str>>,
 ) -> Result<Vec<Map<String, Value>>, RehomeError> {
     let values = serde_json::from_slice::<Value>(package_bytes)
         .map_err(|error| package_invalid(format!("bridge metadata JSON is invalid: {error}")))?
@@ -730,6 +751,9 @@ fn package_thread_rows(
             "rollout_path".into(),
             Value::String(path_text(&session.target)?.to_owned()),
         );
+        if let Some(Some(mode)) = history_modes.get(&session.source_task_id) {
+            object.insert("history_mode".into(), Value::String((*mode).to_owned()));
+        }
         result.push(object);
     }
     Ok(result)
@@ -770,6 +794,13 @@ fn import_thread_row(
     row: &Map<String, Value>,
     schema: &HashMap<String, ThreadColumn>,
 ) -> Result<(), RehomeError> {
+    if row.get("history_mode").and_then(Value::as_str) == Some("paginated")
+        && !schema.contains_key("history_mode")
+    {
+        return Err(restore_failed(
+            "target Codex database does not support paginated conversation history",
+        ));
+    }
     let columns = THREAD_IMPORT_FIELDS
         .iter()
         .copied()

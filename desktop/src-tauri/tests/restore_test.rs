@@ -1593,6 +1593,55 @@ fn same_named_projects_restore_register_and_roll_back_separately() -> Result<(),
 }
 
 #[test]
+fn old_package_paginated_thread_imports_and_repairs_history_mode() -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new_with_setup(DatabaseSchema::Compatible, |package, target| {
+        set_package_session_history_mode(package, "paginated")?;
+        Connection::open(target.join(".codex/state_5.sqlite"))?.execute_batch(
+            "ALTER TABLE threads ADD COLUMN history_mode TEXT NOT NULL DEFAULT 'legacy'",
+        )?;
+        Ok(())
+    })?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    assert!(report.verification.sqlite_threads_valid);
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let thread_id = harness.plan.sessions[0].target_task_id.to_string();
+    let connection = Connection::open(&database)?;
+    let mode: String = connection.query_row(
+        "SELECT history_mode FROM threads WHERE id = ?1",
+        [&thread_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(mode, "paginated");
+    connection.execute(
+        "UPDATE threads SET history_mode = 'legacy' WHERE id = ?1",
+        [&thread_id],
+    )?;
+    drop(connection);
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let repair = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
+    assert!(repair
+        .operations
+        .iter()
+        .any(|operation| operation.package_source == "codex/metadata/threads.json"));
+    apply_restore(repair, harness.options())?;
+    let repaired: String = Connection::open(database)?.query_row(
+        "SELECT history_mode FROM threads WHERE id = ?1",
+        [&thread_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(repaired, "paginated");
+    Ok(())
+}
+
+#[test]
 fn registration_attempts_every_project_and_reports_partial_failure() -> Result<(), Box<dyn Error>> {
     let harness =
         RestoreHarness::new_with_projects(DatabaseSchema::Compatible, true, |_, _| Ok(()))?;
@@ -1904,6 +1953,28 @@ fn replace_selected_session_payload(
     writer.finish()?;
     fs::rename(temporary, package_path)?;
     Ok(())
+}
+
+fn set_package_session_history_mode(
+    package_path: &Path,
+    history_mode: &str,
+) -> Result<(), Box<dyn Error>> {
+    let source = fs::File::open(package_path)?;
+    let mut archive = ZipArchive::new(source)?;
+    let mut manifest_bytes = Vec::new();
+    std::io::copy(&mut archive.by_name("manifest.json")?, &mut manifest_bytes)?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    let source = manifest["conversations"][0]["archive_path"]
+        .as_str()
+        .ok_or("missing conversation payload")?;
+    let mut session_bytes = Vec::new();
+    std::io::copy(&mut archive.by_name(source)?, &mut session_bytes)?;
+    drop(archive);
+    let mut session: Value = serde_json::from_slice(&session_bytes)?;
+    session["payload"]["history_mode"] = Value::String(history_mode.to_owned());
+    let mut replacement = serde_json::to_vec(&session)?;
+    replacement.push(b'\n');
+    replace_selected_session_payload(package_path, &replacement)
 }
 
 impl Drop for RestoreHarness {
