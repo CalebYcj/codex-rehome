@@ -20,6 +20,8 @@ The installer and a migration package are different files. The EXE or DMG instal
 
 Starting with 0.1.26, projects with colliding names in one package automatically restore into separate directories with identity suffixes. Conversation paths and project registration use the corresponding directories. This includes case-only and Unicode-equivalent names; unique names retain their original directory names. If an older version reports `multiple package projects map to the same target directory`, update ReHome on the target computer and import the original package again.
 
+Starting with 0.1.27, ReHome preserves Codex's paginated conversation history mode and can recover that mode from conversation files in older migration packages. This fixes a missing history-mode marker that can cause `list_turns is not supported yet` after import. If a restored chat will not open, update ReHome on the target computer, close Codex, import the original package again, and then reopen Codex.
+
 ## What it can move
 
 - Selected projects and their files

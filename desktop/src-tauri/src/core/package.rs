@@ -60,6 +60,7 @@ const THREAD_EXPORT_COLUMNS_V1: &[&str] = &[
     "archived",
     "has_user_event",
     "preview",
+    "history_mode",
 ];
 const EXCLUSION_RULES: &[&str] = &[
     "credentials and authentication data",

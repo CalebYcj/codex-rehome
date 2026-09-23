@@ -171,6 +171,40 @@ fn packages_selected_fixture_content_without_mutating_sources() -> Result<(), Bo
 }
 
 #[test]
+fn package_preserves_paginated_history_mode_from_codex_database() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let connection = Connection::open(&fixture.state_db_path)?;
+    connection.execute_batch(
+        "ALTER TABLE threads ADD COLUMN history_mode TEXT NOT NULL DEFAULT 'legacy'",
+    )?;
+    connection.execute(
+        "UPDATE threads SET history_mode = 'paginated' WHERE id = ?1",
+        [THREAD_ID],
+    )?;
+    drop(connection);
+    let output = fixture.root.join("paginated.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home,
+        project_paths: vec![],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: output.clone(),
+        source_device_id: Uuid::new_v4(),
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+    let mut archive = ZipArchive::new(fs::File::open(output)?)?;
+    let mut metadata = Vec::new();
+    std::io::copy(
+        &mut archive.by_name("codex/metadata/threads.json")?,
+        &mut metadata,
+    )?;
+    let rows: Value = serde_json::from_slice(&metadata)?;
+    assert_eq!(rows[0]["history_mode"], "paginated");
+    Ok(())
+}
+
+#[test]
 fn package_collapses_overlapping_plugin_roots() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let codex_home = temp.path().join(".codex");

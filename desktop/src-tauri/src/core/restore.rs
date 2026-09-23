@@ -15,6 +15,7 @@ use crate::core::{
     },
     package::{inspect_package_for_planning, VerifiedPackage},
     paths::restore_target_root,
+    session::session_history_mode,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags};
@@ -344,7 +345,7 @@ fn verify_restore(
                 }),
         )
     })?;
-    let bridge = verify_bridge_metadata(plan)?;
+    let bridge = verify_bridge_metadata(plan, verified)?;
     let forbidden_files_absent = current.preview.forbidden_files_total == 0;
     let project_files_valid = verify_project_files(plan, verified)?;
     Ok(VerificationReport {
@@ -459,7 +460,10 @@ struct BridgeVerification {
     path_mapping_valid: bool,
 }
 
-fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, RehomeError> {
+fn verify_bridge_metadata(
+    plan: &RestorePlan,
+    verified: &VerifiedPackage,
+) -> Result<BridgeVerification, RehomeError> {
     let index_rows = read_index_rows(plan)?;
     let sqlite_rows = read_sqlite_rows(plan)?;
     let requires_index = plan.bridge_verification.session_index.is_some();
@@ -481,8 +485,18 @@ fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, Reho
         sqlite_valid = plan.sessions.iter().all(|session| {
             sqlite_rows
                 .get(&session.target_task_id.to_string())
-                .is_some_and(|(_, rollout)| rollout.as_deref() == session.target.to_str())
+                .is_some_and(|(_, rollout, _)| rollout.as_deref() == session.target.to_str())
         });
+        for session in &plan.sessions {
+            let bytes = verified.authenticated_planning_payload(&session.package_source)?;
+            if let Some(expected_mode) = session_history_mode(bytes) {
+                let stored_mode = sqlite_rows
+                    .get(&session.target_task_id.to_string())
+                    .and_then(|(_, _, mode)| mode.as_deref());
+                sqlite_valid &= stored_mode == Some(expected_mode)
+                    || (expected_mode == "legacy" && stored_mode.is_none());
+            }
+        }
     }
 
     for session in &plan.sessions {
@@ -511,7 +525,7 @@ fn verify_bridge_metadata(plan: &RestorePlan) -> Result<BridgeVerification, Reho
             .and_then(Value::as_str);
         let sqlite_cwd = sqlite_rows
             .get(&session.target_task_id.to_string())
-            .and_then(|(cwd, _)| cwd.as_deref());
+            .and_then(|(cwd, _, _)| cwd.as_deref());
         let mapped = expected_project_paths.iter().any(|expected| {
             session_values
                 .iter()
@@ -580,7 +594,7 @@ fn read_index_rows(plan: &RestorePlan) -> Result<BTreeMap<String, Value>, Rehome
     Ok(rows)
 }
 
-type SqliteRows = BTreeMap<String, (Option<String>, Option<String>)>;
+type SqliteRows = BTreeMap<String, (Option<String>, Option<String>, Option<String>)>;
 
 fn read_sqlite_rows(plan: &RestorePlan) -> Result<SqliteRows, RehomeError> {
     let Some(target) = plan.bridge_verification.sqlite_database.as_deref() else {
@@ -590,8 +604,29 @@ fn read_sqlite_rows(plan: &RestorePlan) -> Result<SqliteRows, RehomeError> {
     let connection = Connection::open_with_flags(target, flags).map_err(|error| {
         restore_failed(format!("could not open restored SQLite database: {error}"))
     })?;
+    let has_history_mode = connection
+        .prepare("PRAGMA table_info(threads)")
+        .and_then(|mut statement| {
+            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+            for column in columns {
+                if column? == "history_mode" {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .map_err(|error| {
+            restore_failed(format!("could not inspect restored SQLite schema: {error}"))
+        })?;
+    let history_column = if has_history_mode {
+        "history_mode"
+    } else {
+        "NULL"
+    };
     let mut statement = connection
-        .prepare("SELECT id, cwd, rollout_path FROM threads")
+        .prepare(&format!(
+            "SELECT id, cwd, rollout_path, {history_column} FROM threads"
+        ))
         .map_err(|error| {
             restore_failed(format!("could not inspect restored SQLite rows: {error}"))
         })?;
@@ -601,6 +636,7 @@ fn read_sqlite_rows(plan: &RestorePlan) -> Result<SqliteRows, RehomeError> {
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(|error| {
@@ -608,10 +644,10 @@ fn read_sqlite_rows(plan: &RestorePlan) -> Result<SqliteRows, RehomeError> {
         })?;
     let mut result = BTreeMap::new();
     for row in rows {
-        let (id, cwd, rollout) = row.map_err(|error| {
+        let (id, cwd, rollout, history_mode) = row.map_err(|error| {
             restore_failed(format!("could not read restored SQLite row: {error}"))
         })?;
-        result.insert(id, (cwd, rollout));
+        result.insert(id, (cwd, rollout, history_mode));
     }
     Ok(result)
 }
