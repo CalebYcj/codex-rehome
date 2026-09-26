@@ -717,6 +717,7 @@ pub async fn prepare_support(
                 .transaction(&open_transaction_by_id(transaction_id)?),
         };
         snapshot = state.support.refresh(snapshot);
+        snapshot.user_confirmed_failure = selection.failure_confirmed;
         if let Some(note) = selection.user_note {
             snapshot.user_note = Some(support::render::private_excerpt(
                 &support::render::truncate(&note, 2048),
@@ -741,6 +742,11 @@ pub async fn copy_support_text(
     let state = state.inner().clone();
     run_blocking(ErrorCode::RestoreFailed, move || {
         let snapshot = state.support.incident(selection.support_id)?;
+        if matches!(selection.kind, TextKind::Codex) && !snapshot.can_handoff() {
+            return Err(open_failed(
+                "confirm the original chat still fails before requesting Codex repair",
+            ));
+        }
         let (preview, _) = state.support.preview(&snapshot, selection.locale);
         let text = match selection.kind {
             TextKind::Codex => preview.codex_text,

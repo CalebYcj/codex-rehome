@@ -10,6 +10,8 @@ The incident is minimal evidence, not a full log. Missing fields are unknown; us
 
 ## Procedure
 
+Confirm failure before repair. An observed error or a user's failed attempt to open the original chat after restarting is a diagnostic starting point, not proof of cause. Unknown verification, registration success and passing file checks do not justify repairs. Diagnose read-only first; if a fault cannot be established, do not write and report it as unknown. Export, package-selection or planning errors do not authorize changes to restored chats.
+
 1. Read stage, error_code, transaction_status, backup location and target IDs/paths. Access only incident-scoped objects; do not scan the entire profile.
 2. Distinguish prepared/applying/verifying, committed, rolled_back and rollback_failed. Without a transaction ID, writes may not have started; never guess the latest transaction. For failed rollback, assess subsequent modifications and prefer ReHome's History recovery controls.
 3. Compare the relevant project, session header, index and thread metadata. Do not collect chat contents. Do not globally replace path separators: native filesystem paths and Codex project keys may have different representations.

@@ -57,6 +57,8 @@ pub struct SupportSnapshot {
     pub error_code: Option<ErrorCode>,
     pub local_error_excerpt: Option<String>,
     pub user_note: Option<String>,
+    #[serde(default)]
+    pub user_confirmed_failure: bool,
     pub transaction_id: Option<Uuid>,
     pub transaction_status: Option<RecoveryStatus>,
     pub backup_path: Option<PathBuf>,
@@ -85,6 +87,7 @@ impl SupportSnapshot {
             error_code: None,
             local_error_excerpt: None,
             user_note: None,
+            user_confirmed_failure: false,
             transaction_id: None,
             transaction_status: None,
             backup_path: None,
@@ -101,6 +104,9 @@ impl SupportSnapshot {
     pub fn record_error(&mut self, error: &RehomeError) {
         self.error_code = Some(error.code);
         self.local_error_excerpt = Some(super::render::private_excerpt(&error.message));
+    }
+    pub fn can_handoff(&self) -> bool {
+        self.error_code.is_some() || self.user_confirmed_failure
     }
 }
 
@@ -133,6 +139,8 @@ pub struct PrepareSelection {
     pub source: SupportSource,
     pub locale: Locale,
     pub user_note: Option<String>,
+    #[serde(default)]
+    pub failure_confirmed: bool,
 }
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]

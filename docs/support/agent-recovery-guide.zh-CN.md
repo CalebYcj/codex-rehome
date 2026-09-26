@@ -10,6 +10,8 @@ ReHome 在 Windows 和 macOS 之间迁移选定的 Codex 项目、会话、Skill
 
 ## 排查顺序
 
+先确认失败确实发生：程序记录的错误或用户重启后仍无法打开原对话的反馈，只是排查入口，不证明具体原因。仅“未验证”、登记完成或基础检查通过都不能作为修复理由。先只读定位；无法证实故障时停止写入，保留未知状态。导出、选包或规划错误不授权修改已恢复的会话。
+
 1. 阅读本次 JSON：stage、error_code、transaction_status、备份位置及目标 ID/路径。只访问本次明确指向的对象，不扫描整个用户目录。
 2. 区分 prepared/applying/verifying、committed、rolled_back、rollback_failed；没有 transaction_id 时可能尚未开始写入，不猜最近事务。回滚失败优先使用 ReHome 迁移记录中的恢复入口，先评估当前文件是否又被使用/修改。
 3. 比较本次目标项目、会话文件头、索引和数据库元数据的归属。不要读取聊天正文来寻找密码或上下文。不要全局替换 Windows/macOS 斜杠；文件系统路径与 Codex 项目键的表示可能不同。

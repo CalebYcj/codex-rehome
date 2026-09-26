@@ -68,7 +68,15 @@ fn support_survives_restart_and_checks_only_its_real_transaction() -> Result<(),
     let (preview, diagnostic) = restarted.preview(&restored, Locale::En);
     assert!(preview.saved);
     assert!(diagnostic.unwrap().is_file());
-    assert!(preview.codex_text.contains("local_guide"));
+    assert!(!restored.can_handoff());
+    assert!(preview.codex_text.contains("failure is not confirmed"));
+    let mut confirmed = restored.clone();
+    confirmed.user_confirmed_failure = true;
+    assert!(restarted
+        .preview(&confirmed, Locale::En)
+        .0
+        .codex_text
+        .contains("local_guide"));
     fs::remove_file(&harness.plan.package_path)?;
     let check = recheck::run(&restored);
     assert!(check

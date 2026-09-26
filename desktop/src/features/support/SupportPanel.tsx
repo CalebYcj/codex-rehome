@@ -7,6 +7,7 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
   const { t, locale } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [note, setNote] = useState("");
+  const [failureConfirmed, setFailureConfirmed] = useState(false);
   const [preview, setPreview] = useState<SupportPreview | null>(null);
   const [mode, setMode] = useState<"codex" | "github">("codex");
   const [busy, setBusy] = useState(false);
@@ -15,7 +16,7 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
   const [checks, setChecks] = useState<RecheckReport | null>(null);
   const generation = useRef(0);
   const sourceKey = source.kind === "incident" ? source.support_id : source.transaction_id;
-  useEffect(() => { setNote(""); }, [sourceKey]);
+  useEffect(() => { setNote(""); setFailureConfirmed(false); }, [sourceKey]);
   useEffect(() => {
     generation.current++;
     setPreview(null); setChecks(null); setStatus(null); setError(null); setBusy(false);
@@ -32,7 +33,8 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
   }
   async function prepare(kind: "codex" | "github") {
     const current = generation.current;
-    const result = await prepareSupport(source, locale, note);
+    if (kind === "codex" && source.kind === "transaction" && !failureConfirmed) return;
+    const result = await prepareSupport(source, locale, note, failureConfirmed);
     if (current !== generation.current) return;
     setPreview(result); setMode(kind); setChecks(null);
   }
@@ -44,7 +46,8 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
       <p>{t("ReHome 会整理本次情况，由你决定交给 Codex 或提交到 GitHub。不会自动上传或修复。")}</p>
       <label>{t("补充情况（可选，仅用于本机求助）")}<textarea maxLength={2048} value={note} disabled={busy} onChange={e => { setNote(e.target.value); setPreview(null); setStatus(null); }} /></label>
       <div className="support-actions">
-        <button className="secondary-button" disabled={busy} onClick={() => void action(() => prepare("codex"))}>{t("复制到 Codex")}</button>
+        {source.kind === "transaction" && <label><input type="checkbox" checked={failureConfirmed} disabled={busy} onChange={e => { setFailureConfirmed(e.target.checked); setPreview(null); setChecks(null); setStatus(null); }} />{locale === "zh-CN" ? "我已重启 Codex 并尝试打开原对话，仍然失败" : "I restarted Codex and tried opening the original chat, but it still fails"}</label>}
+        <button className="secondary-button" disabled={busy || (source.kind === "transaction" && !failureConfirmed)} onClick={() => void action(() => prepare("codex"))}>{t("复制到 Codex")}</button>
         <button className="secondary-button" disabled={busy} onClick={() => void action(() => prepare("github"))}>{t("到 GitHub 提交问题")}</button>
       </div>
       {preview && <>

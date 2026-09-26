@@ -18,6 +18,7 @@ fn prepare_support_agent_acceptance_fixture() {
     )
     .unwrap();
     let mut snapshot = SupportSnapshot::new(Stage::UserReported);
+    snapshot.user_confirmed_failure = true;
     snapshot.transaction_status = Some(RecoveryStatus::Committed);
     snapshot.project_paths.push(root.join("projects/示例项目"));
     snapshot.user_note = Some(format!("Synthetic acceptance only: the project directory is missing. A known synthetic copy exists at {}. Diagnose read-only first; do not alter any Codex files.", root.join("project-backup").display()));
@@ -278,10 +279,32 @@ fn truncated_coverage_and_untrusted_command_fields_are_explicit() {
         json!({"support_id":Uuid::new_v4(),"path":"auth.json"})
     )
     .is_err());
-    let snapshot = SupportSnapshot::new(Stage::Inspect);
+    let mut snapshot = SupportSnapshot::new(Stage::Inspect);
+    snapshot.record_error(&RehomeError::new(
+        ErrorCode::RestoreFailed,
+        "synthetic failure",
+    ));
     let huge_path = std::path::PathBuf::from("x".repeat(16000));
     let prompt = render::codex_text(&snapshot, Locale::En, Some(&huge_path), None);
     assert!(prompt.len() <= 8192);
     assert!(prompt.contains("Do not edit SQLite"));
     assert!(prompt.contains("evidence is incomplete"));
+}
+
+#[test]
+fn handoff_requires_observed_error_or_explicit_failure_confirmation() {
+    let mut snapshot = SupportSnapshot::new(Stage::Apply);
+    snapshot.transaction_status = Some(RecoveryStatus::Committed);
+    assert!(!snapshot.can_handoff());
+    assert!(!render::codex_text(&snapshot, Locale::En, None, None).contains("INCIDENT DATA"));
+    snapshot.user_confirmed_failure = true;
+    assert!(snapshot.can_handoff());
+    assert!(render::codex_text(&snapshot, Locale::En, None, None).contains("INCIDENT DATA"));
+    snapshot.user_confirmed_failure = false;
+    assert!(!snapshot.can_handoff());
+    snapshot.record_error(&RehomeError::new(
+        ErrorCode::RestoreFailed,
+        "synthetic failure",
+    ));
+    assert!(snapshot.can_handoff());
 }
