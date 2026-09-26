@@ -10,6 +10,7 @@ const english: Record<string, string> = {
   "故障求助": "Troubleshooting help",
   "需要帮助？": "Need help?",
   "会话打不开？获取帮助": "Can't open a chat? Get help",
+  "我已重启 Codex 并尝试打开原对话，仍然失败": "I restarted Codex and tried opening the original chat, but it still fails",
   "ReHome 会整理本次情况，由你决定交给 Codex 或提交到 GitHub。不会自动上传或修复。": "ReHome prepares the incident for you to share with Codex or GitHub. Nothing is uploaded or repaired automatically.",
   "补充情况（可选，仅用于本机求助）": "Additional details (optional, local help only)",
   "复制到 Codex": "Copy for Codex",
