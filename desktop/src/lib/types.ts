@@ -18,6 +18,26 @@ export type RegistrationStatus =
 export interface RehomeError {
   code: string;
   message: string;
+  support_id?: string;
+}
+
+export type SupportSource = { kind: "incident"; support_id: string } | { kind: "transaction"; transaction_id: string };
+export interface SupportPreview {
+  support_id: string;
+  codex_text: string;
+  github_text: string;
+  reveal_id: string | null;
+  saved: boolean;
+  can_recheck: boolean;
+}
+export interface RecheckReport {
+  checked_at: string;
+  omitted_sessions: number;
+  checks: Array<{ subject: string; code: string; status: "pass" | "fail" | "unknown" | "not_applicable" }>;
+}
+export function supportIdFromError(error: unknown): string | null {
+  if (typeof error === "object" && error !== null && "support_id" in error && typeof error.support_id === "string") return error.support_id;
+  return null;
 }
 
 export interface ContentCounts {

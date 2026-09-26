@@ -338,3 +338,10 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
+.support-panel { margin: 16px 0; padding: 12px; border: 1px solid #d5deda; border-radius: 8px; background: #f7faf8; }
+.support-content { display: grid; gap: 12px; }
+.support-content label { display: grid; gap: 8px; }
+.support-content textarea { width: 100%; min-height: 72px; padding: 10px; border: 1px solid #b9c8c0; border-radius: 6px; font: inherit; resize: vertical; }
+.support-content .support-preview { min-height: 250px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+.support-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.support-checks { overflow-wrap: anywhere; font-size: 13px; }

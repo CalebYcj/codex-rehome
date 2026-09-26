@@ -35,6 +35,90 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn support_survives_restart_and_checks_only_its_real_transaction() -> Result<(), Box<dyn Error>> {
+    use rehome_desktop_lib::core::restore::apply_restore_by_id_observed;
+    use rehome_desktop_lib::support::{capture_plan, models::*, recheck, SupportService};
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let mut snapshot = SupportSnapshot::new(Stage::Apply);
+    capture_plan(&mut snapshot, &harness.plan);
+    let mut observed = vec![];
+    let report =
+        apply_restore_by_id_observed(harness.plan.plan_id, harness.options(), |id, status| {
+            snapshot.transaction_id = Some(id);
+            snapshot.transaction_status = Some(status);
+            observed.push((id, status));
+        })?;
+    assert_eq!(
+        observed,
+        vec![
+            (report.transaction_id, RecoveryStatus::Prepared),
+            (report.transaction_id, RecoveryStatus::Committed)
+        ]
+    );
+    snapshot.verification_at_import = Some(report.verification);
+    let service = SupportService::default();
+    service.record(service.refresh(snapshot.clone()));
+    drop(service);
+    let restarted = SupportService::default();
+    let summary = transaction_summary(report.transaction_id)?.unwrap();
+    let restored = restarted.transaction(&summary);
+    assert_eq!(restored.support_id, snapshot.support_id);
+    assert_eq!(restored.sessions.len(), snapshot.sessions.len());
+    let (preview, diagnostic) = restarted.preview(&restored, Locale::En);
+    assert!(preview.saved);
+    assert!(diagnostic.unwrap().is_file());
+    assert!(preview.codex_text.contains("local_guide"));
+    fs::remove_file(&harness.plan.package_path)?;
+    let check = recheck::run(&restored);
+    assert!(check
+        .checks
+        .iter()
+        .any(|c| c.code == "session_header_valid"));
+    assert!(
+        !check.checks.iter().any(|c| c.status == CheckStatus::Fail),
+        "{:?}",
+        check.checks
+    );
+    // Tampered support paths must not grant access beyond the validated journal.
+    let mut forged = restored;
+    forged.sessions[0].path = harness.plan.target_codex_home.join("auth.json");
+    forged.index_path = Some(harness.plan.target_codex_home.join("auth.json"));
+    let bound = restarted.refresh(forged);
+    assert!(bound.sessions.is_empty());
+    assert!(bound.index_path.is_none());
+    rollback(report.transaction_id)?;
+    let after = restarted.refresh(snapshot);
+    assert_eq!(after.transaction_status, Some(RecoveryStatus::RolledBack));
+    assert!(!recheck::run(&after)
+        .checks
+        .iter()
+        .any(|c| c.status == CheckStatus::Fail));
+    Ok(())
+}
+
+#[test]
+fn support_observer_identifies_the_rolled_back_attempt() -> Result<(), Box<dyn Error>> {
+    use rehome_desktop_lib::core::restore::apply_restore_by_id_observed;
+    let harness = RestoreHarness::new(DatabaseSchema::RequiredColumnWithoutDefault)?;
+    let mut observed = vec![];
+    let error =
+        apply_restore_by_id_observed(harness.plan.plan_id, harness.options(), |id, status| {
+            observed.push((id, status))
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].0, observed[1].0);
+    assert_eq!(observed[0].1, RecoveryStatus::Prepared);
+    assert_eq!(observed[1].1, RecoveryStatus::RolledBack);
+    assert_eq!(
+        transaction_summary(observed[0].0)?.unwrap().status,
+        RecoveryStatus::RolledBack
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_forward_slash_codex_home_restores_and_rolls_back() -> Result<(), Box<dyn Error>> {
