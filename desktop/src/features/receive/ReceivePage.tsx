@@ -20,8 +20,10 @@ import {
   selectRestoreDestinations,
 } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
+import SupportPanel from "../support/SupportPanel";
 import {
   errorMessage,
+  supportIdFromError,
   registrationIsComplete,
   type CodexInventory,
   type FileConflictResolution,
@@ -68,6 +70,7 @@ export default function ReceivePage({
   const [report, setReport] = useState<RestoreReport | null>(null);
   const [phase, setPhase] = useState<"idle" | "inspecting" | "selecting" | "planning" | "restoring">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [supportId, setSupportId] = useState<string | null>(null);
   const [registrationStatuses, setRegistrationStatuses] = useState<Record<string, string>>({});
   const requestGeneration = useRef(0);
 
@@ -75,6 +78,7 @@ export default function ReceivePage({
     if (phase !== "idle") return;
     const generation = ++requestGeneration.current;
     setError(null);
+    setSupportId(null);
     setPhase("inspecting");
     onOperationStart();
     try {
@@ -94,6 +98,7 @@ export default function ReceivePage({
     } catch (caught) {
       if (generation !== requestGeneration.current) return;
       setPreview(null);
+      setSupportId(supportIdFromError(caught));
       setError(errorMessage(caught));
     } finally {
       if (generation === requestGeneration.current) setPhase("idle");
@@ -105,6 +110,7 @@ export default function ReceivePage({
     if (!preview || phase !== "idle") return;
     const generation = ++requestGeneration.current;
     setError(null);
+    setSupportId(null);
     setPhase("selecting");
     onOperationStart();
     try {
@@ -116,6 +122,7 @@ export default function ReceivePage({
       }
     } catch (caught) {
       if (generation !== requestGeneration.current) return;
+      setSupportId(supportIdFromError(caught));
       setError(errorMessage(caught));
     } finally {
       if (generation === requestGeneration.current) setPhase("idle");
@@ -127,6 +134,7 @@ export default function ReceivePage({
     if (!preview || !locations || phase !== "idle") return;
     const generation = ++requestGeneration.current;
     setError(null);
+    setSupportId(null);
     setReport(null);
     setPhase("planning");
     onOperationStart();
@@ -143,6 +151,7 @@ export default function ReceivePage({
     } catch (caught) {
       if (generation !== requestGeneration.current) return;
       setPlan(null);
+      setSupportId(supportIdFromError(caught));
       setError(errorMessage(caught));
     } finally {
       if (generation === requestGeneration.current) setPhase("idle");
@@ -161,6 +170,7 @@ export default function ReceivePage({
   async function handleRestore() {
     if (!plan || plan.conflict_count > 0 || !codexClosed) return;
     setError(null);
+    setSupportId(null);
     setPhase("restoring");
     onOperationStart();
     try {
@@ -172,6 +182,7 @@ export default function ReceivePage({
       // A failed attempt consumes its capability and may have rolled back writes.
       // Re-plan against the current files instead of retrying the stale snapshot.
       clearRestoreSelection();
+      setSupportId(supportIdFromError(caught));
       setError(`${errorMessage(caught)} ${t("请重新预览导入内容后重试；如提示回滚失败，请先在迁移记录中恢复。")}`);
     } finally {
       setPhase("idle");
@@ -287,6 +298,7 @@ export default function ReceivePage({
       )}
 
       {error && <p className="inline-state status-error page-error" role="alert"><XCircle aria-hidden="true" />{error}</p>}
+      {supportId && <SupportPanel key={supportId} source={{ kind: "incident", support_id: supportId }} />}
 
       {report && (
         <section className="result-panel" aria-labelledby="restore-result-title">
@@ -304,6 +316,7 @@ export default function ReceivePage({
               ?? (typeof registration.status === "object" ? registration.status.invocation_failed.message : null);
             return <div className="registration-row" key={registration.project_id}><code>{registration.project_path}</code><button className="secondary-button" type="button" onClick={() => void handleOpenRestored(registration)}><FolderOpen aria-hidden="true" />{t("在 Codex 中打开")}</button>{message && <span role="status">{message}</span>}</div>;
           })}
+          <SupportPanel key={report.transaction_id} source={{ kind: "transaction", transaction_id: report.transaction_id }} />
         </section>
       )}
     </div>

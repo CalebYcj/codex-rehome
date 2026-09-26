@@ -613,6 +613,15 @@ fn transaction_summary_from_journal(journal: TransactionJournal) -> TransactionS
     }
 }
 
+pub(crate) fn support_targets(transaction_id: Uuid) -> Result<Vec<PathBuf>, RehomeError> {
+    let path = journal_path(transaction_id)?;
+    Ok(load_validated_journal(&path, Some(transaction_id))?
+        .operations
+        .into_iter()
+        .map(|operation| operation.target)
+        .collect())
+}
+
 fn restored_project_paths(journal: &TransactionJournal) -> Vec<PathBuf> {
     let Ok(canonical_projects_root) = fs::canonicalize(&journal.projects_root) else {
         return Vec::new();
@@ -1859,7 +1868,7 @@ pub(crate) fn managed_backup_root() -> Result<PathBuf, RehomeError> {
     )
 }
 
-fn app_data_root_path() -> Result<PathBuf, RehomeError> {
+pub(crate) fn app_data_root_path() -> Result<PathBuf, RehomeError> {
     let base = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| {

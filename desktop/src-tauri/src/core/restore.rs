@@ -33,9 +33,7 @@ pub fn apply_restore(
     options: RestoreOptions,
 ) -> Result<RestoreReport, RehomeError> {
     let plan = crate::core::plan_store::load_exact(&plan)?;
-    apply_server_plan(plan, options, |target_os, project| {
-        register_project_with_detected_cli(target_os, project)
-    })
+    apply_server_plan(plan, options, register_project_with_detected_cli, |_, _| {})
 }
 
 pub fn apply_restore_by_id(
@@ -43,9 +41,16 @@ pub fn apply_restore_by_id(
     options: RestoreOptions,
 ) -> Result<RestoreReport, RehomeError> {
     let plan = crate::core::plan_store::load(plan_id)?;
-    apply_server_plan(plan, options, |target_os, project| {
-        register_project_with_detected_cli(target_os, project)
-    })
+    apply_server_plan(plan, options, register_project_with_detected_cli, |_, _| {})
+}
+
+pub fn apply_restore_by_id_observed(
+    plan_id: Uuid,
+    options: RestoreOptions,
+    observer: impl FnMut(Uuid, RecoveryStatus),
+) -> Result<RestoreReport, RehomeError> {
+    let plan = crate::core::plan_store::load(plan_id)?;
+    apply_server_plan(plan, options, register_project_with_detected_cli, observer)
 }
 
 pub fn apply_restore_with_registrar(
@@ -54,13 +59,14 @@ pub fn apply_restore_with_registrar(
     registrar: impl FnMut(SourceOs, &Path) -> RegistrationStatus,
 ) -> Result<RestoreReport, RehomeError> {
     let plan = crate::core::plan_store::load_exact(&plan)?;
-    apply_server_plan(plan, options, registrar)
+    apply_server_plan(plan, options, registrar, |_, _| {})
 }
 
 fn apply_server_plan(
     plan: RestorePlan,
     options: RestoreOptions,
     mut registrar: impl FnMut(SourceOs, &Path) -> RegistrationStatus,
+    mut observer: impl FnMut(Uuid, RecoveryStatus),
 ) -> Result<RestoreReport, RehomeError> {
     if !options.codex_closed_confirmed {
         return Err(RehomeError::new(
@@ -79,19 +85,35 @@ fn apply_server_plan(
     }
     validate_preserved_targets(&plan)?;
     let mut transaction = prepare_transaction(&plan, &options.backup_root)?;
+    observer(transaction.journal.transaction_id, RecoveryStatus::Prepared);
 
     let result = apply_transaction(&plan, &options, &verified, &mut transaction, &mut registrar);
     match result {
-        Ok(report) => Ok(report),
+        Ok(report) => {
+            observer(report.transaction_id, RecoveryStatus::Committed);
+            Ok(report)
+        }
         Err(error) => match rollback_prepared(&mut transaction) {
-            Ok(_) => Err(error),
-            Err(rollback_error) => Err(RehomeError::new(
-                ErrorCode::RollbackFailed,
-                format!(
-                    "restore failed: {}; automatic rollback failed: {}",
-                    error.message, rollback_error.message
-                ),
-            )),
+            Ok(_) => {
+                observer(
+                    transaction.journal.transaction_id,
+                    RecoveryStatus::RolledBack,
+                );
+                Err(error)
+            }
+            Err(rollback_error) => {
+                observer(
+                    transaction.journal.transaction_id,
+                    RecoveryStatus::RollbackFailed,
+                );
+                Err(RehomeError::new(
+                    ErrorCode::RollbackFailed,
+                    format!(
+                        "restore failed: {}; automatic rollback failed: {}",
+                        error.message, rollback_error.message
+                    ),
+                ))
+            }
         },
     }
 }

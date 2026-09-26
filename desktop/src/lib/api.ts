@@ -14,7 +14,23 @@ import type {
   RollbackAction,
   RollbackReport,
   TransactionHistory,
+  SupportSource,
+  SupportPreview,
+  RecheckReport,
 } from "./types";
+
+export function prepareSupport(source: SupportSource, locale: "zh-CN" | "en", userNote?: string, failureConfirmed = false): Promise<SupportPreview> {
+  return invoke("prepare_support", { selection: { source, locale, user_note: userNote ?? null, failure_confirmed: failureConfirmed } });
+}
+export function copySupportText(supportId: string, kind: "codex" | "github", locale: "zh-CN" | "en"): Promise<void> {
+  return invoke("copy_support_text", { selection: { support_id: supportId, kind, locale } });
+}
+export function openSupportIssue(supportId: string, locale: "zh-CN" | "en"): Promise<"opened" | "copy_required"> {
+  return invoke("open_support_issue", { selection: { support_id: supportId, locale } });
+}
+export function recheckSupport(supportId: string): Promise<RecheckReport> {
+  return invoke("recheck_support", { selection: { support_id: supportId } });
+}
 
 export function discoverCodex(): Promise<CodexInventory> {
   return invoke("discover_codex");
