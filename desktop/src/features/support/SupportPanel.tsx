@@ -90,10 +90,10 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
   }
 
   const incidentTitle = preview
-    ? "恢复未完成，已备好 Codex 排查内容"
+    ? "操作未完成，已备好 Codex 排查内容"
     : busy
       ? "正在整理本次失败信息…"
-      : "恢复未完成，可重新生成 Codex 排查内容";
+      : "操作未完成，可重新生成 Codex 排查内容";
 
   return (
     <section ref={panelRef} className={`support-panel${isIncident ? " support-panel-incident" : ""}`} aria-label={t("故障求助")}>

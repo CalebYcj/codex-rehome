@@ -20,7 +20,7 @@ beforeEach(() => {
 describe("support handoff", () => {
   it("opens a prominent incident solution and prepares Codex text without a help click", async () => {
     incident();
-    expect(await screen.findByText("恢复未完成，已备好 Codex 排查内容")).toBeVisible();
+    expect(await screen.findByText("操作未完成，已备好 Codex 排查内容")).toBeVisible();
     expect(screen.getByRole("button", { name: "收起" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByDisplayValue(preview.codex_text)).toBeVisible();
     expect(api.prepareSupport).toHaveBeenCalledExactlyOnceWith({ kind: "incident", support_id: "incident" }, "zh-CN", "", false);

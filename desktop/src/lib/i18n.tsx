@@ -9,8 +9,8 @@ const STORAGE_KEY = "rehome.locale";
 const english: Record<string, string> = {
   "故障求助": "Troubleshooting help",
   "需要帮助？": "Need help?",
-  "恢复未完成，已备好 Codex 排查内容": "Restore did not complete. Troubleshooting details for Codex are ready",
-  "恢复未完成，可重新生成 Codex 排查内容": "Restore did not complete. You can regenerate troubleshooting details for Codex",
+  "操作未完成，已备好 Codex 排查内容": "The operation did not complete. Troubleshooting details for Codex are ready",
+  "操作未完成，可重新生成 Codex 排查内容": "The operation did not complete. You can regenerate troubleshooting details for Codex",
   "正在整理本次失败信息…": "Preparing details from this failure…",
   "检查下方内容，复制到 Codex 的新对话。ReHome 不会自动发送或修复。": "Review the content below and copy it into a new Codex chat. ReHome will not send it or repair anything automatically.",
   "收起": "Collapse",
