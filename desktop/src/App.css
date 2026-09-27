@@ -339,11 +339,40 @@ h2 { margin: 0; color: #27312c; font-size: 16px; line-height: 1.3; letter-spacin
   .spin { animation: none; }
 }
 .support-panel { margin: 16px 0; padding: 12px; border: 1px solid #d5deda; border-radius: 8px; background: #f7faf8; }
-.support-content { display: grid; gap: 12px; }
-.support-content label { display: grid; gap: 8px; }
-.support-content textarea { width: 100%; min-height: 72px; padding: 10px; border: 1px solid #b9c8c0; border-radius: 6px; font: inherit; resize: vertical; }
-.support-content .support-preview { min-height: 250px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
-.support-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.support-panel-incident { padding: 16px; border-color: #d99c54; border-left: 5px solid #b86a25; background: #fff9f0; box-shadow: 0 2px 8px rgba(91, 60, 28, .08); scroll-margin-top: 108px; }
+.support-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.support-heading-copy { display: grid; gap: 5px; min-width: 0; }
+.support-heading-copy strong { display: flex; align-items: flex-start; gap: 8px; color: #743f1d; font-size: 15px; line-height: 1.4; }
+.support-heading-copy strong svg { width: 18px; height: 18px; margin-top: 1px; color: #b86a25; }
+.support-heading-copy span { color: #65584c; font-size: 12px; line-height: 1.5; }
+.support-collapse { flex: 0 0 auto; }
+.support-content { display: grid; gap: 11px; margin-top: 12px; }
+.support-content p { margin: 0; line-height: 1.5; }
+.support-content label { display: grid; gap: 7px; color: #3c4942; font-size: 12px; font-weight: 650; line-height: 1.45; }
+.support-content label > span { display: block; }
+.support-content textarea { width: 100%; min-height: 72px; padding: 10px; border: 1px solid #b9c8c0; border-radius: 6px; font: inherit; font-weight: 400; line-height: 1.45; resize: vertical; }
+.support-content .support-preview { min-height: 144px; height: 152px; font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.support-note { color: #526058; font-size: 12px; }
+.support-note summary { width: fit-content; cursor: pointer; line-height: 1.4; }
+.support-note textarea { margin-top: 8px; }
+.support-explainer { display: grid; gap: 6px; padding: 10px 12px; color: #526058; background: #fff; border: 1px solid #e2e8e4; border-radius: 6px; font-size: 12px; line-height: 1.45; }
+.support-preview-heading { display: grid; gap: 4px; }
+.support-preview-heading h3 { margin: 0; color: #27312c; font-size: 14px; line-height: 1.35; }
+.support-preview-heading p { color: #69766f; font-size: 11px; }
+.support-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.support-primary-actions { padding-top: 2px; }
+.support-copy-button { min-height: 42px; padding-inline: 16px; font-size: 12px; box-shadow: 0 1px 3px rgba(22, 31, 26, .1); }
+.support-copy-button svg { width: 16px; height: 16px; }
 .support-content .support-confirmation { display: flex; align-items: flex-start; flex-basis: 100%; }
 .support-confirmation input { flex: 0 0 auto; margin-top: 3px; }
-.support-checks { overflow-wrap: anywhere; font-size: 13px; }
+.support-retry { display: grid; justify-items: start; gap: 9px; padding: 12px; background: #fff; border: 1px solid #ead6bf; border-radius: 6px; }
+.support-retry p { color: #8a3f34; font-size: 12px; }
+.support-inline-status { color: #526058; font-size: 12px; }
+.support-followup { padding-top: 10px; color: #69766f; font-size: 11px; border-top: 1px solid #e2e8e4; }
+.support-checks { display: grid; gap: 6px; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.support-checks ul { margin: 0; padding-left: 20px; line-height: 1.5; }
+
+@media (max-width: 680px) {
+  .support-panel-heading { flex-direction: column; }
+  .support-collapse { align-self: flex-start; }
+}
