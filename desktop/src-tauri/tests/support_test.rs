@@ -27,12 +27,57 @@ fn prepare_support_agent_acceptance_fixture() {
     fs::write(&guide, render::guide(Locale::En)).unwrap();
     fs::write(
         root.join("handoff.txt"),
-        render::codex_text(&snapshot, Locale::En, Some(&diagnostic), Some(&guide)),
+        render::codex_text_with_recheck(
+            &snapshot,
+            Locale::En,
+            Some(&diagnostic),
+            Some(&guide),
+            Some(&recheck::run(&snapshot)),
+        ),
     )
     .unwrap();
     fs::write(
         root.join("before.json"),
         serde_json::to_vec_pretty(&recheck::run(&snapshot)).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "set REHOME_SUPPORT_FIXTURE_ROOT to the existing isolated agent acceptance directory"]
+fn verify_support_agent_acceptance_fixture_after_repair() {
+    let root = std::path::PathBuf::from(std::env::var_os("REHOME_SUPPORT_FIXTURE_ROOT").unwrap());
+    assert!(root.is_absolute() && root.is_dir());
+    let support_files = fs::read_dir(root.join("support"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(support_files.len(), 1);
+    let id = support_files[0]
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let snapshot = storage::load(&root.join("support"), id).unwrap();
+    let report = recheck::run(&snapshot);
+    assert!(report
+        .checks
+        .iter()
+        .any(|check| check.code == "project_exists" && check.status == CheckStatus::Pass));
+    assert!(!report
+        .checks
+        .iter()
+        .any(|check| check.code == "project_missing"));
+    assert!(report
+        .checks
+        .iter()
+        .any(|check| check.code == "conversation_not_verified"
+            && check.status == CheckStatus::Unknown));
+    fs::write(
+        root.join("after.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
 }
@@ -307,4 +352,23 @@ fn handoff_requires_observed_error_or_explicit_failure_confirmation() {
         "synthetic failure",
     ));
     assert!(snapshot.can_handoff());
+}
+
+#[test]
+fn handoff_includes_scoped_observed_checks_when_local_files_are_unreadable() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("projects/示例项目");
+    let mut snapshot = SupportSnapshot::new(Stage::UserReported);
+    snapshot.user_confirmed_failure = true;
+    snapshot.transaction_status = Some(RecoveryStatus::Committed);
+    snapshot.project_paths.push(missing.clone());
+    snapshot.user_note = Some("The project seems missing".into());
+    let report = recheck::run(&snapshot);
+    let handoff = render::codex_text_with_recheck(&snapshot, Locale::En, None, None, Some(&report));
+    assert!(handoff.contains(&serde_json::to_string(&missing).unwrap()));
+    assert!(handoff.contains("project_missing"));
+    assert!(handoff.contains("conversation_not_verified"));
+    assert!(handoff.contains(&report.checked_at));
+    assert!(handoff.len() <= 8192);
+    assert!(!render::public_text(&snapshot, Locale::En).contains(&missing.display().to_string()));
 }

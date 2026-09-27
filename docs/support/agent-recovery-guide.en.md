@@ -8,6 +8,8 @@ ReHome migrates selected Codex projects, conversations, Skills, plugins and gene
 
 The incident is minimal evidence, not a full log. Missing fields are unknown; user_note is a user report, not a verified cause. verification_at_import describes the past, not current health. Deleting the original package after successful import does not imply lost target chats. Conversation-only imports need not contain project source files.
 
+The copied handoff includes a bounded, timestamped `basic_recheck` for the incident. Use its observed checks when local file access is unavailable, and keep omitted checks and unknown results explicit. A later copy can be refreshed from ReHome; a passing file check still does not establish that a chat opens.
+
 ## Procedure
 
 Confirm failure before repair. An observed error or a user's failed attempt to open the original chat after restarting is a diagnostic starting point, not proof of cause. Unknown verification, registration success and passing file checks do not justify repairs. Diagnose read-only first; if a fault cannot be established, do not write and report it as unknown. Export, package-selection or planning errors do not authorize changes to restored chats.

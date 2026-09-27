@@ -9,6 +9,7 @@ use crate::core::{
     models::{PackagePreview, ReferenceRewriteKind, RestorePlan, TransactionSummary},
 };
 use models::*;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -16,9 +17,12 @@ use std::{
 };
 use uuid::Uuid;
 
+type PreviewCache = HashMap<(Uuid, bool), ([u8; 32], String)>;
+
 #[derive(Clone, Default)]
 pub struct SupportService {
     entries: Arc<Mutex<HashMap<Uuid, SupportSnapshot>>>,
+    previews: Arc<Mutex<PreviewCache>>,
     root_override: Option<PathBuf>,
 }
 pub(crate) fn failure() -> RehomeError {
@@ -42,6 +46,7 @@ impl SupportService {
         }
     }
     pub fn record(&self, snapshot: SupportSnapshot) {
+        let support_id = snapshot.support_id;
         if let Ok(root) = self.root() {
             let _ = storage::save(&root, &snapshot);
         }
@@ -53,9 +58,15 @@ impl SupportService {
                     .map(|s| s.support_id)
                 {
                     entries.remove(&id);
+                    if let Ok(mut previews) = self.previews.lock() {
+                        previews.retain(|(key, _), _| *key != id);
+                    }
                 }
             }
             entries.insert(snapshot.support_id, snapshot);
+        }
+        if let Ok(mut previews) = self.previews.lock() {
+            previews.retain(|(key, _), _| *key != support_id);
         }
     }
     pub fn incident(&self, id: Uuid) -> Result<SupportSnapshot, RehomeError> {
@@ -119,14 +130,33 @@ impl SupportService {
             .root()
             .ok()
             .and_then(|root| storage::save_guide(&root.join("guides"), locale).ok());
-        let preview = SupportPreview {
-            support_id: snapshot.support_id,
-            codex_text: render::codex_text(
+        let cache_key = (snapshot.support_id, locale.is_zh());
+        let fingerprint: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&(snapshot, &path, &guide_path)).unwrap_or_default())
+                .into();
+        let cached = self
+            .previews
+            .lock()
+            .ok()
+            .and_then(|previews| previews.get(&cache_key).cloned())
+            .and_then(|(previous, text)| (previous == fingerprint).then_some(text));
+        let codex_text = cached.unwrap_or_else(|| {
+            let report = snapshot.can_handoff().then(|| recheck::run(snapshot));
+            let text = render::codex_text_with_recheck(
                 snapshot,
                 locale,
                 path.as_deref(),
                 guide_path.as_deref(),
-            ),
+                report.as_ref(),
+            );
+            if let Ok(mut previews) = self.previews.lock() {
+                previews.insert(cache_key, (fingerprint, text.clone()));
+            }
+            text
+        });
+        let preview = SupportPreview {
+            support_id: snapshot.support_id,
+            codex_text,
             github_text: render::public_text(snapshot, locale),
             reveal_id: None,
             saved: path.is_some(),
@@ -209,5 +239,34 @@ fn bind_transaction(snapshot: &mut SupportSnapshot, summary: &TransactionSummary
         } else if !snapshot.project_paths.contains(path) {
             snapshot.projects_truncated = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::models::RecoveryStatus;
+
+    #[test]
+    fn copied_handoff_matches_preview_until_refreshed() {
+        let root = tempfile::tempdir().unwrap();
+        let service = SupportService::with_root(root.path().join("support"));
+        let project = root.path().join("projects/demo");
+        let mut snapshot = SupportSnapshot::new(Stage::UserReported);
+        snapshot.user_confirmed_failure = true;
+        snapshot.transaction_status = Some(RecoveryStatus::Committed);
+        snapshot.project_paths.push(project.clone());
+        service.record(snapshot.clone());
+
+        let first = service.preview(&snapshot, Locale::En).0.codex_text;
+        assert!(first.contains("project_missing"));
+        std::fs::create_dir_all(&project).unwrap();
+        let copied = service.preview(&snapshot, Locale::En).0.codex_text;
+        assert_eq!(first, copied);
+
+        service.record(snapshot.clone());
+        let refreshed = service.preview(&snapshot, Locale::En).0.codex_text;
+        assert!(refreshed.contains("project_exists"));
+        assert_ne!(first, refreshed);
     }
 }
