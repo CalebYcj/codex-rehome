@@ -11,6 +11,7 @@ import {
 
 import { listTransactions, openPath, rollbackTransaction } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
+import SupportPanel from "../support/SupportPanel";
 import { errorMessage, type RecoveryStatus, type RollbackAction, type TransactionSummary } from "../../lib/types";
 
 interface HistoryPageProps {
@@ -116,6 +117,7 @@ export default function HistoryPage({
                 ))}
                 <button className="rollback-button" type="button" aria-label={t(resumable ? "继续回滚事务" : "回滚此事务")} disabled={(!committed && !resumable) || busy} onClick={() => void handleRollback(transaction, rollbackAction)}>{busy ? <LoaderCircle className="spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t(resumable ? "继续回滚" : "回滚")}</button>
               </div>
+              <SupportPanel source={{ kind: "transaction", transaction_id: transaction.transaction_id }} />
             </article>
           );
         })}

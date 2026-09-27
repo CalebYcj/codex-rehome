@@ -63,6 +63,14 @@ If restored conversations are missing from a project, also compare the two compu
 
 ## Install and help
 
+Expand **Need help?** after an export, package inspection or import error. Import results and History also offer **Can't open a chat? Get help**.
+
+- **Copy for Codex**: preview, then paste into a new Codex chat on this computer. The handoff includes product context, incident locations and safety instructions. No Skill is required; the [Agent recovery guide](docs/support/agent-recovery-guide.en.md) is bundled for offline access.
+- **Report on GitHub**: preview a separately generated public summary, then open GitHub and submit it yourself. No diagnostic file or migration package is automatically uploaded.
+- **Recheck data**: read-only basic file and limited index checks. This does not open the database or repair data; opening and continuing the original chat is a separate verification.
+
+Private diagnostics may contain full paths and error excerpts. Content pasted into Codex is processed by your configured model service; review before sending. The public summary excludes local paths, raw errors and additional notes. Up to 50 reports are stored separately in ReHome's local application data directory; an in-memory summary remains available if saving fails. Missing evidence in older records is explicitly unverified. Do not let a running Codex edit its own conversation database.
+
 Starting with `v0.1.4`, ReHome Desktop can check, verify, and install signed updates inside the app. Users on `v0.1.3` or earlier must install one final release manually. The updater signature prevents tampered update packages; it is separate from paid Apple or Windows publisher signing, so the operating system may still show an unknown-developer warning.
 
 The interface starts in Chinese. Click `English` in the sidebar; ReHome remembers the choice on this device.

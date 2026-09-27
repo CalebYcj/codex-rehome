@@ -16,8 +16,10 @@ import {
 
 import { createPackage, openPath } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
+import SupportPanel from "../support/SupportPanel";
 import {
   errorMessage,
+  supportIdFromError,
   type CodexInventory,
   type ConversationEntry,
   type CreatePackageReport,
@@ -47,6 +49,7 @@ export default function SendPage({
   const [report, setReport] = useState<CreatePackageReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [supportId, setSupportId] = useState<string | null>(null);
 
   const projectGroups = useMemo(() => {
     if (!inventory) return [];
@@ -145,6 +148,7 @@ export default function SendPage({
   async function handleCreate() {
     if (!inventory || !canCreate) return;
     setError(null);
+    setSupportId(null);
     setBusy(true);
     onOperationStart();
     try {
@@ -164,6 +168,7 @@ export default function SendPage({
         }
       }
     } catch (caught) {
+      setSupportId(supportIdFromError(caught));
       const message = errorMessage(caught);
       if (message.includes("source file kept changing while being copied")) {
         setError(t("有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n{message}", { message }));
@@ -303,6 +308,7 @@ export default function SendPage({
           </button>
         </div>
         {error && <p className="inline-state status-error" role="alert">{error}</p>}
+        {supportId && <SupportPanel key={supportId} source={{ kind: "incident", support_id: supportId }} />}
       </section>
 
       {report && (

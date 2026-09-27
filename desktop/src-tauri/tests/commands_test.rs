@@ -11,11 +11,18 @@ const COMMANDS: &[&str] = &[
     "rollback_transaction",
     "open_path",
     "open_restored_thread",
+    "prepare_support",
+    "copy_support_text",
+    "open_support_issue",
+    "recheck_support",
 ];
 
 #[test]
-fn desktop_registers_exactly_the_nine_reviewed_commands() {
-    assert_eq!(WORKFLOW_SOURCE.matches("#[tauri::command]").count(), 9);
+fn desktop_registers_exactly_the_reviewed_commands() {
+    assert_eq!(
+        WORKFLOW_SOURCE.matches("#[tauri::command]").count(),
+        COMMANDS.len()
+    );
     for command in COMMANDS {
         assert!(
             APP_SOURCE.contains(&format!("workflow::{command}")),
@@ -37,6 +44,6 @@ fn every_custom_command_is_async() {
 
 #[test]
 fn restore_application_uses_only_the_opaque_core_plan_id() {
-    assert!(WORKFLOW_SOURCE.contains("apply_restore_by_id("));
+    assert!(WORKFLOW_SOURCE.contains("apply_restore_by_id_observed("));
     assert!(!WORKFLOW_SOURCE.contains("pub async fn apply_restore(\n    plan:"));
 }

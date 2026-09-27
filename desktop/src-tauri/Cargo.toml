@@ -1,6 +1,6 @@
 [package]
 name = "rehome-desktop"
-version = "0.1.27"
+version = "0.1.28"
 description = "ReHome Desktop migration utility"
 authors = ["ReHome contributors"]
 edition = "2021"
@@ -24,6 +24,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-process = "2"
+tauri-plugin-clipboard-manager = "=2.3.3"
 tempfile = "3"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }

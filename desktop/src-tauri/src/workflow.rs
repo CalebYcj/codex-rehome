@@ -4,9 +4,9 @@ use crate::core::{
     discovery::discover_codex as core_discover_codex,
     error::{ErrorCode, RehomeError},
     models::{
-        CodexInventory, CreatePackageReport, CreatePackageRequest, FileConflictResolution,
-        PackagePreview, RecoveryStatus, RegistrationStatus, RestoreOptions, RestorePlan,
-        RestoreReport, RollbackReport, SourceOs, TargetInventory, TransactionHistory,
+        CodexInventory, ContentCounts, CreatePackageReport, CreatePackageRequest,
+        FileConflictResolution, PackagePreview, RecoveryStatus, RegistrationStatus, RestoreOptions,
+        RestorePlan, RestoreReport, RollbackReport, SourceOs, TargetInventory, TransactionHistory,
         TransactionSummary,
     },
     package::{
@@ -15,10 +15,11 @@ use crate::core::{
     },
     planner::build_restore_plan_with_conflict_resolution as core_build_restore_plan,
     restore::{
-        apply_restore_by_id, list_transaction_history as core_list_transaction_history,
+        apply_restore_by_id_observed, list_transaction_history as core_list_transaction_history,
         rollback as core_rollback, transaction_summary as core_transaction_summary,
     },
 };
+use crate::support::{self, models::*, SupportService};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -29,6 +30,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, State, WebviewWindow};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
@@ -126,6 +128,7 @@ pub struct OpenRestoredThreadSelection {
 #[derive(Clone, Default)]
 pub struct WorkflowState {
     inner: Arc<Mutex<WorkflowGrants>>,
+    support: SupportService,
 }
 
 #[derive(Default)]
@@ -158,6 +161,7 @@ struct PackageGrant {
 struct RestorePlanGrant {
     backup_root: PathBuf,
     state: GrantState,
+    package_facts: Option<(SourceOs, u32, ContentCounts)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,6 +175,7 @@ pub(crate) struct PlanClaim {
     plan_id: Uuid,
     pub(crate) backup_root: PathBuf,
     finished: bool,
+    package_facts: Option<(SourceOs, u32, ContentCounts)>,
 }
 
 impl PlanClaim {
@@ -348,6 +353,7 @@ impl WorkflowState {
             timed(RestorePlanGrant {
                 backup_root,
                 state: GrantState::Available,
+                package_facts: None,
             }),
         );
         Ok(())
@@ -374,6 +380,7 @@ impl WorkflowState {
             plan_id,
             backup_root: grant.value.backup_root.clone(),
             finished: false,
+            package_facts: grant.value.package_facts.clone(),
         })
     }
 
@@ -454,9 +461,9 @@ pub async fn create_package(
     window: WebviewWindow,
     state: State<'_, WorkflowState>,
     selection: CreatePackageSelection,
-) -> Result<Option<CreatedPackage>, RehomeError> {
+) -> Result<Option<CreatedPackage>, SupportFailure> {
     let state = state.inner().clone();
-    run_blocking(ErrorCode::PackageInvalid, move || {
+    run_supported(Stage::Export, state.support.clone(), move |snapshot| {
         let Some(selected) = app
             .dialog()
             .file()
@@ -469,7 +476,10 @@ pub async fn create_package(
             return Ok(None);
         };
         let output_path = canonical_save_path(selected)?;
+        snapshot.package_path = Some(output_path.clone());
         let inventory = core_discover_codex(None)?;
+        snapshot.codex_home = Some(inventory.codex_home.clone());
+        snapshot.source_os = Some(inventory.source_os);
         let request = resolve_create_package_request(&inventory, selection, output_path)?;
         // The native save dialog only returns an existing filename after the user confirms replace.
         let report = core_create_package_replacing(request)?;
@@ -490,9 +500,9 @@ pub async fn inspect_package(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, WorkflowState>,
-) -> Result<Option<InspectedPackage>, RehomeError> {
+) -> Result<Option<InspectedPackage>, SupportFailure> {
     let state = state.inner().clone();
-    run_blocking(ErrorCode::PackageInvalid, move || {
+    run_supported(Stage::Inspect, state.support.clone(), move |snapshot| {
         let Some(selected) = app
             .dialog()
             .file()
@@ -504,6 +514,7 @@ pub async fn inspect_package(
             return Ok(None);
         };
         let path = canonical_existing_file(&selected_path(selected)?)?;
+        snapshot.package_path = Some(path.clone());
         if !has_rehome_extension(&path) {
             return Err(selection_failed(
                 ErrorCode::PackageInvalid,
@@ -511,6 +522,7 @@ pub async fn inspect_package(
             ));
         }
         let preview = core_inspect_package(&path)?;
+        support::capture_package(snapshot, &preview);
         let selection_id = state.grant_inspected_package(path, preview.archive_hash.clone())?;
         Ok(Some(InspectedPackage {
             selection_id,
@@ -526,69 +538,89 @@ pub async fn build_restore_plan(
     window: WebviewWindow,
     state: State<'_, WorkflowState>,
     request: BuildRestorePlanRequest,
-) -> Result<Option<BuildRestorePlanResponse>, RehomeError> {
+) -> Result<Option<BuildRestorePlanResponse>, SupportFailure> {
     let state = state.inner().clone();
-    run_blocking(ErrorCode::RestoreFailed, move || match request {
-        BuildRestorePlanRequest::SelectDestinations {
-            package_selection_id,
-        } => {
-            let package_path = state.resolve_package(package_selection_id)?;
-            let package = core_inspect_package(&package_path)?;
-            state.validate_package_grant(package_selection_id, &package.archive_hash)?;
-            let inventory = core_discover_codex(None)?;
-            let projects_root = if package.manifest.projects.is_empty() {
-                default_unused_projects_root(&inventory.codex_home)?
-            } else {
-                let Some(projects) = app
-                    .dialog()
-                    .file()
-                    .set_parent(&window)
-                    .set_title("选择项目目录")
-                    .blocking_pick_folder()
-                else {
-                    return Ok(None);
-                };
-                canonical_existing_directory(&selected_path(projects)?)?
-            };
-            let backup_root = managed_backup_root()?;
-            validate_restore_location_separation(&projects_root, &backup_root)?;
-            let selection_id = state.grant_restore_locations(
+    run_supported(
+        Stage::Plan,
+        state.support.clone(),
+        move |snapshot| match request {
+            BuildRestorePlanRequest::SelectDestinations {
                 package_selection_id,
-                projects_root.clone(),
-                backup_root.clone(),
-            );
-            Ok(Some(BuildRestorePlanResponse::Destinations {
-                selection_id,
-                target_codex_home: inventory.codex_home,
-                projects_root,
-                backup_root,
-            }))
-        }
-        BuildRestorePlanRequest::Build {
-            package_selection_id,
-            destination_selection_id,
-            conflict_resolution,
-        } => {
-            let package_path = state.resolve_package(package_selection_id)?;
-            let (projects_root, backup_root) =
-                state.resolve_restore_locations(package_selection_id, destination_selection_id)?;
-            let package = core_inspect_package(&package_path)?;
-            state.validate_package_grant(package_selection_id, &package.archive_hash)?;
-            let inventory = core_discover_codex(None)?;
-            let target = TargetInventory {
-                codex_home: inventory.codex_home,
-                target_os: inventory.source_os,
-                target_arch: inventory.source_arch,
-                counts: inventory.counts,
-                projects: inventory.projects,
-                conversations: inventory.conversations,
-            };
-            let plan =
-                core_build_restore_plan(&package, &target, &projects_root, conflict_resolution)?;
-            state.grant_plan(plan.plan_id, backup_root)?;
-            Ok(Some(BuildRestorePlanResponse::Plan { plan }))
-        }
-    })
+            } => {
+                snapshot.stage = Stage::Destinations;
+                let package_path = state.resolve_package(package_selection_id)?;
+                let package = core_inspect_package(&package_path)?;
+                support::capture_package(snapshot, &package);
+                state.validate_package_grant(package_selection_id, &package.archive_hash)?;
+                let inventory = core_discover_codex(None)?;
+                snapshot.codex_home = Some(inventory.codex_home.clone());
+                let projects_root = if package.manifest.projects.is_empty() {
+                    default_unused_projects_root(&inventory.codex_home)?
+                } else {
+                    let Some(projects) = app
+                        .dialog()
+                        .file()
+                        .set_parent(&window)
+                        .set_title("选择项目目录")
+                        .blocking_pick_folder()
+                    else {
+                        return Ok(None);
+                    };
+                    canonical_existing_directory(&selected_path(projects)?)?
+                };
+                let backup_root = managed_backup_root()?;
+                validate_restore_location_separation(&projects_root, &backup_root)?;
+                let selection_id = state.grant_restore_locations(
+                    package_selection_id,
+                    projects_root.clone(),
+                    backup_root.clone(),
+                );
+                Ok(Some(BuildRestorePlanResponse::Destinations {
+                    selection_id,
+                    target_codex_home: inventory.codex_home,
+                    projects_root,
+                    backup_root,
+                }))
+            }
+            BuildRestorePlanRequest::Build {
+                package_selection_id,
+                destination_selection_id,
+                conflict_resolution,
+            } => {
+                let package_path = state.resolve_package(package_selection_id)?;
+                let (projects_root, backup_root) = state
+                    .resolve_restore_locations(package_selection_id, destination_selection_id)?;
+                let package = core_inspect_package(&package_path)?;
+                support::capture_package(snapshot, &package);
+                state.validate_package_grant(package_selection_id, &package.archive_hash)?;
+                let inventory = core_discover_codex(None)?;
+                snapshot.codex_home = Some(inventory.codex_home.clone());
+                let target = TargetInventory {
+                    codex_home: inventory.codex_home,
+                    target_os: inventory.source_os,
+                    target_arch: inventory.source_arch,
+                    counts: inventory.counts,
+                    projects: inventory.projects,
+                    conversations: inventory.conversations,
+                };
+                let plan = core_build_restore_plan(
+                    &package,
+                    &target,
+                    &projects_root,
+                    conflict_resolution,
+                )?;
+                state.grant_plan(plan.plan_id, backup_root)?;
+                if let Some(grant) = state.grants().plans.get_mut(&plan.plan_id) {
+                    grant.value.package_facts = Some((
+                        package.manifest.source_os,
+                        package.manifest.schema_version,
+                        package.manifest.counts.clone(),
+                    ));
+                }
+                Ok(Some(BuildRestorePlanResponse::Plan { plan }))
+            }
+        },
+    )
     .await
 }
 
@@ -596,18 +628,36 @@ pub async fn build_restore_plan(
 pub async fn apply_restore(
     state: State<'_, WorkflowState>,
     selection: ApplyRestoreSelection,
-) -> Result<RestoreReport, RehomeError> {
+) -> Result<RestoreReport, SupportFailure> {
     let state = state.inner().clone();
-    run_blocking(ErrorCode::RestoreFailed, move || {
+    run_supported(Stage::Apply, state.support.clone(), move |snapshot| {
         let claim = state.claim_plan(selection.plan_id)?;
-        let result = apply_restore_by_id(
+        if let Some((source_os, schema, counts)) = &claim.package_facts {
+            snapshot.source_os = Some(*source_os);
+            snapshot.package_schema = Some(*schema);
+            snapshot.counts = Some(counts.clone());
+        }
+        if let Ok(plan) = crate::core::plan_store::load(selection.plan_id) {
+            support::capture_plan(snapshot, &plan);
+        }
+        let result = apply_restore_by_id_observed(
             selection.plan_id,
             RestoreOptions {
                 codex_closed_confirmed: selection.codex_closed_confirmed,
                 backup_root: claim.backup_root.clone(),
                 register_projects: selection.register_projects,
             },
+            |id, status| {
+                snapshot.transaction_id = Some(id);
+                snapshot.transaction_status = Some(status);
+            },
         );
+        if let Ok(report) = &result {
+            snapshot.verification_at_import = Some(report.verification.clone());
+            if !report.verification.app_registration_valid && !report.registrations.is_empty() {
+                snapshot.error_code = Some(ErrorCode::RegistrationIncomplete);
+            }
+        }
         match result {
             Err(error) if error.code == ErrorCode::CodexRunning => {
                 claim.restore_available();
@@ -615,6 +665,138 @@ pub async fn apply_restore(
             }
             result => result,
         }
+    })
+    .await
+}
+
+async fn run_supported<T, F>(
+    stage: Stage,
+    service: SupportService,
+    operation: F,
+) -> Result<T, SupportFailure>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut SupportSnapshot) -> Result<T, RehomeError> + Send + 'static,
+{
+    let fallback = SupportSnapshot::new(stage);
+    let result = run_blocking(ErrorCode::RestoreFailed, move || {
+        let mut snapshot = SupportSnapshot::new(stage);
+        let result = operation(&mut snapshot);
+        Ok((result, snapshot))
+    })
+    .await;
+    let (result, mut snapshot) = match result {
+        Ok(pair) => pair,
+        Err(error) => (Err(error), fallback),
+    };
+    if let Err(error) = &result {
+        snapshot.record_error(error);
+    }
+    let snapshot = service.refresh(snapshot);
+    let id = snapshot.support_id;
+    if result.is_err() || snapshot.transaction_id.is_some() {
+        service.record(snapshot);
+    }
+    result.map_err(|error| SupportFailure {
+        error,
+        support_id: id,
+    })
+}
+
+#[tauri::command]
+pub async fn prepare_support(
+    state: State<'_, WorkflowState>,
+    selection: PrepareSelection,
+) -> Result<SupportPreview, RehomeError> {
+    let state = state.inner().clone();
+    run_blocking(ErrorCode::RestoreFailed, move || {
+        let mut snapshot = match selection.source {
+            SupportSource::Incident { support_id } => state.support.incident(support_id)?,
+            SupportSource::Transaction { transaction_id } => state
+                .support
+                .transaction(&open_transaction_by_id(transaction_id)?),
+        };
+        snapshot = state.support.refresh(snapshot);
+        snapshot.user_confirmed_failure = selection.failure_confirmed;
+        if let Some(note) = selection.user_note {
+            snapshot.user_note = Some(support::render::private_excerpt(
+                &support::render::truncate(&note, 2048),
+            ));
+        }
+        state.support.record(snapshot.clone());
+        let (mut preview, path) = state.support.preview(&snapshot, selection.locale);
+        preview.reveal_id = path
+            .and_then(|p| fs::canonicalize(p).ok())
+            .map(|p| state.grant_reveal_path(p));
+        Ok(preview)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn copy_support_text(
+    app: AppHandle,
+    state: State<'_, WorkflowState>,
+    selection: CopySelection,
+) -> Result<(), RehomeError> {
+    let state = state.inner().clone();
+    run_blocking(ErrorCode::RestoreFailed, move || {
+        let snapshot = state.support.incident(selection.support_id)?;
+        if matches!(selection.kind, TextKind::Codex) && !snapshot.can_handoff() {
+            return Err(open_failed(
+                "confirm the original chat still fails before requesting Codex repair",
+            ));
+        }
+        let (preview, _) = state.support.preview(&snapshot, selection.locale);
+        let text = match selection.kind {
+            TextKind::Codex => preview.codex_text,
+            TextKind::Github => preview.github_text,
+        };
+        app.clipboard()
+            .write_text(text)
+            .map_err(|_| open_failed("clipboard unavailable; select and copy the preview text"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn open_support_issue(
+    app: AppHandle,
+    state: State<'_, WorkflowState>,
+    selection: IssueSelection,
+) -> Result<IssueOpenResult, RehomeError> {
+    let state = state.inner().clone();
+    run_blocking(ErrorCode::RestoreFailed, move || {
+        let snapshot = state.support.incident(selection.support_id)?;
+        let url = support::render::issue_url(&snapshot, selection.locale);
+        app.opener()
+            .open_url(
+                url.as_deref().unwrap_or(support::render::ISSUE_URL),
+                None::<&str>,
+            )
+            .map_err(|_| {
+                open_failed("browser unavailable; copy the public summary and open GitHub manually")
+            })?;
+        Ok(if url.is_some() {
+            IssueOpenResult::Opened
+        } else {
+            IssueOpenResult::CopyRequired
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn recheck_support(
+    state: State<'_, WorkflowState>,
+    selection: RecheckSelection,
+) -> Result<RecheckReport, RehomeError> {
+    let state = state.inner().clone();
+    run_blocking(ErrorCode::RestoreFailed, move || {
+        let snapshot = state
+            .support
+            .refresh(state.support.incident(selection.support_id)?);
+        Ok(support::recheck::run(&snapshot))
     })
     .await
 }
@@ -1093,6 +1275,47 @@ fn open_failed(message: impl Into<String>) -> RehomeError {
     RehomeError::new(ErrorCode::RestoreFailed, message)
 }
 
+#[cfg(test)]
+mod support_workflow_tests {
+    use super::*;
+    #[test]
+    fn help_storage_failure_preserves_original_error_and_memory_context() {
+        let root = tempfile::tempdir().unwrap();
+        let blocked = root.path().join("not-a-directory");
+        fs::write(&blocked, "keep").unwrap();
+        let service = SupportService::with_root(blocked);
+        let result =
+            tauri::async_runtime::block_on(run_supported(Stage::Inspect, service.clone(), |_| {
+                Err::<(), _>(RehomeError::new(
+                    ErrorCode::ChecksumMismatch,
+                    "original checksum error",
+                ))
+            }))
+            .unwrap_err();
+        assert_eq!(result.error.code, ErrorCode::ChecksumMismatch);
+        assert_eq!(result.error.message, "original checksum error");
+        let snapshot = service.incident(result.support_id).unwrap();
+        let (preview, path) = service.preview(&snapshot, Locale::En);
+        assert!(!preview.saved);
+        assert!(path.is_none());
+        assert!(preview.codex_text.contains("checksum_mismatch"));
+        assert!(!preview.codex_text.contains("not-a-directory"));
+        assert!(service.incident(Uuid::new_v4()).is_err());
+    }
+    #[test]
+    fn cancelled_and_successful_non_import_operations_do_not_create_incidents() {
+        let root = tempfile::tempdir().unwrap();
+        let support_root = root.path().join("support");
+        let service = SupportService::with_root(support_root.clone());
+        let result = tauri::async_runtime::block_on(run_supported(Stage::Inspect, service, |_| {
+            Ok(None::<()>)
+        }))
+        .unwrap();
+        assert!(result.is_none());
+        assert!(!support_root.exists());
+    }
+}
+
 fn ensure_codex_desktop_is_closed() -> Result<(), RehomeError> {
     if codex_desktop_is_running()? {
         return Err(RehomeError::new(
@@ -1187,6 +1410,7 @@ mod grant_tests {
                 value: RestorePlanGrant {
                     backup_root: PathBuf::from("C:\\backups"),
                     state: GrantState::InFlight,
+                    package_facts: None,
                 },
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
