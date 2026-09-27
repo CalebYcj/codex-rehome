@@ -12,14 +12,14 @@ The copied handoff includes a bounded, timestamped `basic_recheck` for the incid
 
 ## Procedure
 
-Confirm failure before repair. An observed error or a user's failed attempt to open the original chat after restarting is a diagnostic starting point, not proof of cause. Unknown verification, registration success and passing file checks do not justify repairs. Diagnose read-only first; if a fault cannot be established, do not write and report it as unknown. Export, package-selection or planning errors do not authorize changes to restored chats.
+Confirm failure before repair. An observed error, or a report that the original project/chat is still missing or the chat still will not open after restarting, is a diagnostic starting point, not proof of cause. Unknown verification, registration success and passing file checks do not justify repairs. Diagnose read-only first; if a fault cannot be established, do not write and report it as unknown. Export, package-selection or planning errors do not authorize changes to restored chats.
 
 1. Read stage, error_code, transaction_status, backup location and target IDs/paths. Access only incident-scoped objects; do not scan the entire profile.
 2. Distinguish prepared/applying/verifying, committed, rolled_back and rollback_failed. Without a transaction ID, writes may not have started; never guess the latest transaction. For failed rollback, assess subsequent modifications and prefer ReHome's History recovery controls.
 3. Compare the relevant project, session header, index and thread metadata. Do not collect chat contents. Do not globally replace path separators: native filesystem paths and Codex project keys may have different representations.
 4. Inspect SQLite only using a safe consistent snapshot or after relevant processes are stopped. A running Codex writes SQLite/WAL, rollouts and indexes; it must not edit its own live state.
 5. Propose an evidence-based minimal fix. Back up affected files and necessary SQLite sidecars before changes, with a recovery procedure. Explain risks and obtain consent for shutdown, offline execution or configuration changes; do not terminate your own process first.
-6. Run ReHome's data recheck afterward. It checks basic files/limited indexes, not the database or application behavior. Have the user open the original conversation, confirm old messages and send a continuation; restart and repeat when relevant. Report diagnosis, changes, data checks and actual continuation separately.
+6. Run ReHome's data recheck afterward. It checks basic files/limited indexes, not the database or application behavior. Have the user confirm the original project or chat is visible and old messages remain, then open the original chat and send a continuation; restart and repeat when relevant. Report diagnosis, changes, data checks and actual continuation separately.
 
 ## Known issues are hypotheses until verified
 

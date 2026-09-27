@@ -40,15 +40,16 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
   }
   return <section className="support-panel" aria-label={t("故障求助")}>
     <button className="icon-text-button" type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
-      {t(source.kind === "incident" ? "需要帮助？" : "会话打不开？获取帮助")}
+      {t(source.kind === "incident" ? "需要帮助？" : "项目或对话找不到、打不开？获取帮助")}
     </button>
     {expanded && <div className="support-content">
       <p>{t("ReHome 会整理本次情况，由你决定交给 Codex 或提交到 GitHub。不会自动上传或修复。")}</p>
-      <label>{t("补充情况（可选，仅用于本机求助）")}<textarea maxLength={2048} value={note} disabled={busy} onChange={e => { setNote(e.target.value); setPreview(null); setStatus(null); }} /></label>
+      <p>{t("先生成求助内容并检查预览，再复制到本机 Codex 的新对话中发送。无需安装 Skill；Codex 会先排查，涉及关闭 Codex 的操作需要你同意。")}</p>
+      <label>{t("补充情况（可选，仅用于本机求助）")}<textarea maxLength={2048} placeholder={t("例如：导入后左栏找不到项目；点击原对话时显示的报错。")} value={note} disabled={busy} onChange={e => { setNote(e.target.value); setPreview(null); setStatus(null); }} /></label>
       <div className="support-actions">
-        {source.kind === "transaction" && <label className="support-confirmation"><input type="checkbox" checked={failureConfirmed} disabled={busy} onChange={e => { setFailureConfirmed(e.target.checked); setPreview(null); setChecks(null); setStatus(null); }} />{t("我已重启 Codex 并尝试打开原对话，仍然失败")}</label>}
-        <button className="secondary-button" disabled={busy || (source.kind === "transaction" && !failureConfirmed)} onClick={() => void action(() => prepare("codex"))}>{t("复制到 Codex")}</button>
-        <button className="secondary-button" disabled={busy} onClick={() => void action(() => prepare("github"))}>{t("到 GitHub 提交问题")}</button>
+        {source.kind === "transaction" && <label className="support-confirmation"><input type="checkbox" checked={failureConfirmed} disabled={busy} onChange={e => { setFailureConfirmed(e.target.checked); setPreview(null); setChecks(null); setStatus(null); }} />{t("我已重启 Codex，原项目或对话仍找不到，或原对话仍打不开")}</label>}
+        <button className="secondary-button" disabled={busy || (source.kind === "transaction" && !failureConfirmed)} onClick={() => void action(() => prepare("codex"))}>{t("生成给 Codex 的求助内容")}</button>
+        <button className="secondary-button" disabled={busy} onClick={() => void action(() => prepare("github"))}>{t("预览 GitHub 问题")}</button>
       </div>
       {preview && <>
         <h3>{t(mode === "codex" ? "将交给 Codex 的内容" : "将公开的摘要")}</h3>
@@ -61,8 +62,8 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
           <button className="secondary-button" disabled={busy} onClick={() => void action(async () => {
             const current = generation.current;
             await copySupportText(preview.support_id, mode, locale);
-            if (current === generation.current) setStatus(t(mode === "codex" ? "已复制，请到本机 Codex 新对话粘贴。" : "已复制公开摘要。"));
-          })}>{t("确认复制")}</button>
+            if (current === generation.current) setStatus(t(mode === "codex" ? "已复制。打开本机 Codex，新建对话，粘贴并发送。" : "已复制公开摘要。"));
+          })}>{t(mode === "codex" ? "复制给 Codex" : "复制公开摘要")}</button>
           {mode === "github" && <button className="secondary-button" disabled={busy} onClick={() => void action(async () => {
             const current = generation.current;
             const result = await openSupportIssue(preview.support_id, locale);
@@ -75,6 +76,7 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
             if (current === generation.current) setChecks(result);
           })}>{t("重新检查数据")}</button>}
         </div>
+        {mode === "codex" && <p>{t("Codex 处理后，请确认原项目或对话可见、旧消息仍在，并打开原对话实际续聊；基础检查通过不等于恢复成功。")}</p>}
       </>}
       {busy && <p role="status">{t("正在整理...")}</p>}
       {status && <p role="status">{status}</p>}
@@ -83,7 +85,7 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
         <p>{t("基础检查时间：{time}", { time: checks.checked_at })}</p>
         <ul>{checks.checks.map((check, i) => <li key={i}>{check.subject} — {t(statusLabels[check.status])}：{t(checkLabels[check.code] ?? "未知检查结果")}</li>)}</ul>
         {checks.omitted_sessions > 0 && <p>{t("另有 {count} 个会话未纳入检查。", { count: checks.omitted_sessions })}</p>}
-        <p>{t("以上仅为基础文件与索引检查。数据库及实际续聊尚未验证，请在 Codex 中打开原对话确认。")}</p>
+        <p>{t("以上仅为基础文件与索引检查。数据库及实际续聊尚未验证；请确认原项目或对话可见，打开原对话并实际续聊。")}</p>
       </div>}
     </div>}
   </section>;

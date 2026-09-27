@@ -368,6 +368,7 @@ fn handoff_includes_scoped_observed_checks_when_local_files_are_unreadable() {
     assert!(handoff.contains(&serde_json::to_string(&missing).unwrap()));
     assert!(handoff.contains("project_missing"));
     assert!(handoff.contains("conversation_not_verified"));
+    assert!(handoff.contains("original project or chat is visible"));
     assert!(handoff.contains(&report.checked_at));
     assert!(handoff.len() <= 8192);
     assert!(!render::public_text(&snapshot, Locale::En).contains(&missing.display().to_string()));
