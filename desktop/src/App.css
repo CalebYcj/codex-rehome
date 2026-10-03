@@ -138,14 +138,17 @@ summary:hover {
   color: var(--ink);
 }
 .app-shell {
+  --app-header-height: 82px;
+  --app-footer-height: 44px;
   width: 100%;
   min-height: 100vh;
+  padding-bottom: var(--app-footer-height);
 }
 .app-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  height: 82px;
+  height: var(--app-header-height);
   padding: 0 max(32px, calc((100vw - 1120px) / 2));
   border-bottom: 1px solid var(--line);
   background: var(--surface);
@@ -231,7 +234,9 @@ summary:hover {
   margin: 0 auto;
 }
 .page {
-  min-height: calc(100vh - 82px);
+  min-height: calc(
+    100dvh - var(--app-header-height) - var(--app-footer-height)
+  );
   padding: 24px 0 56px;
 }
 .page-header {
@@ -263,7 +268,9 @@ summary:hover {
 .aux-back + .page,
 .settings-page,
 .help-page {
-  min-height: calc(100vh - 142px);
+  min-height: calc(
+    100dvh - var(--app-header-height) - var(--app-footer-height) - 60px
+  );
   padding-top: 0;
 }
 .eyebrow,
@@ -447,7 +454,7 @@ summary:hover {
   align-items: center;
   gap: 16px;
   position: sticky;
-  bottom: 0;
+  bottom: var(--app-footer-height);
   z-index: 3;
   min-height: 84px;
   margin-top: 28px;
@@ -1250,6 +1257,62 @@ td code {
   line-height: 1.9;
   max-width: 700px;
 }
+.app-footer {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  height: var(--app-footer-height);
+  padding: 0 24px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.version-shortcut-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.version-shortcut {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.version-shortcut:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--selection);
+}
+.version-shortcut svg {
+  width: 13px;
+  height: 13px;
+}
+.version-number {
+  font-variant-numeric: tabular-nums;
+}
+.version-status {
+  font-size: 11px;
+}
+.version-shortcut.has-update {
+  color: var(--accent);
+}
+.update-dot {
+  width: 6px;
+  height: 6px;
+  margin: 0 3.5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.version-shortcut-group > .update-progress {
+  width: 140px;
+}
 .update-control {
   display: flex;
   align-items: center;
@@ -1356,8 +1419,8 @@ td code {
   }
 }
 @media (max-height: 700px) {
-  .app-header {
-    height: 68px;
+  .app-shell {
+    --app-header-height: 68px;
   }
   .home-page {
     padding-top: 18px;
@@ -1383,8 +1446,8 @@ td code {
   }
 }
 @media (max-height: 580px) {
-  .app-header {
-    height: 60px;
+  .app-shell {
+    --app-header-height: 60px;
   }
   .home-page {
     padding-top: 14px;
@@ -1419,9 +1482,6 @@ td code {
   }
   .app-header {
     padding: 0 32px;
-  }
-  .page {
-    min-height: calc(100vh - 72px);
   }
   .project-expand span {
     max-width: 180px;

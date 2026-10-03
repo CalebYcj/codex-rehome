@@ -536,9 +536,16 @@ describe("ReHome Desktop workflows", () => {
 
     expect(updateButton).toBeDisabled();
     expect(screen.getByText("请先完成当前迁移")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(
+      within(screen.getByRole("main")).getByRole("status"),
+    ).toHaveTextContent(
       "正在创建迁移包。内容较多时可能需要几分钟，请保持 ReHome 打开。",
     );
+    expect(
+      within(screen.getByRole("contentinfo", { name: "版本与更新" })).getByRole(
+        "button",
+      ),
+    ).toBeDisabled();
     expect(screen.getByRole("button", { name: "ReHome 首页" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "更多选项" })).toBeDisabled();
 

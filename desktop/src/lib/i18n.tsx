@@ -14,6 +14,13 @@ type Translator = (key: string, variables?: Variables) => string;
 const STORAGE_KEY = "rehome.locale";
 
 const english: Record<string, string> = {
+  "版本 {version}，检查更新": "Version {version}, check for updates",
+  "版本 {version}，发现更新": "Version {version}, update available",
+  发现更新: "Update available",
+  "检查失败，点击重试": "Check failed · Retry",
+  "更新未完成，点击重试": "Update failed · Retry",
+  "更新未完成，请重新检查后再试。":
+    "Update did not finish. Check again to retry.",
   "这次导入已撤销，请重新预览后再导入。":
     "This import was undone. Preview it again before importing.",
   "撤销未完成，请先到迁移记录处理，再重新预览。":

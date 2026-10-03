@@ -44,6 +44,7 @@ function AppContent() {
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [activeOperations, setActiveOperations] = useState(0);
   const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateFooter, setUpdateFooter] = useState<HTMLElement | null>(null);
   const [rollbackResult, setRollbackResult] = useState<{
     transaction_id: string;
     success: boolean;
@@ -321,6 +322,7 @@ function AppContent() {
               <UpdateControl
                 migrationBusy={activeOperations > 0}
                 onInstallingChange={setUpdateInstalling}
+                footerContainer={updateFooter}
               />
             </section>
             <section className="workflow-section">
@@ -341,6 +343,11 @@ function AppContent() {
           </div>
         </div>
       </main>
+      <footer
+        className="app-footer"
+        aria-label={t("版本与更新")}
+        ref={setUpdateFooter}
+      />
     </div>
   );
 }

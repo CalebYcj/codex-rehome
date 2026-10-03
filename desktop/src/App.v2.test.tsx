@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { version as appVersion } from "../package.json";
 
 const api = vi.hoisted(() => ({
   applyRestore: vi.fn(),
@@ -427,6 +428,96 @@ describe("V2 utility safeguards", () => {
     await user.click(within(dialog).getByRole("button", { name: "稍后" }));
     expect(updater.installCheckedUpdate).not.toHaveBeenCalled();
   });
+  it("checks from the persistent version shortcut and shares the result with Settings", async () => {
+    const user = userEvent.setup();
+    updater.checkForUpdates
+      .mockResolvedValueOnce({ status: "current", currentVersion: appVersion })
+      .mockResolvedValueOnce({
+        status: "available",
+        currentVersion: appVersion,
+        version: "0.1.30",
+        notes: "Update details",
+      });
+    render(<App />);
+    const footer = screen.getByRole("contentinfo", { name: "版本与更新" });
+    const shortcut = await within(footer).findByRole("button", {
+      name: `版本 ${appVersion}，检查更新`,
+    });
+    expect(shortcut).toHaveTextContent(`v${appVersion}`);
+    expect(updater.checkForUpdates).toHaveBeenCalledTimes(1);
+    shortcut.focus();
+    await user.keyboard("{Enter}");
+    const available = await within(footer).findByRole("button", {
+      name: `版本 ${appVersion}，发现更新`,
+    });
+    expect(available).toHaveTextContent("发现更新");
+    await user.click(available);
+    const dialog = screen.getByRole("dialog", { name: "现在更新 ReHome？" });
+    expect(within(dialog).getByText("Update details")).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "稍后" }));
+    expect(updater.installCheckedUpdate).not.toHaveBeenCalled();
+    expect(available).toHaveFocus();
+    await menu(user, "设置与关于");
+    expect(screen.getByRole("button", { name: "更新到 0.1.30" })).toBeEnabled();
+    expect(updater.checkForUpdates).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "ReHome 首页" }));
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
+    expect(available).toBeVisible();
+    expect(updater.checkForUpdates).toHaveBeenCalledTimes(2);
+  });
+  it("keeps the installed version visible offline and lets the footer retry in English", async () => {
+    const user = userEvent.setup();
+    updater.checkForUpdates
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ status: "current", currentVersion: appVersion });
+    render(<App />);
+    const footer = screen.getByRole("contentinfo", { name: "版本与更新" });
+    await within(footer).findByText("检查失败，点击重试");
+    expect(within(footer).getByText(`v${appVersion}`)).toBeVisible();
+    await menu(user, "English");
+    const retry = within(footer).getByRole("button", {
+      name: `Version ${appVersion}, check for updates`,
+    });
+    expect(retry).toHaveTextContent("Check failed · Retry");
+    await user.click(retry);
+    expect(await within(footer).findByText("Up to date")).toBeVisible();
+    expect(updater.checkForUpdates).toHaveBeenCalledTimes(2);
+  });
+  it("locks the workspace during an update started from the footer and unlocks after failure", async () => {
+    const user = userEvent.setup();
+    let reject!: (reason: unknown) => void;
+    updater.checkForUpdates.mockResolvedValue({
+      status: "available",
+      currentVersion: appVersion,
+      version: "0.1.30",
+      notes: null,
+    });
+    updater.installCheckedUpdate.mockReturnValue(
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+    );
+    render(<App />);
+    const footer = screen.getByRole("contentinfo", { name: "版本与更新" });
+    await user.click(
+      await within(footer).findByRole("button", {
+        name: `版本 ${appVersion}，发现更新`,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "安装并重启" }));
+    expect(document.querySelector("main.workspace")).toHaveAttribute("inert");
+    expect(within(footer).getByRole("button")).toBeDisabled();
+    expect(within(footer).getByRole("progressbar")).not.toHaveAttribute(
+      "value",
+    );
+    expect(updater.installCheckedUpdate).toHaveBeenCalledOnce();
+    await act(async () => reject(new Error("download failed")));
+    expect(document.querySelector("main.workspace")).not.toHaveAttribute(
+      "inert",
+    );
+    expect(within(footer).getByRole("button")).toBeEnabled();
+    expect(within(footer).getByText("更新未完成，点击重试")).toBeVisible();
+  });
   it("locks navigation during an actual restore and shows no fabricated progress stages", async () => {
     const user = userEvent.setup();
     let reject!: (reason: unknown) => void;
@@ -444,7 +535,17 @@ describe("V2 utility safeguards", () => {
     await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
     expect(screen.getByRole("button", { name: "ReHome 首页" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "更多选项" })).toBeDisabled();
+    expect(
+      within(screen.getByRole("contentinfo", { name: "版本与更新" })).getByRole(
+        "button",
+      ),
+    ).toBeDisabled();
     expect(screen.queryByLabelText("导入进度")).toBeNull();
     await act(async () => reject(new Error("test stop")));
+    expect(
+      within(screen.getByRole("contentinfo", { name: "版本与更新" })).getByRole(
+        "button",
+      ),
+    ).toBeEnabled();
   });
 });
