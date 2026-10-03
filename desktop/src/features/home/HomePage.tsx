@@ -2,28 +2,21 @@ import { useEffect, useState, type RefObject } from "react";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
+  ArrowRight,
   CheckCircle2,
-  Clock3,
-  FolderKanban,
-  Image,
-  MessageSquareText,
-  PackageCheck,
-  Puzzle,
-  Sparkles,
+  LoaderCircle,
+  LockKeyhole,
 } from "lucide-react";
-
 import { listTransactions } from "../../lib/api";
 import { useI18n } from "../../lib/i18n";
-import type { CodexInventory, RecoveryStatus, TransactionSummary } from "../../lib/types";
-
+import type { CodexInventory, TransactionSummary } from "../../lib/types";
 interface HomePageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
   inventory: CodexInventory | null;
   loading: boolean;
   error: string | null;
-  onNavigate: (view: "send" | "receive") => void;
+  onNavigate: (view: "send" | "receive" | "history") => void;
 }
-
 export default function HomePage({
   headingRef,
   inventory,
@@ -33,7 +26,6 @@ export default function HomePage({
 }: HomePageProps) {
   const { t } = useI18n();
   const [recent, setRecent] = useState<TransactionSummary | null>(null);
-
   useEffect(() => {
     let active = true;
     void listTransactions()
@@ -45,82 +37,109 @@ export default function HomePage({
       active = false;
     };
   }, []);
-
   return (
     <div className="page home-page">
       <header className="page-header">
-        <p className="eyebrow">CODEX WORKSPACE</p>
-        <h1 ref={headingRef} tabIndex={-1}>{t("迁移工作台")}</h1>
-        <p className="page-description">{t("从旧电脑导出，在新电脑导入。全程离线。")}</p>
+        <h1 ref={headingRef} tabIndex={-1}>
+          {t("把工作带到新电脑。")}
+        </h1>
+        <p className="page-description">
+          {t("项目、对话和 Skills，带走需要的，接着做。")}
+        </p>
       </header>
-
-      <section className="action-strip" aria-label={t("迁移操作")}>
-        <button className="primary-action send-action" type="button" onClick={() => onNavigate("send")}>
-          <ArrowUpFromLine aria-hidden="true" />
-          <span><strong>{t("导出")}</strong><small>{t("创建 .rehome 迁移包")}</small></span>
+      <section className="home-actions" aria-label={t("迁移操作")}>
+        <button
+          type="button"
+          className="home-action"
+          aria-label={t("前往导出")}
+          onClick={() => onNavigate("send")}
+        >
+          <span className="home-action-icon">
+            <ArrowUpFromLine aria-hidden="true" />
+          </span>
+          <span>
+            <small>{t("在旧电脑")}</small>
+            <strong>{t("导出要带走的内容")}</strong>
+            <span>{t("选好项目和对话，创建一个迁移包。")}</span>
+          </span>
+          <ArrowRight aria-hidden="true" />
         </button>
-        <button className="primary-action receive-action" type="button" onClick={() => onNavigate("receive")}>
-          <ArrowDownToLine aria-hidden="true" />
-          <span><strong>{t("导入")}</strong><small>{t("将迁移包导入本机 Codex")}</small></span>
+        <button
+          type="button"
+          className="home-action"
+          aria-label={t("前往导入")}
+          onClick={() => onNavigate("receive")}
+        >
+          <span className="home-action-icon">
+            <ArrowDownToLine aria-hidden="true" />
+          </span>
+          <span>
+            <small>{t("在新电脑")}</small>
+            <strong>{t("导入已有的迁移包")}</strong>
+            <span>{t("打开 .rehome 文件，恢复到这台电脑。")}</span>
+          </span>
+          <ArrowRight aria-hidden="true" />
         </button>
       </section>
-
-      <section className="workflow-section" aria-labelledby="detected-title">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">{t("本机检测")}</p>
-            <h2 id="detected-title">{t("Codex 内容")}</h2>
-          </div>
-          {inventory && <span className="status status-success"><CheckCircle2 aria-hidden="true" />{t("已检测")}</span>}
-        </div>
-
-        {loading && <p className="inline-state" role="status">{t("正在检测 Codex...")}</p>}
-        {error && <p className="inline-state status-error" role="alert">{error}</p>}
+      <div className="home-meta">
+        {loading && (
+          <p role="status">
+            <LoaderCircle className="spin" aria-hidden="true" />
+            {t("正在检测 Codex...")}
+          </p>
+        )}
+        {error && (
+          <p className="status-error" role="alert">
+            {error}
+          </p>
+        )}
         {inventory && (
-          <>
-            <div className="path-line"><span>Codex Home</span><code>{inventory.codex_home}</code></div>
-            <div className="count-grid" aria-label={t("内容数量")}>
-              <span><FolderKanban aria-hidden="true" /><strong>{inventory.counts.projects}</strong> {t("{count} 个项目", { count: "" }).trim()}</span>
-              <span><MessageSquareText aria-hidden="true" /><strong>{inventory.counts.conversations}</strong> {t("{count} 个对话", { count: "" }).trim()}</span>
-              <span><Sparkles aria-hidden="true" /><strong>{inventory.counts.skills}</strong> {t("{count} 个技能", { count: "" }).trim()}</span>
-              <span><Puzzle aria-hidden="true" /><strong>{inventory.counts.plugins}</strong> {t("{count} 个插件", { count: "" }).trim()}</span>
-              <span><Image aria-hidden="true" /><strong>{inventory.counts.generated_images}</strong> {t("{count} 张生成图片", { count: "" }).trim()}</span>
-            </div>
-          </>
+          <details className="machine-details">
+            <summary>
+              <CheckCircle2 aria-hidden="true" />
+              {t("本机已就绪")}
+              <span>{t("查看检测内容")}</span>
+            </summary>
+            <code>{inventory.codex_home}</code>
+            <p aria-label={t("内容数量")}>
+              {t("{count} 个项目", { count: inventory.counts.projects })} ·{" "}
+              {t("{count} 个对话", { count: inventory.counts.conversations })} ·{" "}
+              {t("{count} 个技能", { count: inventory.counts.skills })} ·{" "}
+              {t("{count} 个插件", { count: inventory.counts.plugins })} ·{" "}
+              {t("{count} 张生成图片", {
+                count: inventory.counts.generated_images,
+              })}
+            </p>
+          </details>
         )}
-      </section>
-
-      <section className="workflow-section" aria-labelledby="recent-title">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">{t("迁移记录")}</p>
-            <h2 id="recent-title">{t("最近一次迁移")}</h2>
-          </div>
-          <Clock3 aria-hidden="true" />
-        </div>
-        {recent ? (
-          <div className="recent-row">
-            <PackageCheck aria-hidden="true" />
-            <div><strong>{t("{count} 个文件变更", { count: recent.changed_files })}</strong><span>{recent.created_at}</span></div>
-            <span className={`status status-${recent.status}`}>{recoveryStatusLabel(recent.status, t)}</span>
-          </div>
-        ) : (
-          <p className="empty-state">{t("暂无迁移记录")}</p>
-        )}
-      </section>
+        <button
+          className="icon-text-button"
+          aria-label={t("前往迁移记录")}
+          onClick={() => onNavigate("history")}
+        >
+          {t("查看迁移记录")} →
+        </button>
+      </div>
+      {recent && (
+        <p className="recent-note">
+          {t("最近一次导入")} ·{" "}
+          {t(
+            {
+              prepared: "已准备",
+              applying: "导入中",
+              verifying: "验证中",
+              committed: "已完成",
+              rolling_back: "回滚中",
+              rolled_back: "已回滚",
+              rollback_failed: "回滚失败",
+            }[recent.status],
+          )}
+        </p>
+      )}
+      <p className="privacy-note">
+        <LockKeyhole aria-hidden="true" />
+        {t("离线迁移，登录信息留在原电脑。")}
+      </p>
     </div>
   );
-}
-
-function recoveryStatusLabel(status: RecoveryStatus, t: (key: string) => string): string {
-  const labels: Record<RecoveryStatus, string> = {
-    prepared: "已准备",
-    applying: "导入中",
-    verifying: "验证中",
-    committed: "已完成",
-    rolling_back: "回滚中",
-    rolled_back: "已回滚",
-    rollback_failed: "回滚失败",
-  };
-  return t(labels[status]);
 }

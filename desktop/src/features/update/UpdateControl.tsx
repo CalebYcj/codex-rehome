@@ -6,6 +6,7 @@ import {
   installCheckedUpdate,
   type UpdateCheckResult,
 } from "../../lib/updater";
+import Modal from "../../components/Modal";
 import { useI18n } from "../../lib/i18n";
 
 interface UpdateControlProps {
@@ -16,12 +17,20 @@ interface UpdateControlProps {
 type UpdateState =
   | { phase: "checking" }
   | { phase: "ready"; result: UpdateCheckResult }
-  | { phase: "installing"; result: Extract<UpdateCheckResult, { status: "available" }>; percent: number | null }
+  | {
+      phase: "installing";
+      result: Extract<UpdateCheckResult, { status: "available" }>;
+      percent: number | null;
+    }
   | { phase: "installed" }
   | { phase: "error" };
 
-export default function UpdateControl({ migrationBusy, onInstallingChange }: UpdateControlProps) {
+export default function UpdateControl({
+  migrationBusy,
+  onInstallingChange,
+}: UpdateControlProps) {
   const { t } = useI18n();
+  const [confirming, setConfirming] = useState(false);
   const [state, setState] = useState<UpdateState>({ phase: "checking" });
 
   const runCheck = useCallback(async () => {
@@ -37,8 +46,11 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
     void runCheck();
   }, [runCheck]);
 
-  async function install(result: Extract<UpdateCheckResult, { status: "available" }>) {
+  async function install(
+    result: Extract<UpdateCheckResult, { status: "available" }>,
+  ) {
     if (migrationBusy) return;
+    setConfirming(false);
     onInstallingChange(true);
     setState({ phase: "installing", result, percent: null });
     try {
@@ -74,8 +86,13 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
     return (
       <div className="update-control update-stack">
         <span>{t("检查失败，不影响离线迁移")}</span>
-        <button type="button" onClick={() => void runCheck()} aria-label={t("重新检查更新")}>
-          <RefreshCw aria-hidden="true" />{t("重新检查")}
+        <button
+          type="button"
+          onClick={() => void runCheck()}
+          aria-label={t("重新检查更新")}
+        >
+          <RefreshCw aria-hidden="true" />
+          {t("重新检查")}
         </button>
       </div>
     );
@@ -84,17 +101,28 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
   if (state.phase === "installing") {
     return (
       <div className="update-control update-stack" role="status">
-        <span>{t("正在安装 {percent}", { percent: state.percent === null ? "…" : `${state.percent}%` })}</span>
-        <div className="update-progress" aria-hidden="true">
-          <span style={{ width: `${state.percent ?? 8}%` }} />
-        </div>
+        <span>
+          {t("正在安装 {percent}", {
+            percent: state.percent === null ? "…" : `${state.percent}%`,
+          })}
+        </span>
+        <progress
+          className="update-progress"
+          max={100}
+          value={state.percent ?? undefined}
+          aria-label={t("更新下载进度")}
+        />
       </div>
     );
   }
 
   const { result } = state;
   if (result.status === "unsupported") {
-    return <div className="update-control"><span>{t("开发预览模式")}</span></div>;
+    return (
+      <div className="update-control">
+        <span>{t("开发预览模式")}</span>
+      </div>
+    );
   }
 
   if (result.status === "current") {
@@ -118,12 +146,42 @@ export default function UpdateControl({ migrationBusy, onInstallingChange }: Upd
       <button
         type="button"
         disabled={migrationBusy}
-        onClick={() => void install(result)}
+        onClick={() => setConfirming(true)}
         aria-label={t("更新到 {version}", { version: result.version })}
-        title={result.notes ?? t("更新到 {version}", { version: result.version })}
+        title={
+          result.notes ?? t("更新到 {version}", { version: result.version })
+        }
       >
         <Download aria-hidden="true" />v{result.version}
       </button>
+      {confirming && (
+        <Modal
+          title={t("现在更新 ReHome？")}
+          onClose={() => setConfirming(false)}
+        >
+          <p>{t("更新会重启 ReHome。请先完成迁移并保存当前工作。")}</p>
+          <p>
+            {result.currentVersion} → {result.version}
+          </p>
+          {result.notes && <p className="update-notes">{result.notes}</p>}
+          <div className="modal-actions">
+            <button
+              data-autofocus
+              className="secondary-button"
+              onClick={() => setConfirming(false)}
+            >
+              {t("稍后")}
+            </button>
+            <button
+              className="command-button"
+              disabled={migrationBusy}
+              onClick={() => void install(result)}
+            >
+              {t("安装并重启")}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
