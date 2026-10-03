@@ -35,6 +35,13 @@ export default function SupportPanel({ source }: { source: SupportSource }) {
     if (isIncident) panelRef.current?.scrollIntoView?.({ block: "start" });
   }, [isIncident, sourceKey]);
 
+  const previewReady = preview !== null;
+  useEffect(() => {
+    // The asynchronous draft adds height after the first scroll was clamped.
+    if (isIncident && previewReady)
+      panelRef.current?.scrollIntoView?.({ block: "start" });
+  }, [isIncident, previewReady]);
+
   useEffect(() => {
     const current = ++generation.current;
     const currentSource: SupportSource =

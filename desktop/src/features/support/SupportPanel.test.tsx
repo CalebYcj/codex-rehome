@@ -18,6 +18,25 @@ beforeEach(() => {
 });
 
 describe("support handoff", () => {
+  it("realigns the incident solution after the asynchronous draft expands its layout", async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    let finish!: (value: typeof preview) => void;
+    vi.mocked(api.prepareSupport).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    try {
+      incident();
+      expect(scroll).toHaveBeenCalledTimes(1);
+      finish(preview);
+      await screen.findByRole("button", { name: "复制给 Codex" });
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+      expect(scroll).toHaveBeenLastCalledWith({ block: "start" });
+      expect(api.copySupportText).not.toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it("opens a prominent incident solution and prepares Codex text without a help click", async () => {
     incident();
     expect(await screen.findByText("操作未完成，已备好 Codex 排查内容")).toBeVisible();
