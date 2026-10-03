@@ -39,6 +39,7 @@ import {
 interface ReceivePageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
   inventory: CodexInventory | null;
+  rollbackResult: { transaction_id: string; success: boolean } | null;
   onOperationStart: () => void;
   onOperationEnd: () => void;
   onHome: () => void;
@@ -62,6 +63,7 @@ const verificationLabels: Array<[keyof RestoreReport["verification"], string]> =
 export default function ReceivePage({
   headingRef,
   inventory,
+  rollbackResult,
   onOperationStart,
   onOperationEnd,
   onHome,
@@ -194,6 +196,22 @@ export default function ReceivePage({
     setUseChecks([false, false, false]);
     setUseDialog(false);
   }
+
+  useEffect(() => {
+    if (!report || report.transaction_id !== rollbackResult?.transaction_id)
+      return;
+    // A completed or partial undo invalidates the cached verification result.
+    clearRestoreSelection();
+    setStep("location");
+    setSupportId(null);
+    setError(
+      t(
+        rollbackResult.success
+          ? "这次导入已撤销，请重新预览后再导入。"
+          : "撤销未完成，请先到迁移记录处理，再重新预览。",
+      ),
+    );
+  }, [rollbackResult, report?.transaction_id]);
 
   async function handleRestore() {
     if (!plan || plan.conflict_count > 0 || !codexClosed || phase !== "idle")

@@ -23,11 +23,13 @@ interface HistoryPageProps {
   headingRef: RefObject<HTMLHeadingElement | null>;
   onOperationStart: () => void;
   onOperationEnd: () => void;
+  onRollbackFinished: (transactionId: string, success: boolean) => void;
 }
 export default function HistoryPage({
   headingRef,
   onOperationStart,
   onOperationEnd,
+  onRollbackFinished,
 }: HistoryPageProps) {
   const { locale, t } = useI18n();
   const [transactions, setTransactions] = useState<TransactionSummary[]>([]);
@@ -68,6 +70,7 @@ export default function HistoryPage({
     setError(null);
     setSupportId(null);
     onOperationStart();
+    let success = false;
     try {
       const result = await rollbackTransaction(
         transaction.transaction_id,
@@ -75,13 +78,7 @@ export default function HistoryPage({
       );
       if (!result.success)
         throw new Error(t("撤销未完成，请保留备份并查看诊断。"));
-      try {
-        window.localStorage.removeItem(
-          "rehome-use-confirmed:" + transaction.transaction_id,
-        );
-      } catch {
-        /* Cosmetic confirmation is not transaction evidence. */
-      }
+      success = true;
       await refresh();
     } catch (caught) {
       setError(errorMessage(caught));
@@ -89,6 +86,14 @@ export default function HistoryPage({
       setFailed((current) => new Set(current).add(transaction.transaction_id));
       await refresh();
     } finally {
+      try {
+        window.localStorage.removeItem(
+          "rehome-use-confirmed:" + transaction.transaction_id,
+        );
+      } catch {
+        /* A partial undo also invalidates the cosmetic use confirmation. */
+      }
+      onRollbackFinished(transaction.transaction_id, success);
       setRollingBack(null);
       onOperationEnd();
     }

@@ -14,6 +14,10 @@ type Translator = (key: string, variables?: Variables) => string;
 const STORAGE_KEY = "rehome.locale";
 
 const english: Record<string, string> = {
+  "这次导入已撤销，请重新预览后再导入。":
+    "This import was undone. Preview it again before importing.",
+  "撤销未完成，请先到迁移记录处理，再重新预览。":
+    "Undo did not finish. Check History before previewing again.",
   返回: "Back",
   "内容较多时可能需要几分钟。": "Larger imports may take a few minutes.",
   "Plugins {plugins} · 生成图片 {images}":

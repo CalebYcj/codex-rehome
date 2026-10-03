@@ -103,6 +103,73 @@ async function plannedImport(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "预览导入内容" }));
 }
 describe("V2 utility safeguards", () => {
+  it.each([true, false])(
+    "invalidates a preserved import result after undo settles with success=%s",
+    async (success) => {
+      const user = userEvent.setup();
+      api.listTransactions.mockResolvedValue({
+        transactions: [committedTransaction],
+        warnings: [],
+      });
+      api.rollbackTransaction.mockImplementation(async () => {
+        if (success)
+          api.listTransactions.mockResolvedValue({
+            transactions: [{ ...committedTransaction, status: "rolled_back" }],
+            warnings: [],
+          });
+        return {
+          transaction_id: committedTransaction.transaction_id,
+          success,
+          restored_files: 8,
+          completed_at: "now",
+        };
+      });
+      render(<App />);
+      await screen.findByText(inventory.codex_home);
+      await plannedImport(user);
+      await user.click(
+        screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }),
+      );
+      await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+      await user.click(
+        await screen.findByRole("button", { name: "确认旧对话能用" }),
+      );
+      const useDialog = screen.getByRole("dialog");
+      for (const check of within(useDialog).getAllByRole("checkbox"))
+        await user.click(check);
+      await user.click(
+        within(useDialog).getByRole("button", { name: "确认能用" }),
+      );
+      expect(screen.getByText("已由你确认能用")).toBeVisible();
+      await user.click(screen.getByRole("button", { name: "查看迁移记录" }));
+      await user.click(
+        await screen.findByRole("button", { name: "回滚此事务" }),
+      );
+      await user.click(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: "确认撤销",
+        }),
+      );
+      await screen.findByText(
+        success ? "已回滚" : "撤销未完成，请保留备份并查看诊断。",
+      );
+      await user.click(screen.getByRole("button", { name: "返回" }));
+      expect(
+        await screen.findByRole("button", { name: "预览导入内容" }),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "确认旧对话能用" }),
+      ).toBeNull();
+      expect(screen.queryByText("已由你确认能用")).toBeNull();
+      expect(
+        localStorage.getItem(
+          "rehome-use-confirmed:" + committedTransaction.transaction_id,
+        ),
+      ).toBeNull();
+      expect(api.applyRestore).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(["export", "restore"])(
     "keeps the automatic %s failure solution in view instead of focusing the old heading",
     async (kind) => {

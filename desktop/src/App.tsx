@@ -44,6 +44,10 @@ function AppContent() {
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [activeOperations, setActiveOperations] = useState(0);
   const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [rollbackResult, setRollbackResult] = useState<{
+    transaction_id: string;
+    success: boolean;
+  } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const homeRef = useRef<HTMLHeadingElement>(null),
@@ -247,6 +251,7 @@ function AppContent() {
             <ReceivePage
               headingRef={receiveRef}
               inventory={inventory}
+              rollbackResult={rollbackResult}
               {...workflowProps}
               onHome={() => navigate("home")}
               onHistory={() => navigate("history")}
@@ -262,7 +267,13 @@ function AppContent() {
                 busy={locked}
               />
             </div>
-            <HistoryPage headingRef={historyRef} {...workflowProps} />
+            <HistoryPage
+              headingRef={historyRef}
+              {...workflowProps}
+              onRollbackFinished={(transaction_id, success) =>
+                setRollbackResult({ transaction_id, success })
+              }
+            />
           </>
         )}
         {view === "help" && (
