@@ -15,6 +15,9 @@ const api = vi.hoisted(() => ({
   openRestoredThread: vi.fn(),
   rollbackTransaction: vi.fn(),
   selectRestoreDestinations: vi.fn(),
+  prepareSupport: vi.fn(),
+  copySupportText: vi.fn(),
+  openSupportIssue: vi.fn(),
 }));
 
 const updater = vi.hoisted(() => ({
@@ -46,6 +49,14 @@ beforeEach(() => {
   });
   api.buildRestorePlan.mockResolvedValue(basePlan);
   api.openPath.mockResolvedValue(undefined);
+  api.prepareSupport.mockResolvedValue({
+    support_id: "incident",
+    codex_text: "Synthetic local diagnostic",
+    github_text: "Synthetic public summary",
+    saved: true,
+    reveal_id: null,
+    can_recheck: false,
+  });
   api.openRestoredThread.mockResolvedValue("registered");
   api.rollbackTransaction.mockResolvedValue({
     transaction_id: committedTransaction.transaction_id,
@@ -92,6 +103,42 @@ async function plannedImport(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "预览导入内容" }));
 }
 describe("V2 utility safeguards", () => {
+  it.each(["export", "restore"])(
+    "keeps the automatic %s failure solution in view instead of focusing the old heading",
+    async (kind) => {
+      const user = userEvent.setup();
+      const failure = { message: "synthetic failure", support_id: "incident" };
+      render(<App />);
+      await screen.findByText(inventory.codex_home);
+      if (kind === "export") {
+        api.createPackage.mockRejectedValue(failure);
+        await user.click(screen.getByRole("button", { name: "前往导出" }));
+        await user.click(
+          screen.getByRole("checkbox", { name: "选择项目 rehome-app" }),
+        );
+        await user.click(screen.getByRole("button", { name: "继续" }));
+        await user.click(
+          screen.getByRole("button", { name: "选择保存位置并创建" }),
+        );
+      } else {
+        api.applyRestore.mockRejectedValue(failure);
+        await plannedImport(user);
+        await user.click(
+          screen.getByRole("checkbox", { name: "确认已保存当前 Codex 工作" }),
+        );
+        await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
+      }
+      const copy = await screen.findByRole("button", { name: "复制给 Codex" });
+      expect(screen.getByRole("heading", { level: 1 })).not.toHaveFocus();
+      const previewText = screen.getByRole("textbox", { name: "求助内容预览" });
+      expect(
+        copy.compareDocumentPosition(previewText) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(api.copySupportText).not.toHaveBeenCalled();
+      expect(api.openSupportIssue).not.toHaveBeenCalled();
+    },
+  );
   it("keeps the interface usable when preference storage is unavailable and updates the document language", async () => {
     const read = vi
       .spyOn(Storage.prototype, "getItem")

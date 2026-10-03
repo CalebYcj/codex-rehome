@@ -232,8 +232,8 @@ export default function SendPage({
   }
 
   useEffect(() => {
-    headingRef.current?.focus();
-  }, [step, busy, report]);
+    if (!error && !supportId) headingRef.current?.focus();
+  }, [step, busy, report, error, supportId]);
   const query = search.trim().toLocaleLowerCase();
   const filteredGroups = projectGroups.filter(
     (project) =>

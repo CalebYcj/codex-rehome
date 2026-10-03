@@ -1131,6 +1131,7 @@ td code {
 }
 .support-copy-button {
   min-height: 45px;
+  justify-self: start;
 }
 .support-primary-actions {
   padding-top: 4px;

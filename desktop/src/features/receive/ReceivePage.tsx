@@ -269,8 +269,8 @@ export default function ReceivePage({
   );
 
   useEffect(() => {
-    headingRef.current?.focus();
-  }, [step, phase]);
+    if (!error && !supportId) headingRef.current?.focus();
+  }, [step, phase, error, supportId]);
   const busy = phase !== "idle" || opening !== null;
   const stepLabel = t(
     {
