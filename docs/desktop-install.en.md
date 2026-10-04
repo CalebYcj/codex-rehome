@@ -29,7 +29,7 @@ Public builds are not signed with an Apple Developer ID, so macOS may show a fir
 
 ## In-app updates
 
-Starting with `v0.1.4`, the app checks GitHub Releases at launch. When a new version is available, an update button appears at the bottom of the sidebar. Download, signature verification, installation, and restart begin only after the user clicks it. Updates are blocked while a migration, restore, or rollback is active. Users on `v0.1.3` or earlier must install one new release manually first.
+Starting with `v0.1.4`, the app checks GitHub Releases at launch. Open **Settings & about** from the top-right **More options** menu to see versions and updates. Download, signature verification, installation, and restart begin only after confirming **Install & restart**. Updates are blocked while a migration, restore, or rollback is active. Users on `v0.1.3` or earlier must install one new release manually first.
 
 The updater signature verifies that the package came from this project and was not modified. It does not remove macOS unknown-developer warnings. A failed update check never blocks offline migration.
 

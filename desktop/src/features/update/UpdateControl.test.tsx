@@ -15,7 +15,10 @@ vi.mock("../../lib/updater", () => updater);
 function renderUpdateControl(migrationBusy: boolean) {
   return render(
     <I18nProvider>
-      <UpdateControl migrationBusy={migrationBusy} onInstallingChange={vi.fn()} />
+      <UpdateControl
+        migrationBusy={migrationBusy}
+        onInstallingChange={vi.fn()}
+      />
     </I18nProvider>,
   );
 }
@@ -40,6 +43,8 @@ describe("UpdateControl", () => {
     expect(screen.getByText("当前 0.1.3")).toBeInTheDocument();
 
     await user.click(install);
+    expect(updater.installCheckedUpdate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "安装并重启" }));
 
     expect(updater.installCheckedUpdate).toHaveBeenCalledOnce();
     expect(await screen.findByText("安装完成，正在重启…")).toBeInTheDocument();

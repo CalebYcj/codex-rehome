@@ -63,7 +63,7 @@ If restored conversations are missing from a project, also compare the two compu
 
 ## Install and help
 
-Expand **Need help?** after an export, package inspection or import error. Import results and History also offer **Can't open a chat? Get help**.
+After an export, package inspection or import error, the Codex help panel appears automatically with diagnostic text for review. Import results and History also offer **Can't find or open a project or chat? Get help**.
 
 - **Copy for Codex**: preview, then paste into a new Codex chat on this computer. The handoff includes product context, incident locations and safety instructions. No Skill is required; the [Agent recovery guide](docs/support/agent-recovery-guide.en.md) is bundled for offline access.
 - **Report on GitHub**: preview a separately generated public summary, then open GitHub and submit it yourself. No diagnostic file or migration package is automatically uploaded.
@@ -73,7 +73,7 @@ Private diagnostics may contain full paths and error excerpts. Content pasted in
 
 Starting with `v0.1.4`, ReHome Desktop can check, verify, and install signed updates inside the app. Users on `v0.1.3` or earlier must install one final release manually. The updater signature prevents tampered update packages; it is separate from paid Apple or Windows publisher signing, so the operating system may still show an unknown-developer warning.
 
-The interface starts in Chinese. Click `English` in the sidebar; ReHome remembers the choice on this device.
+The interface starts in Chinese. Choose `English` from the top-right **More options** menu; ReHome remembers the choice on this device. History, Help, and **Settings & about** are in the same menu. Export and import use focused steps. File checks do not prove that an old chat is usable; open and continue the original chat before confirming the result.
 
 - [Chinese installation guide](docs/desktop-install.md)
 - [English installation guide](docs/desktop-install.en.md)
