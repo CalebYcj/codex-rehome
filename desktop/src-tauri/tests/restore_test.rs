@@ -36,6 +36,135 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn streamed_large_conversation_round_trip_preserves_messages_paths_and_rollback(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let body = format!(
+        "{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{}\"}}}}\n",
+        "synthetic transcript body ".repeat(128)
+    );
+    let mut source = fs::OpenOptions::new()
+        .append(true)
+        .open(&harness._fixture.session_path)?;
+    for _ in 0..8192 {
+        source.write_all(body.as_bytes())?;
+    }
+    source.sync_all()?;
+    drop(source);
+    let output_path = harness._fixture.root.join("large-transcript.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: harness._fixture.codex_home.clone(),
+        project_paths: vec![harness._fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: output_path.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(
+        &inspect_package(&output_path)?,
+        &target,
+        &harness.plan.projects_root,
+    )?;
+    let session_path = plan.sessions[0].target.clone();
+    let expected_hash = plan.sessions[0].expected_final_content_hash.clone();
+    let original_index = fs::read(target.codex_home.join("session_index.jsonl"))?;
+    let original_db = fs::read(target.codex_home.join("state_5.sqlite"))?;
+    let report = apply_restore(plan, harness.options())?;
+    assert!(report.verification.files_valid && report.verification.sessions_valid);
+    assert!(
+        report.verification.path_mapping_valid
+            && report.verification.sqlite_threads_valid
+            && report.verification.session_index_valid
+    );
+    let mut hash = Sha256::new();
+    std::io::copy(&mut fs::File::open(&session_path)?, &mut hash)?;
+    assert_eq!(format!("{:x}", hash.finalize()), expected_hash);
+    let mut records = 0;
+    use std::io::BufRead;
+    for line in std::io::BufReader::new(fs::File::open(&session_path)?).lines() {
+        let line = line?;
+        let value: Value = serde_json::from_str(&line)?;
+        if value["type"] == "response_item" {
+            assert_eq!(value, serde_json::from_str::<Value>(&body)?);
+            records += 1;
+        }
+    }
+    assert_eq!(records, 8192);
+    assert!(rollback(report.transaction_id)?.success);
+    assert!(!session_path.exists());
+    assert_eq!(
+        fs::read(target.codex_home.join("session_index.jsonl"))?,
+        original_index
+    );
+    assert_eq!(
+        fs::read(target.codex_home.join("state_5.sqlite"))?,
+        original_db
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "explicit 17 GiB disk/throughput acceptance; run with TMP and LOCALAPPDATA on a spacious isolated volume"]
+fn streamed_project_file_above_sixteen_gib_restores_and_rolls_back() -> Result<(), Box<dyn Error>> {
+    eprintln!("17 GiB acceptance: preparing isolated source");
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let source_path = harness._fixture.project_path.join("large-source.bin");
+    let source = fs::File::create(&source_path)?;
+    let size = 17_u64 * 1024 * 1024 * 1024 + 17;
+    source.set_len(size)?;
+    source.sync_all()?;
+    drop(source);
+    let output_path = harness._fixture.root.join("above-sixteen-gib.rehome");
+    eprintln!("17 GiB acceptance: exporting package");
+    create_package(CreatePackageRequest {
+        codex_home: harness._fixture.codex_home.clone(),
+        project_paths: vec![harness._fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: output_path.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+    assert!(fs::metadata(&output_path)?.len() > 16_u64 * 1024 * 1024 * 1024);
+    eprintln!("17 GiB acceptance: inspecting and planning");
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let plan = build_restore_plan(
+        &inspect_package(&output_path)?,
+        &target,
+        &harness.plan.projects_root,
+    )?;
+    eprintln!("17 GiB acceptance: restoring and verifying");
+    let report = apply_restore(plan, harness.options())?;
+    let restored = harness.plan.projects_root.join("visual/large-source.bin");
+    assert_eq!(fs::metadata(&restored)?.len(), size);
+    assert!(report.verification.files_valid && report.verification.project_files_valid);
+    assert!(report.verification.sessions_valid && report.verification.path_mapping_valid);
+    eprintln!("17 GiB acceptance: rolling back");
+    assert!(rollback(report.transaction_id)?.success);
+    assert!(!restored.exists());
+    eprintln!("17 GiB acceptance: PASS");
+    Ok(())
+}
+
+#[test]
 fn support_survives_restart_and_checks_only_its_real_transaction() -> Result<(), Box<dyn Error>> {
     use rehome_desktop_lib::core::restore::apply_restore_by_id_observed;
     use rehome_desktop_lib::support::{capture_plan, models::*, recheck, SupportService};

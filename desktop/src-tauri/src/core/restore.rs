@@ -16,12 +16,18 @@ use crate::core::{
     package::{inspect_package_for_planning, VerifiedPackage},
     paths::restore_target_root,
     session::session_history_mode,
+    session_stream::visit_jsonl,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, Read},
+    path::Path,
+};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -510,8 +516,8 @@ fn verify_bridge_metadata(
                 .is_some_and(|(_, rollout, _)| rollout.as_deref() == session.target.to_str())
         });
         for session in &plan.sessions {
-            let bytes = verified.authenticated_planning_payload(&session.package_source)?;
-            if let Some(expected_mode) = session_history_mode(bytes) {
+            let payload = verified.session_payload(&session.package_source)?;
+            if let Some(expected_mode) = session_history_mode(&payload.summary) {
                 let stored_mode = sqlite_rows
                     .get(&session.target_task_id.to_string())
                     .and_then(|(_, _, mode)| mode.as_deref());
@@ -535,12 +541,20 @@ fn verify_bridge_metadata(
         if expected_project_paths.is_empty() {
             continue;
         }
-        let session_bytes = fs::read(&session.target).map_err(|error| {
+        let session_file = fs::File::open(&session.target).map_err(|error| {
             restore_failed(format!(
                 "could not read restored session for verification: {error}"
             ))
         })?;
-        let session_values = parse_jsonl_values(&session_bytes)?;
+        let mut matching_paths = std::collections::BTreeSet::new();
+        visit_jsonl(session_file, |_, value| {
+            for expected in &expected_project_paths {
+                if json_contains_string(value, expected) {
+                    matching_paths.insert(*expected);
+                }
+            }
+            Ok(())
+        })?;
         let index_cwd = index_rows
             .get(&session.target_task_id.to_string())
             .and_then(|row| row.get("cwd"))
@@ -549,9 +563,7 @@ fn verify_bridge_metadata(
             .get(&session.target_task_id.to_string())
             .and_then(|(cwd, _, _)| cwd.as_deref());
         let mapped = expected_project_paths.iter().any(|expected| {
-            session_values
-                .iter()
-                .any(|value| json_contains_string(value, expected))
+            matching_paths.contains(expected)
                 // Some Codex versions use a minimal session_index row containing only
                 // id/title/timestamps/rollout_path. In that schema the authoritative
                 // project binding is the session metadata plus the SQLite thread row;
@@ -567,19 +579,6 @@ fn verify_bridge_metadata(
         sqlite_threads_valid: sqlite_valid,
         path_mapping_valid: mapping_valid,
     })
-}
-
-fn parse_jsonl_values(bytes: &[u8]) -> Result<Vec<Value>, RehomeError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| restore_failed("restored session JSONL is not UTF-8"))?;
-    text.lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            serde_json::from_str(line).map_err(|error| {
-                restore_failed(format!("restored session JSONL is invalid: {error}"))
-            })
-        })
-        .collect()
 }
 
 fn json_contains_string(value: &Value, expected: &str) -> bool {
@@ -723,8 +722,8 @@ fn data_verification_passed(report: &VerificationReport) -> bool {
 }
 
 fn hash_optional_file(path: &Path) -> Result<Option<String>, RehomeError> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(restore_failed(format!(
@@ -733,7 +732,21 @@ fn hash_optional_file(path: &Path) -> Result<Option<String>, RehomeError> {
             )))
         }
     };
-    Ok(Some(format!("{:x}", Sha256::digest(bytes))))
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| {
+            restore_failed(format!(
+                "could not hash restored file {}: {error}",
+                path.display()
+            ))
+        })?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(Some(format!("{:x}", hash.finalize())))
 }
 
 #[cfg(windows)]

@@ -543,6 +543,10 @@ export default function SendPage({
           <p className="privacy-note">{t("登录信息和敏感文件不会打包。")}</p>
           <p className="muted">{t("体积将在创建时确定。")}</p>
           <details className="technical-details">
+            <summary>{t("如何分批迁移？")}</summary>
+            <p>{t("每次只选一部分对话，分别保存成不同的迁移包。同一项目分批迁移时，每批都保留项目勾选，并在新电脑导入到同一个项目保存位置。未变化的项目文件会跳过；有变化的文件仍需确认冲突。")}</p>
+          </details>
+          <details className="technical-details">
             <summary>{t("查看排除内容")}</summary>
             <p>
               {t(

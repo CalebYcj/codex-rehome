@@ -6,9 +6,10 @@ use crate::core::{
         ContentCounts, ConversationEntry, ExclusionSummary, PackageManifest, PackageMode,
         PackagePreview, ProjectEntry, SourceOs,
     },
-    package::{VerifiedPackage, VerifiedPayload},
+    package::{checked_planning_metadata_bytes, VerifiedPackage, VerifiedPayload},
     paths::normalize_entry,
     session::{metadata_string, parse_session_metadata},
+    session_stream::SessionPayload,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -26,9 +27,6 @@ const LEGACY_SCHEMA: u32 = 3;
 const MAX_ENTRIES: usize = 100_000;
 const MAX_CONTROL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_TOTAL_BYTES;
 const THREAD_COLUMNS: &[&str] = &[
     "id",
     "cwd",
@@ -124,17 +122,9 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
         if logical_name.is_empty() || entry.is_dir() {
             continue;
         }
-        if entry.size() > MAX_ENTRY_BYTES {
-            return Err(invalid("ZIP entry size exceeds the inspection limit"));
-        }
         total_bytes = total_bytes
             .checked_add(entry.size())
             .ok_or_else(|| invalid("ZIP uncompressed size exceeds the inspection limit"))?;
-        if total_bytes > MAX_TOTAL_BYTES {
-            return Err(invalid(
-                "ZIP uncompressed size exceeds the inspection limit",
-            ));
-        }
         let logical_name = normalize_entry(Path::new(logical_name))?;
         if legacy_entry_is_forbidden(&logical_name) {
             forbidden_files_total += 1;
@@ -166,6 +156,8 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
     let project_sources = read_project_sources(&mut archive, prefix, &files)?;
     let mut payloads = BTreeMap::new();
     let mut planning_payloads = BTreeMap::new();
+    let mut session_payloads = BTreeMap::new();
+    let mut planning_metadata_bytes = 0;
     let mut projects = build_projects(&project_sources, &files, &mut payloads)?;
     projects.sort_by(|left, right| left.name.cmp(&right.name));
 
@@ -207,8 +199,14 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
     let mut conversations = Vec::new();
     let mut seen_sessions = HashSet::new();
     for (modern, archive_name) in session_candidates {
-        let bytes = read_archive_entry(&mut archive, &archive_name)?;
-        let Some(session) = parse_session_metadata(&bytes) else {
+        let payload = payloads
+            .get(&modern)
+            .ok_or_else(|| invalid("legacy session payload mapping is missing"))?;
+        let mut entry = archive
+            .by_name(&archive_name)
+            .map_err(|error| invalid(format!("could not reopen legacy session: {error}")))?;
+        let streamed = SessionPayload::capture(&mut entry, payload)?;
+        let Some(session) = parse_session_metadata(&streamed.summary) else {
             continue;
         };
         if !seen_sessions.insert(session.task_id) {
@@ -230,12 +228,19 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
             archive_path: modern.clone(),
             classification: None,
         });
-        planning_payloads.insert(modern, bytes);
+        planning_metadata_bytes = checked_planning_metadata_bytes(
+            planning_metadata_bytes,
+            streamed.summary.len() as u64,
+        )?;
+        planning_payloads.insert(modern.clone(), streamed.summary.clone());
+        session_payloads.insert(modern, streamed);
     }
     conversations.sort_by_key(|conversation| conversation.task_id);
 
     let index_bytes = build_session_index(&mut archive, &files, &conversations)?;
     if !index_bytes.is_empty() {
+        planning_metadata_bytes =
+            checked_planning_metadata_bytes(planning_metadata_bytes, index_bytes.len() as u64)?;
         insert_inline_payload(
             &mut payloads,
             &mut planning_payloads,
@@ -244,6 +249,7 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
         );
     }
     if let Some(thread_bytes) = build_thread_metadata(&mut archive, &files, &conversations)? {
+        checked_planning_metadata_bytes(planning_metadata_bytes, thread_bytes.len() as u64)?;
         insert_inline_payload(
             &mut payloads,
             &mut planning_payloads,
@@ -317,6 +323,7 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
         },
         payloads,
         planning_payloads,
+        session_payloads,
         archive_size_bytes,
         archive_modified,
     }))
@@ -677,22 +684,6 @@ fn ensure_legacy_entry_count(count: usize) -> Result<(), RehomeError> {
     Ok(())
 }
 
-fn ensure_legacy_archive_size(size: u64) -> Result<(), RehomeError> {
-    if size > MAX_ARCHIVE_FILE_BYTES {
-        return Err(invalid(format!(
-            "legacy package file is {size} bytes and exceeds the {MAX_ARCHIVE_FILE_BYTES} byte inspection limit"
-        )));
-    }
-    Ok(())
-}
-
-fn read_archive_entry(
-    archive: &mut ZipArchive<fs::File>,
-    name: &str,
-) -> Result<Vec<u8>, RehomeError> {
-    read_archive_entry_limited(archive, name, MAX_ENTRY_BYTES, "planning payload")
-}
-
 fn read_archive_entry_limited(
     archive: &mut ZipArchive<fs::File>,
     name: &str,
@@ -721,10 +712,6 @@ fn read_archive_entry_limited(
 }
 
 fn hash_file(file: &mut fs::File) -> Result<String, RehomeError> {
-    let metadata = file
-        .metadata()
-        .map_err(|error| invalid(format!("could not inspect package: {error}")))?;
-    ensure_legacy_archive_size(metadata.len())?;
     hash_reader(file)
 }
 
@@ -750,13 +737,6 @@ fn invalid(message: impl Into<String>) -> RehomeError {
 #[cfg(test)]
 mod limit_tests {
     use super::*;
-
-    #[test]
-    fn accepts_legacy_packages_larger_than_the_old_two_gib_limit() {
-        ensure_legacy_archive_size(2 * 1024 * 1024 * 1024 + 128 * 1024 * 1024).unwrap();
-        ensure_legacy_archive_size(MAX_ARCHIVE_FILE_BYTES).unwrap();
-        ensure_legacy_archive_size(MAX_ARCHIVE_FILE_BYTES + 1).unwrap_err();
-    }
 
     #[test]
     fn accepts_large_legacy_project_entry_counts() {
