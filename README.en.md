@@ -51,7 +51,9 @@ Packages exclude login tokens, cookies, `.env` files, private keys, `.git`, `nod
 
 This is not official cloud sync and it does not automatically keep two computers synchronized each day. After a cross-platform move, an old conversation can remain useful historical context while its original working-directory handle no longer works. Reopen the restored project, then continue in a new task when needed.
 
-Each `.rehome` package, individual file, and single Codex conversation can currently be up to 16 GiB. Large files are streamed during creation, inspection, and restore. If a conversation exceeds that limit, split it or leave it unselected.
+Migration packages, ordinary project files, and complete Codex conversations no longer have a fixed byte-size cap. Project files are copied in chunks; transcript bodies stay in temporary files, and path rewriting and restore verification process one record at a time. Leave enough disk space for the package, temporary files, and restore backups. You can also select chats in batches. For successive batches from one project, keep the project selected in each package and import to the same project destination; unchanged project files are skipped, while changed target files still require conflict handling.
+
+Parser safeguards remain: at most 100,000 archive entries, a 4 MiB manifest, a 64 MiB checksum file, 64 MiB of combined planning summaries and conversation bridge metadata, and a 64 MiB individual session JSON record. These bound parsing allocations, not the package or entire transcript size. An oversized record produces an explicit error; ReHome does not truncate or delete conversation content. Whether the target Codex can open a very large chat still depends on its version and the computer's resources.
 
 Login sessions, browser state, running terminals, unsaved work, and native system dependencies are not fully portable. Different accounts or workspaces may require fresh sign-in or authorization for external services.
 

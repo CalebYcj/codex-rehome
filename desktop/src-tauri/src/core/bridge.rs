@@ -317,10 +317,9 @@ fn apply_bridge_plan_with_lock_token(
             continue;
         }
         ensure_writable_change(operation)?;
-        let bytes = verified.authenticated_planning_payload(&session.package_source)?;
-        let rewritten =
-            rewrite_session_jsonl(bytes, &plan.reference_rewrites, &session.package_source)?;
-        let final_hash = sha256_hex(&rewritten);
+        let (rewritten, final_hash) = verified
+            .session_payload(&session.package_source)?
+            .rewritten_file(&plan.reference_rewrites, &session.package_source)?;
         if !final_hash.eq_ignore_ascii_case(&session.expected_final_content_hash) {
             return Err(restore_failed(format!(
                 "planned session transformation hash changed for {}",
@@ -329,7 +328,7 @@ fn apply_bridge_plan_with_lock_token(
         }
         let guard =
             TargetReplacementGuard::acquire(&plan.target_codex_home, operation, lock_token)?;
-        guard.commit_bytes(operation, &rewritten)?;
+        guard.commit_file(operation, rewritten.path())?;
         on_applied(&operation.target)?;
         sessions_written += 1;
     }
@@ -370,8 +369,11 @@ fn apply_bridge_plan_with_lock_token(
             .sessions
             .iter()
             .map(|session| {
-                let bytes = verified.authenticated_planning_payload(&session.package_source)?;
-                Ok((session.source_task_id, session_history_mode(bytes)))
+                let payload = verified.session_payload(&session.package_source)?;
+                Ok((
+                    session.source_task_id,
+                    session_history_mode(&payload.summary),
+                ))
             })
             .collect::<Result<HashMap<_, _>, RehomeError>>()?;
         let import_result = import_sqlite_threads_for_operation(
@@ -1358,10 +1360,6 @@ fn hash_file(path: &Path) -> Result<String, RehomeError> {
         ))
     })?;
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[derive(Debug)]

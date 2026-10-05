@@ -11,4 +11,5 @@ pub(crate) mod plan_store;
 pub mod planner;
 pub mod restore;
 pub(crate) mod session;
+pub(crate) mod session_stream;
 pub(crate) mod stable_fs;

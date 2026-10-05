@@ -8,6 +8,7 @@ use crate::core::{
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
     session::session_history_mode,
+    session_stream::SessionPayload,
 };
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -163,10 +164,7 @@ pub fn build_restore_plan_with_conflict_resolution(
             ));
         }
 
-        let source_bytes = verified
-            .planning_payloads
-            .get(&conversation.archive_path)
-            .ok_or_else(|| package_invalid("verified session payload bytes are missing"))?;
+        let source_bytes = verified.session_payload(&conversation.archive_path)?;
         let source_task_id = conversation.task_id;
         let original_target = codex_target_path(
             &target.codex_home,
@@ -831,7 +829,7 @@ fn target_path_text(path: &Path) -> Result<&str, RehomeError> {
 fn plan_branch_session(
     package_id: Uuid,
     conversation: &crate::core::models::ConversationEntry,
-    source_bytes: &[u8],
+    source_bytes: &SessionPayload,
     original_target: &Path,
     payloads: &BTreeMap<String, VerifiedPayload>,
     planning_payloads: &BTreeMap<String, Vec<u8>>,
@@ -977,12 +975,11 @@ fn conversation_rewrites(
 }
 
 fn rewritten_content_hash(
-    bytes: &[u8],
+    bytes: &SessionPayload,
     rewrites: &[ReferenceRewrite],
     source: &str,
 ) -> Result<String, RehomeError> {
-    let rewritten = rewrite_jsonl_payload(bytes, rewrites, source)?;
-    Ok(format!("{:x}", Sha256::digest(&rewritten)))
+    bytes.rewritten_hash(rewrites, source)
 }
 
 pub(crate) fn rewrite_jsonl_payload(
@@ -1739,7 +1736,10 @@ fn metadata_rows(bytes: &[u8], source: &str) -> Result<Vec<serde_json::Value>, R
     }
 }
 
-fn collect_metadata_project_paths(value: &serde_json::Value, paths: &mut BTreeSet<String>) {
+pub(crate) fn collect_metadata_project_paths(
+    value: &serde_json::Value,
+    paths: &mut BTreeSet<String>,
+) {
     let Some(object) = value.as_object() else {
         if let Some(values) = value.as_array() {
             for value in values {

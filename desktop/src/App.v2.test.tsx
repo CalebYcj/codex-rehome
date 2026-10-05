@@ -265,6 +265,10 @@ describe("V2 utility safeguards", () => {
     expect(
       screen.getByRole("heading", { name: "确认要带走的内容" }),
     ).toBeVisible();
+    const batchHelp = screen.getByText("如何分批迁移？");
+    await user.click(batchHelp);
+    expect(screen.getByText(/每次只选一部分对话，分别保存成不同的迁移包/)).toBeVisible();
+    expect(api.createPackage).not.toHaveBeenCalled();
     await user.click(
       screen.getByRole("button", { name: "选择保存位置并创建" }),
     );

@@ -14,6 +14,8 @@ type Translator = (key: string, variables?: Variables) => string;
 const STORAGE_KEY = "rehome.locale";
 
 const english: Record<string, string> = {
+  "如何分批迁移？": "How do I migrate in batches?",
+  "每次只选一部分对话，分别保存成不同的迁移包。同一项目分批迁移时，每批都保留项目勾选，并在新电脑导入到同一个项目保存位置。未变化的项目文件会跳过；有变化的文件仍需确认冲突。": "Select a subset of chats each time and save separate packages. For batches from the same project, keep the project selected in every package and import to the same project destination on the new computer. Unchanged project files are skipped; changed files still require conflict confirmation.",
   "版本 {version}，检查更新": "Version {version}, check for updates",
   "版本 {version}，发现更新": "Version {version}, update available",
   发现更新: "Update available",

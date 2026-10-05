@@ -10,6 +10,7 @@ use crate::core::{
     },
     paths::normalize_entry,
     session::{metadata_string, metadata_uuid, session_metadata_from_value, SessionMetadata},
+    session_stream::SessionPayload,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
@@ -33,13 +34,9 @@ const SCHEMA_VERSION: u32 = 1;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const MAX_CONTROL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CHECKSUM_FILE_BYTES: u64 = 64 * 1024 * 1024;
-// Keep the planning limit aligned with the package's existing per-file and
-// total-size safety ceiling. This lets a large Codex conversation be checked
-// and path-rewritten instead of being rejected by a smaller legacy limit.
-const MAX_PLANNING_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const MAX_INSPECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRY_BYTES: u64 = MAX_INSPECTION_BYTES;
-const MAX_ARCHIVE_FILE_BYTES: u64 = 2 * MAX_INSPECTION_BYTES;
+// Only parser metadata is bounded. Files and transcripts are streamed and have
+// no fixed byte-size ceiling.
+const MAX_PLANNING_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
 // Codex keeps updating its session index while the app is open. Give a
@@ -246,7 +243,7 @@ fn create_package_with_overwrite(
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct VerifiedPayload {
     pub content_hash: String,
     pub size_bytes: u64,
@@ -259,6 +256,7 @@ pub(crate) struct VerifiedPackage {
     pub preview: PackagePreview,
     pub payloads: BTreeMap<String, VerifiedPayload>,
     pub planning_payloads: BTreeMap<String, Vec<u8>>,
+    pub session_payloads: BTreeMap<String, SessionPayload>,
     pub(crate) archive_size_bytes: u64,
     pub(crate) archive_modified: SystemTime,
 }
@@ -269,6 +267,11 @@ pub(crate) struct AuthenticatedPayloadArchive<'a> {
 }
 
 impl VerifiedPackage {
+    pub(crate) fn session_payload(&self, source: &str) -> Result<&SessionPayload, RehomeError> {
+        self.session_payloads
+            .get(source)
+            .ok_or_else(|| package_invalid("verified session payload is missing"))
+    }
     pub(crate) fn authenticated_planning_payload(
         &self,
         source: &str,
@@ -417,11 +420,6 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         total_bytes = total_bytes
             .checked_add(entry.size())
             .ok_or_else(|| package_invalid("ZIP uncompressed size exceeds the inspection limit"))?;
-        if total_bytes > MAX_INSPECTION_BYTES {
-            return Err(package_invalid(
-                "ZIP uncompressed size exceeds the inspection limit",
-            ));
-        }
         file_paths.insert(normalized.clone());
         match normalized.as_str() {
             "manifest.json" => manifest_bytes = Some(read_control_entry(&mut entry, &normalized)?),
@@ -477,18 +475,32 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         }
     }
     let mut planning_payloads = BTreeMap::new();
+    let mut session_payloads = BTreeMap::new();
+    let mut planning_metadata_bytes = 0;
     for source in planning_sources {
         let mut entry = archive.by_name(&source).map_err(|error| {
             package_invalid(format!(
                 "could not reopen verified planning payload: {error}"
             ))
         })?;
-        let bytes = read_planning_entry(&mut entry, &source)?;
         let payload = payloads
             .get(&source)
             .ok_or_else(|| package_invalid("verified planning payload metadata is missing"))?;
-        authenticate_payload_bytes(&bytes, payload)?;
-        planning_payloads.insert(source, bytes);
+        if source.starts_with("codex/sessions/") || source.starts_with("codex/archived_sessions/") {
+            let session = SessionPayload::capture(&mut entry, payload)?;
+            planning_metadata_bytes = checked_planning_metadata_bytes(
+                planning_metadata_bytes,
+                session.summary.len() as u64,
+            )?;
+            planning_payloads.insert(source.clone(), session.summary.clone());
+            session_payloads.insert(source, session);
+        } else {
+            let bytes = read_planning_entry(&mut entry, &source)?;
+            planning_metadata_bytes =
+                checked_planning_metadata_bytes(planning_metadata_bytes, bytes.len() as u64)?;
+            authenticate_payload_bytes(&bytes, payload)?;
+            planning_payloads.insert(source, bytes);
+        }
     }
 
     let mut file = archive.into_inner();
@@ -513,6 +525,7 @@ pub(crate) fn inspect_package_for_planning(path: &Path) -> Result<VerifiedPackag
         },
         payloads,
         planning_payloads,
+        session_payloads,
         archive_size_bytes,
         archive_modified,
     })
@@ -1394,17 +1407,6 @@ struct ArchiveEntry {
     size: u64,
 }
 
-fn format_package_bytes(bytes: u64) -> String {
-    const MIB: f64 = (1024_u64 * 1024) as f64;
-    const GIB: f64 = (1024_u64 * 1024 * 1024) as f64;
-
-    if bytes >= 1024_u64 * 1024 * 1024 {
-        format!("{:.2} GiB ({bytes} bytes)", bytes as f64 / GIB)
-    } else {
-        format!("{:.2} MiB ({bytes} bytes)", bytes as f64 / MIB)
-    }
-}
-
 fn ensure_archive_entry_count(count: usize) -> Result<(), RehomeError> {
     if count > MAX_ARCHIVE_ENTRIES {
         return Err(package_invalid(format!(
@@ -1415,20 +1417,9 @@ fn ensure_archive_entry_count(count: usize) -> Result<(), RehomeError> {
 }
 
 fn checked_staged_total_bytes(current: u64, next: u64) -> Result<u64, RehomeError> {
-    let total = current.checked_add(next).ok_or_else(|| {
-        package_invalid(format!(
-            "staged package size overflowed the {} limit; deselect large project files or generated images and try again",
-            format_package_bytes(MAX_INSPECTION_BYTES),
-        ))
-    })?;
-    if total > MAX_INSPECTION_BYTES {
-        return Err(package_invalid(format!(
-            "staged package size {} exceeds the {} limit; deselect large project files or generated images and try again",
-            format_package_bytes(total),
-            format_package_bytes(MAX_INSPECTION_BYTES),
-        )));
-    }
-    Ok(total)
+    current
+        .checked_add(next)
+        .ok_or_else(|| package_invalid("staged package size overflowed the supported byte counter"))
 }
 
 fn staged_archive_entries(
@@ -1670,6 +1661,18 @@ mod authenticated_payload_tests {
     use super::*;
 
     #[test]
+    fn streaming_payload_sizes_accept_more_than_sixteen_gib_without_allocating() {
+        let old_limit = 16_u64 * 1024 * 1024 * 1024;
+        assert_eq!(
+            checked_staged_total_bytes(old_limit, 1).unwrap(),
+            old_limit + 1
+        );
+        ensure_archive_entry_size("projects/large.bin", old_limit + 1).unwrap();
+        ensure_archive_entry_size("codex/sessions/large.jsonl", old_limit + 1).unwrap();
+        assert!(checked_staged_total_bytes(u64::MAX, 1).is_err());
+    }
+
+    #[test]
     fn rejects_consumed_payload_bytes_that_do_not_match_the_verified_hash() {
         let verified = VerifiedPayload {
             content_hash: format!("{:x}", Sha256::digest(b"verified bytes")),
@@ -1736,15 +1739,10 @@ mod authenticated_payload_tests {
     }
 
     #[test]
-    fn staged_total_size_error_reports_the_actual_size_and_limit() {
-        let actual = MAX_INSPECTION_BYTES + 1;
-
-        let error = checked_staged_total_bytes(MAX_INSPECTION_BYTES, 1).unwrap_err();
-
+    fn staged_total_size_rejects_only_counter_overflow() {
+        let error = checked_staged_total_bytes(u64::MAX, 1).unwrap_err();
         assert_eq!(error.code, ErrorCode::PackageInvalid);
-        assert!(error.message.contains(&actual.to_string()));
-        assert!(error.message.contains(&MAX_INSPECTION_BYTES.to_string()));
-        assert!(error.message.contains("deselect large project files"));
+        assert!(error.message.contains("byte counter"));
     }
 
     #[test]
@@ -1755,7 +1753,7 @@ mod authenticated_payload_tests {
     }
 
     #[test]
-    fn thread_metadata_uses_the_package_planning_payload_limit() {
+    fn bounded_metadata_is_separate_from_unbounded_transcripts() {
         ensure_control_size("manifest.json", MAX_CONTROL_FILE_BYTES + 1).unwrap_err();
         ensure_planning_payload_size("codex/metadata/threads.json", MAX_CONTROL_FILE_BYTES + 1)
             .unwrap();
@@ -1788,11 +1786,6 @@ fn hash_archive_file(file: &mut fs::File) -> Result<String, RehomeError> {
         bytes_read = bytes_read
             .checked_add(count as u64)
             .ok_or_else(|| package_invalid("package file exceeds the inspection limit"))?;
-        if bytes_read > MAX_ARCHIVE_FILE_BYTES {
-            return Err(package_invalid(
-                "package file size exceeds the inspection limit",
-            ));
-        }
         hasher.update(&buffer[..count]);
     }
     Ok(hex_bytes(&hasher.finalize()))
@@ -1808,7 +1801,10 @@ fn ensure_control_size(name: &str, size: u64) -> Result<(), RehomeError> {
 }
 
 fn control_file_limit(name: &str) -> u64 {
-    if name == "checksums.sha256" {
+    if matches!(
+        name,
+        "checksums.sha256" | "codex/session_index.jsonl" | "codex/metadata/threads.json"
+    ) {
         MAX_CHECKSUM_FILE_BYTES
     } else {
         MAX_CONTROL_FILE_BYTES
@@ -1816,6 +1812,9 @@ fn control_file_limit(name: &str) -> u64 {
 }
 
 fn ensure_planning_payload_size(name: &str, size: u64) -> Result<(), RehomeError> {
+    if name.starts_with("codex/sessions/") || name.starts_with("codex/archived_sessions/") {
+        return Ok(());
+    }
     if size > MAX_PLANNING_PAYLOAD_BYTES {
         return Err(package_invalid(format!(
             "ZIP planning payload size exceeds the inspection limit: {name}"
@@ -1825,18 +1824,30 @@ fn ensure_planning_payload_size(name: &str, size: u64) -> Result<(), RehomeError
     Ok(())
 }
 
+pub(crate) fn checked_planning_metadata_bytes(current: u64, next: u64) -> Result<u64, RehomeError> {
+    let total = current
+        .checked_add(next)
+        .ok_or_else(|| package_invalid("planning metadata byte count overflowed"))?;
+    if total > MAX_PLANNING_PAYLOAD_BYTES {
+        return Err(package_invalid("combined planning metadata exceeds the 64 MiB parser limit; transcript bodies and project files have no fixed total-size limit"));
+    }
+    Ok(total)
+}
+
 fn ensure_archive_entry_size(name: &str, size: u64) -> Result<(), RehomeError> {
-    if size > MAX_ARCHIVE_ENTRY_BYTES {
-        return Err(package_invalid(format!(
-            "package entry {name} is {} and exceeds the {} per-file limit; deselect this file or reduce the package selection",
-            format_package_bytes(size),
-            format_package_bytes(MAX_ARCHIVE_ENTRY_BYTES),
-        )));
+    if matches!(name, "manifest.json" | "checksums.sha256") {
+        return ensure_control_size(name, size);
+    }
+    if matches!(
+        name,
+        "codex/metadata/threads.json" | "codex/session_index.jsonl"
+    ) {
+        return ensure_planning_payload_size(name, size);
     }
     Ok(())
 }
 
-fn stream_authenticated_payload<R: Read, W: Write>(
+pub(crate) fn stream_authenticated_payload<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     verified: &VerifiedPayload,
@@ -1886,11 +1897,6 @@ fn hash_reader<R: Read>(reader: &mut R) -> Result<String, RehomeError> {
         bytes_read = bytes_read
             .checked_add(count as u64)
             .ok_or_else(|| package_invalid("ZIP entry size exceeds the inspection limit"))?;
-        if bytes_read > MAX_ARCHIVE_ENTRY_BYTES {
-            return Err(package_invalid(
-                "ZIP entry size exceeds the inspection limit",
-            ));
-        }
         hasher.update(&buffer[..count]);
     }
     Ok(hex_bytes(&hasher.finalize()))
@@ -2076,7 +2082,7 @@ fn source_is_executable(_path: &Path) -> bool {
     false
 }
 
-fn private_app_temp_root() -> Result<PathBuf, RehomeError> {
+pub(crate) fn private_app_temp_root() -> Result<PathBuf, RehomeError> {
     let root = private_app_temp_path();
     match fs::symlink_metadata(&root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -2187,6 +2193,16 @@ fn io_package_error(error: io::Error) -> RehomeError {
 #[cfg(test)]
 mod archive_entry_tests {
     use super::*;
+
+    #[test]
+    fn combined_planning_metadata_budget_checks_boundaries_without_allocation() {
+        assert_eq!(
+            checked_planning_metadata_bytes(0, MAX_PLANNING_PAYLOAD_BYTES).unwrap(),
+            MAX_PLANNING_PAYLOAD_BYTES
+        );
+        assert!(checked_planning_metadata_bytes(MAX_PLANNING_PAYLOAD_BYTES, 1).is_err());
+        assert!(checked_planning_metadata_bytes(u64::MAX, 1).is_err());
+    }
 
     #[test]
     fn staging_overlap_error_identifies_the_conflicting_selection(
