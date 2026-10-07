@@ -2,7 +2,7 @@ use crate::core::{
     error::{ErrorCode, RehomeError},
     models::ReferenceRewrite,
     package::{private_app_temp_root, stream_authenticated_payload, VerifiedPayload},
-    planner::{collect_metadata_project_paths, rewrite_jsonl_payload},
+    planner::{collect_session_project_paths, rewrite_jsonl_payload},
     session::parse_session_metadata,
 };
 use serde_json::{json, Value};
@@ -69,7 +69,13 @@ impl SessionPayload {
                 });
             }
             let mut record_paths = BTreeSet::new();
-            collect_metadata_project_paths(value, &mut record_paths);
+            let task_id = metadata
+                .as_ref()
+                .and_then(|m| m.get("payload"))
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+                .and_then(|id| uuid::Uuid::parse_str(id).ok());
+            collect_session_project_paths(value, task_id, &mut record_paths);
             for path in record_paths {
                 if !paths.contains(&path) {
                     path_bytes = path_bytes.saturating_add(path.len());

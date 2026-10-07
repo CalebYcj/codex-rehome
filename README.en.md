@@ -22,6 +22,8 @@ Starting with 0.1.26, projects with colliding names in one package automatically
 
 Starting with 0.1.27, ReHome preserves Codex's paginated conversation history mode and can recover that mode from conversation files in older migration packages. This fixes a missing history-mode marker that can cause `list_turns is not supported yet` after import. If a restored chat will not open, update ReHome on the target computer, close Codex, import the original package again, and then reopen Codex.
 
+Starting with 0.1.31, import also maps saved workspace roots, including `runtime_workspace_roots` in later thread-settings snapshots. This prevents stale cross-platform roots from causing `cannot restore workspace root ... path is not absolute`. Selected projects and their subdirectories map to their respective destinations; extra workspace roots not included in the migration are removed from the list rather than assigned guessed locations. Chat messages stay unchanged. Older packages are supported: update ReHome on the target computer, close Codex, and preview/import the original package again. If the existing chat has changed, preserve it and check the newly imported copy.
+
 ## What it can move
 
 - Selected projects and their files

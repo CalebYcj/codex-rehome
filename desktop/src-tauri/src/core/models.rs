@@ -192,6 +192,7 @@ pub enum ReferenceRewriteKind {
     ConversationId,
     ConversationTitle,
     ProjectPath,
+    WorkspaceRoot,
     SessionPath,
 }
 

@@ -7,7 +7,7 @@ use crate::core::{
     },
     package::{inspect_package_for_planning, VerifiedPayload},
     paths::normalize_entry,
-    session::session_history_mode,
+    session::{parse_session_metadata, session_history_mode},
     session_stream::SessionPayload,
 };
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
@@ -1046,6 +1046,25 @@ fn rewrite_json_value(value: &mut serde_json::Value, rewrites: &[&ReferenceRewri
                 rewrite_known_metadata_fields(payload, rewrites, false);
             }
         }
+        Some("event_msg") => {
+            if let Some(payload) = object.get_mut("payload") {
+                let owned_settings = payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("thread_settings_applied")
+                    && payload
+                        .get("thread_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| {
+                            rewrites
+                                .iter()
+                                .any(|rewrite| rewrite.source_task_id.to_string() == id)
+                        });
+                if owned_settings {
+                    // Copied history can contain snapshots owned by another thread.
+                    // Only the current thread's settings participate in resume.
+                    rewrite_known_metadata_fields(payload, rewrites, true);
+                }
+            }
+        }
         Some(_) => {}
         None => rewrite_known_metadata_fields(value, rewrites, true),
     }
@@ -1066,6 +1085,28 @@ fn rewrite_known_metadata_fields(
         return;
     };
     for (field, value) in object {
+        if is_workspace_roots_field(field)
+            && rewrites
+                .iter()
+                .any(|r| r.kind == ReferenceRewriteKind::WorkspaceRoot)
+        {
+            if let Some(roots) = value.as_array_mut() {
+                let mut mapped = Vec::new();
+                for root in roots.iter().filter_map(serde_json::Value::as_str) {
+                    if let Some(root) = map_workspace_root(root, rewrites) {
+                        let root = serde_json::Value::String(root);
+                        if !mapped.contains(&root) {
+                            mapped.push(root);
+                        }
+                    }
+                }
+                // Never guess paths for folders absent from the migration. An
+                // explicit empty list is supported by Codex and avoids restoring
+                // stale roots or granting access to unrelated target folders.
+                *roots = mapped;
+            }
+            continue;
+        }
         if !matches!(
             field.as_str(),
             "message" | "messages" | "content" | "text" | "input" | "output" | "instructions"
@@ -1084,8 +1125,12 @@ fn rewrite_known_metadata_fields(
                     }
                     ReferenceRewriteKind::ConversationTitle => include_identity && field == "title",
                     ReferenceRewriteKind::ProjectPath => {
-                        matches!(field.as_str(), "project" | "project_path" | "cwd" | "path")
+                        matches!(
+                            field.as_str(),
+                            "project" | "project_path" | "cwd" | "path" | "workspace_root"
+                        )
                     }
+                    ReferenceRewriteKind::WorkspaceRoot => false,
                     ReferenceRewriteKind::SessionPath => {
                         matches!(field.as_str(), "rollout" | "rollout_path")
                     }
@@ -1094,6 +1139,148 @@ fn rewrite_known_metadata_fields(
             *value = serde_json::Value::String(rewrite.to.clone());
         }
     }
+}
+
+fn is_workspace_roots_field(field: &str) -> bool {
+    matches!(
+        field,
+        "runtime_workspace_roots" | "runtimeWorkspaceRoots" | "workspace_roots" | "workspaceRoots"
+    )
+}
+
+pub(crate) fn workspace_roots_are_mapped(
+    record: &serde_json::Value,
+    task_id: Uuid,
+    rewrites: &[&ReferenceRewrite],
+) -> bool {
+    if !rewrites
+        .iter()
+        .any(|r| r.kind == ReferenceRewriteKind::WorkspaceRoot)
+    {
+        return true;
+    }
+    let metadata = match record.get("type").and_then(serde_json::Value::as_str) {
+        Some("session_meta" | "turn_context") => record.get("payload"),
+        Some("event_msg") => record.get("payload").filter(|p| {
+            p.get("type").and_then(serde_json::Value::as_str) == Some("thread_settings_applied")
+                && p.get("thread_id").and_then(serde_json::Value::as_str)
+                    == Some(task_id.to_string().as_str())
+        }),
+        None => Some(record),
+        Some(_) => None,
+    };
+    fn check(value: &serde_json::Value, rewrites: &[&ReferenceRewrite]) -> bool {
+        match value {
+            serde_json::Value::Object(object) => object.iter().all(|(field, value)| {
+                if is_workspace_roots_field(field) {
+                    value.is_null()
+                        || value.as_array().is_some_and(|roots| {
+                            roots.iter().all(|root| {
+                                root.as_str().is_some_and(|root| {
+                                    rewrites.iter().any(|r| {
+                                        r.kind == ReferenceRewriteKind::WorkspaceRoot
+                                            && workspace_relative_parts(root, &r.to).is_some()
+                                    })
+                                })
+                            })
+                        })
+                } else {
+                    matches!(
+                        field.as_str(),
+                        "message"
+                            | "messages"
+                            | "content"
+                            | "text"
+                            | "input"
+                            | "output"
+                            | "instructions"
+                    ) || check(value, rewrites)
+                }
+            }),
+            serde_json::Value::Array(values) => values.iter().all(|v| check(v, rewrites)),
+            _ => true,
+        }
+    }
+    metadata.is_none_or(|m| check(m, rewrites))
+}
+
+fn map_workspace_root(root: &str, rewrites: &[&ReferenceRewrite]) -> Option<String> {
+    rewrites
+        .iter()
+        .filter(|r| r.kind == ReferenceRewriteKind::WorkspaceRoot)
+        .filter_map(|r| workspace_relative_parts(root, &r.from).map(|suffix| (r, suffix)))
+        .filter(|(r, suffix)| {
+            if suffix.is_empty() {
+                return true;
+            }
+            let relative = suffix.join("/");
+            !relative.contains('\0')
+                && (!is_windows_path(&r.to)
+                    || normalize_entry(Path::new(&relative))
+                        .is_ok_and(|normalized| normalized == relative))
+        })
+        .max_by_key(|(r, _)| r.from.len())
+        .map(|(r, suffix)| {
+            let separator = if is_windows_path(&r.to) { "\\" } else { "/" };
+            if suffix.is_empty() {
+                r.to.clone()
+            } else {
+                format!(
+                    "{}{}{}",
+                    r.to.trim_end_matches(['/', '\\']),
+                    separator,
+                    suffix.join(separator)
+                )
+            }
+        })
+}
+
+fn is_windows_path(path: &str) -> bool {
+    path.starts_with(r"\\")
+        || path.starts_with("//")
+        || is_windows_drive_path(&path.replace('/', "\\"))
+}
+
+// Parse using the source path's syntax, not the host OS. In particular a Unix
+// backslash is a literal name, Windows comparisons ignore ASCII case, and a
+// sibling with a matching text prefix is not a descendant. Reject traversal.
+fn workspace_relative_parts(path: &str, base: &str) -> Option<Vec<String>> {
+    let windows = is_windows_path(base);
+    if windows != is_windows_path(path) || !looks_like_absolute_path(path) {
+        return None;
+    }
+    let split = |value: &str| {
+        let value = if windows {
+            let value = value.replace('\\', "/");
+            if let Some(body) = value.strip_prefix("//?/UNC/") {
+                format!("//{body}")
+            } else {
+                value.strip_prefix("//?/").unwrap_or(&value).to_owned()
+            }
+        } else {
+            value.to_owned()
+        };
+        let parts = value
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        (!parts.iter().any(|s| s == "..")).then_some(parts)
+    };
+    let path = split(path)?;
+    let base = split(base)?;
+    if path.len() < base.len()
+        || !path.iter().zip(&base).all(|(a, b)| {
+            if windows {
+                a.eq_ignore_ascii_case(b)
+            } else {
+                a == b
+            }
+        })
+    {
+        return None;
+    }
+    Some(path[base.len()..].to_vec())
 }
 
 fn rewrite_metadata_document(
@@ -1559,6 +1746,23 @@ fn add_project_path_rewrites(
     projects: &[crate::core::models::ProjectEntry],
     project_targets: &HashMap<Uuid, PathBuf>,
 ) -> Result<(), RehomeError> {
+    // These mappings are scoped to one conversation but cover every selected
+    // project, so secondary workspaces do not collapse into its primary project.
+    for source in reference_sources(payloads, &conversation.archive_path) {
+        for project in projects {
+            let target = project_targets
+                .get(&project.project_id)
+                .ok_or_else(|| package_invalid("workspace project target is missing"))?;
+            insert_rewrite(
+                rewrites,
+                conversation.task_id,
+                source.clone(),
+                ReferenceRewriteKind::WorkspaceRoot,
+                project.source_path.clone(),
+                crate::core::paths::codex_project_path(target)?.to_owned(),
+            );
+        }
+    }
     let Some(project_id) = conversation.project_id else {
         return Ok(());
     };
@@ -1589,6 +1793,21 @@ fn add_project_path_rewrites(
             }
         }
         for source_path in source_paths {
+            if !projects
+                .iter()
+                .any(|p| workspace_relative_parts(&source_path, &p.source_path).is_some())
+            {
+                // Legacy packages can associate a cwd spelling that differs from
+                // the manifest's source path. Preserve that established binding.
+                insert_rewrite(
+                    rewrites,
+                    conversation.task_id,
+                    source.clone(),
+                    ReferenceRewriteKind::WorkspaceRoot,
+                    source_path.clone(),
+                    target.to_owned(),
+                );
+            }
             insert_rewrite(
                 rewrites,
                 conversation.task_id,
@@ -1705,13 +1924,45 @@ fn session_project_paths(bytes: &[u8], source: &str) -> Result<Vec<String>, Reho
         std::str::from_utf8(bytes).map_err(|_| package_invalid("session payload is not UTF-8"))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut paths = BTreeSet::new();
+    let task_id = parse_session_metadata(bytes).map(|m| m.task_id);
     for line in text.lines().filter(|line| !line.is_empty()) {
         let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
             package_invalid(format!("session JSONL is invalid for {source}: {error}"))
         })?;
-        collect_metadata_project_paths(&value, &mut paths);
+        collect_session_project_paths(&value, task_id, &mut paths);
     }
     Ok(paths.into_iter().collect())
+}
+
+pub(crate) fn collect_session_project_paths(
+    value: &serde_json::Value,
+    task_id: Option<Uuid>,
+    paths: &mut BTreeSet<String>,
+) {
+    match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("session_meta" | "turn_context") => {
+            if let Some(payload) = value.get("payload") {
+                collect_metadata_project_paths(payload, paths);
+            }
+        }
+        Some("event_msg") => {
+            if let Some(payload) = value.get("payload") {
+                if payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("thread_settings_applied")
+                    && payload
+                        .get("thread_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| task_id.is_some_and(|task| task.to_string() == id))
+                {
+                    if let Some(settings) = payload.get("thread_settings") {
+                        collect_metadata_project_paths(settings, paths);
+                    }
+                }
+            }
+        }
+        None => collect_metadata_project_paths(value, paths),
+        Some(_) => {}
+    }
 }
 
 fn metadata_rows(bytes: &[u8], source: &str) -> Result<Vec<serde_json::Value>, RehomeError> {
@@ -1750,7 +2001,10 @@ pub(crate) fn collect_metadata_project_paths(
     };
 
     for (field, value) in object {
-        if matches!(field.as_str(), "cwd" | "project" | "project_path") {
+        if matches!(
+            field.as_str(),
+            "cwd" | "project" | "project_path" | "workspace_root"
+        ) {
             if let Some(value) = value
                 .as_str()
                 .filter(|value| looks_like_absolute_path(value))
@@ -1983,6 +2237,157 @@ mod tests {
             assert_eq!(error.code, ErrorCode::RestoreFailed);
             assert!(error.message.contains("overlap"));
         }
+    }
+
+    #[test]
+    fn workspace_root_verification_rejects_stale_roots_even_with_mapped_cwd() {
+        let id = Uuid::nil();
+        let rewrite = ReferenceRewrite {
+            source_task_id: id,
+            package_source: "thread".into(),
+            kind: ReferenceRewriteKind::WorkspaceRoot,
+            from: "C:/old".into(),
+            to: "/Users/new/project".into(),
+        };
+        for (roots, valid) in [
+            (serde_json::json!(["C:/old"]), false),
+            (
+                serde_json::json!(["/Users/new/project", "/Users/new/project/sub"]),
+                true,
+            ),
+            (serde_json::json!(["/Users/new/project/../outside"]), false),
+            (serde_json::json!([]), true),
+        ] {
+            let record = serde_json::json!({"type":"session_meta","payload":{"cwd":"/Users/new/project","runtime_workspace_roots":roots}});
+            assert_eq!(workspace_roots_are_mapped(&record, id, &[&rewrite]), valid);
+        }
+    }
+
+    #[test]
+    fn workspace_root_mapping_cannot_turn_unix_names_into_windows_traversal() {
+        let rewrite = ReferenceRewrite {
+            source_task_id: Uuid::nil(),
+            package_source: "thread".into(),
+            kind: ReferenceRewriteKind::WorkspaceRoot,
+            from: "/Users/old/project".into(),
+            to: r"C:\new\project".into(),
+        };
+        for root in [
+            r"/Users/old/project/..\outside",
+            "/Users/old/project/sub:stream",
+            "/Users/old/project/NUL",
+        ] {
+            assert_eq!(map_workspace_root(root, &[&rewrite]), None);
+        }
+        assert_eq!(
+            map_workspace_root("/Users/old/project/sub", &[&rewrite]),
+            Some(r"C:\new\project\sub".into())
+        );
+    }
+
+    #[test]
+    fn workspace_root_mapping_respects_source_syntax_and_boundaries() {
+        for (root, base, expected) in [
+            (
+                r"\\?\UNC\SERVER\Share\Project\sub",
+                r"\\server\share\project",
+                Some(vec!["sub"]),
+            ),
+            (r"\\?\c:\project\sub", "C:/Project", Some(vec!["sub"])),
+            ("C:/Project-old", r"C:\Project", None),
+            ("C:/Project/../outside", r"C:\Project", None),
+            (
+                "/Users/old/Project/sub",
+                "/Users/old/Project",
+                Some(vec!["sub"]),
+            ),
+            ("/users/old/project", "/Users/old/Project", None),
+            (
+                r"/Users/old/Project/literal\name",
+                "/Users/old/Project",
+                Some(vec![r"literal\name"]),
+            ),
+        ] {
+            assert_eq!(
+                workspace_relative_parts(root, base),
+                expected.map(|parts| parts.into_iter().map(str::to_owned).collect()),
+                "{root}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_roots_migrate_without_changing_messages_or_other_threads() {
+        let source = "codex/sessions/thread.jsonl";
+        let id = Uuid::nil();
+        let mapped_id = Uuid::new_v4();
+        let rewrites = vec![
+            ReferenceRewrite {
+                source_task_id: id,
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::ProjectPath,
+                from: r"C:\Users\25309\Documents\Codex".into(),
+                to: "/Users/new/Codex".into(),
+            },
+            ReferenceRewrite {
+                source_task_id: id,
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::WorkspaceRoot,
+                from: r"C:\Users\25309\Documents\Codex".into(),
+                to: "/Users/new/Codex".into(),
+            },
+            ReferenceRewrite {
+                source_task_id: id,
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::WorkspaceRoot,
+                from: r"D:\Second".into(),
+                to: "/Users/new/Second".into(),
+            },
+            ReferenceRewrite {
+                source_task_id: id,
+                package_source: source.into(),
+                kind: ReferenceRewriteKind::ConversationId,
+                from: id.to_string(),
+                to: mapped_id.to_string(),
+            },
+        ];
+        let roots = serde_json::json!([
+            r"C:\Users\25309\Documents\Codex",
+            "c:/users/25309/documents/codex/sub",
+            r"D:\Second",
+            r"C:\Users\25309\Documents\Codex-old",
+            r"E:\NotMigrated"
+        ]);
+        let records = [
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":rewrites[0].from,"workspace_root":rewrites[0].from,"runtime_workspace_roots":roots}}),
+            serde_json::json!({"type":"turn_context","payload":{"runtime_workspace_roots":roots,"workspaceRoots":roots}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":id,"thread_settings":{"cwd":rewrites[0].from,"runtime_workspace_roots":roots}}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":Uuid::new_v4(),"thread_settings":{"cwd":rewrites[0].from,"runtime_workspace_roots":roots}}}),
+            serde_json::json!({"type":"response_item","payload":{"runtime_workspace_roots":roots,"content":[{"text":rewrites[0].from}]}}),
+        ];
+        let bytes = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+        let output = rewrite_jsonl_payload(bytes.as_bytes(), &rewrites, source).unwrap();
+        let result = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .collect::<Vec<_>>();
+        let expected = serde_json::json!([
+            "/Users/new/Codex",
+            "/Users/new/Codex/sub",
+            "/Users/new/Second"
+        ]);
+        assert_eq!(result[0]["payload"]["workspace_root"], "/Users/new/Codex");
+        assert_eq!(result[0]["payload"]["runtime_workspace_roots"], expected);
+        assert_eq!(result[1]["payload"]["runtime_workspace_roots"], expected);
+        assert_eq!(result[1]["payload"]["workspaceRoots"], expected);
+        assert_eq!(result[2]["payload"]["thread_id"], mapped_id.to_string());
+        assert_eq!(
+            result[2]["payload"]["thread_settings"]["runtime_workspace_roots"],
+            expected
+        );
+        assert_eq!(result[3], records[3]);
+        assert_eq!(result[4], records[4]);
     }
 
     #[test]
