@@ -1746,10 +1746,22 @@ fn add_project_path_rewrites(
     projects: &[crate::core::models::ProjectEntry],
     project_targets: &HashMap<Uuid, PathBuf>,
 ) -> Result<(), RehomeError> {
+    let primary_project = projects
+        .iter()
+        .find(|project| Some(project.project_id) == conversation.project_id);
     // These mappings are scoped to one conversation but cover every selected
     // project, so secondary workspaces do not collapse into its primary project.
     for source in reference_sources(payloads, &conversation.archive_path) {
         for project in projects {
+            // Two package projects can have the same source root. Only the
+            // conversation's explicit primary association resolves that alias.
+            if primary_project.is_some_and(|primary| {
+                primary.project_id != project.project_id
+                    && workspace_relative_parts(&project.source_path, &primary.source_path)
+                        .is_some_and(|suffix| suffix.is_empty())
+            }) {
+                continue;
+            }
             let target = project_targets
                 .get(&project.project_id)
                 .ok_or_else(|| package_invalid("workspace project target is missing"))?;
@@ -1808,13 +1820,23 @@ fn add_project_path_rewrites(
                     target.to_owned(),
                 );
             }
+            let workspace_mappings = rewrites
+                .values()
+                .filter(|r| {
+                    r.source_task_id == conversation.task_id
+                        && r.package_source == source
+                        && r.kind == ReferenceRewriteKind::WorkspaceRoot
+                })
+                .collect::<Vec<_>>();
+            let mapped_target = map_workspace_root(&source_path, &workspace_mappings)
+                .unwrap_or_else(|| target.to_owned());
             insert_rewrite(
                 rewrites,
                 conversation.task_id,
                 source.clone(),
                 ReferenceRewriteKind::ProjectPath,
                 source_path,
-                target.to_owned(),
+                mapped_target,
             );
         }
     }

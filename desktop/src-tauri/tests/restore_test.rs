@@ -59,7 +59,7 @@ fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
             let records = [
                 serde_json::json!({"type":"session_meta","payload":{"id":THREAD_ID,"timestamp":common::FIXED_TIMESTAMP,"cwd":old,"workspace_root":old,"runtime_workspace_roots":roots,"history_mode":"legacy","model_provider":"openai","source":"appServer","cli_version":"0.162.0-alpha.2","originator":"rehome-workspace-test"}}),
                 serde_json::json!({"type":"turn_context","payload":{"cwd":old,"runtime_workspace_roots":roots}}),
-                serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":THREAD_ID,"thread_settings":{"cwd":old,"runtime_workspace_roots":roots}}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":THREAD_ID,"thread_settings":{"cwd":second.source_path,"runtime_workspace_roots":roots}}}),
                 serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":old}]}}),
             ];
             let replacement = records.iter().map(|v| format!("{v}\n")).collect::<String>();
@@ -106,7 +106,7 @@ fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
     assert_eq!(records[0]["payload"]["workspace_root"], primary);
     assert_eq!(records[0]["payload"]["runtime_workspace_roots"], expected);
     assert_eq!(records[1]["payload"]["runtime_workspace_roots"], expected);
-    assert_eq!(records[2]["payload"]["thread_settings"]["cwd"], primary);
+    assert_eq!(records[2]["payload"]["thread_settings"]["cwd"], secondary);
     assert_eq!(
         records[2]["payload"]["thread_settings"]["runtime_workspace_roots"],
         expected
