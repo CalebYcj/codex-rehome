@@ -15,6 +15,7 @@ use crate::core::{
     },
     package::{inspect_package_for_planning, VerifiedPackage},
     paths::restore_target_root,
+    planner::workspace_roots_are_mapped,
     session::session_history_mode,
     session_stream::visit_jsonl,
 };
@@ -547,7 +548,17 @@ fn verify_bridge_metadata(
             ))
         })?;
         let mut matching_paths = std::collections::BTreeSet::new();
+        let workspace_rewrites = plan
+            .reference_rewrites
+            .iter()
+            .filter(|r| {
+                r.source_task_id == session.source_task_id
+                    && r.package_source == session.package_source
+            })
+            .collect::<Vec<_>>();
         visit_jsonl(session_file, |_, value| {
+            mapping_valid &=
+                workspace_roots_are_mapped(value, session.target_task_id, &workspace_rewrites);
             for expected in &expected_project_paths {
                 if json_contains_string(value, expected) {
                     matching_paths.insert(*expected);

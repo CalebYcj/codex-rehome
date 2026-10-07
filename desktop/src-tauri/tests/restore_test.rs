@@ -36,6 +36,96 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
+) -> Result<(), Box<dyn Error>> {
+    let old = r"C:\Users\OldUser\Documents\Codex";
+    let harness = RestoreHarness::new_with_projects(
+        DatabaseSchema::Compatible,
+        true,
+        |package, _| {
+            let preview = inspect_package(package)?;
+            let second = preview
+                .manifest
+                .projects
+                .iter()
+                .find(|p| p.name == "second")
+                .unwrap();
+            let roots = serde_json::json!([
+                old,
+                format!("{old}\\sub"),
+                second.source_path,
+                r"E:\NotMigrated"
+            ]);
+            let records = [
+                serde_json::json!({"type":"session_meta","payload":{"id":THREAD_ID,"timestamp":common::FIXED_TIMESTAMP,"cwd":old,"workspace_root":old,"runtime_workspace_roots":roots,"history_mode":"legacy","model_provider":"openai","source":"appServer","cli_version":"0.162.0-alpha.2","originator":"rehome-workspace-test"}}),
+                serde_json::json!({"type":"turn_context","payload":{"cwd":old,"runtime_workspace_roots":roots}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":THREAD_ID,"thread_settings":{"cwd":second.source_path,"runtime_workspace_roots":roots}}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":old}]}}),
+            ];
+            let replacement = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+            replace_selected_session_payload(package, replacement.as_bytes())
+        },
+    )?;
+    let session = harness.plan.sessions[0].target.clone();
+    let primary = harness
+        .plan
+        .reference_rewrites
+        .iter()
+        .find(|r| {
+            r.from == old
+                && r.kind == rehome_desktop_lib::core::models::ReferenceRewriteKind::ProjectPath
+        })
+        .unwrap()
+        .to
+        .clone();
+    let secondary = harness
+        .plan
+        .reference_rewrites
+        .iter()
+        .find(|r| {
+            r.kind == rehome_desktop_lib::core::models::ReferenceRewriteKind::WorkspaceRoot
+                && r.to.ends_with("second")
+        })
+        .unwrap()
+        .to
+        .clone();
+    let expected = serde_json::json!([
+        primary,
+        Path::new(&primary).join("sub").to_string_lossy(),
+        secondary
+    ]);
+    let original_index = fs::read(harness.plan.target_codex_home.join("session_index.jsonl"))?;
+    let original_db = fs::read(harness.plan.target_codex_home.join("state_5.sqlite"))?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    assert!(report.verification.path_mapping_valid && report.verification.sessions_valid);
+    let restored = fs::read_to_string(&session)?;
+    let records = restored
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(records[0]["payload"]["workspace_root"], primary);
+    assert_eq!(records[0]["payload"]["runtime_workspace_roots"], expected);
+    assert_eq!(records[1]["payload"]["runtime_workspace_roots"], expected);
+    assert_eq!(records[2]["payload"]["thread_settings"]["cwd"], secondary);
+    assert_eq!(
+        records[2]["payload"]["thread_settings"]["runtime_workspace_roots"],
+        expected
+    );
+    assert_eq!(records[3]["payload"]["content"][0]["text"], old);
+    assert!(rollback(report.transaction_id)?.success);
+    assert!(!session.exists());
+    assert_eq!(
+        fs::read(harness.plan.target_codex_home.join("session_index.jsonl"))?,
+        original_index
+    );
+    assert_eq!(
+        fs::read(harness.plan.target_codex_home.join("state_5.sqlite"))?,
+        original_db
+    );
+    Ok(())
+}
+
+#[test]
 fn streamed_large_conversation_round_trip_preserves_messages_paths_and_rollback(
 ) -> Result<(), Box<dyn Error>> {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;

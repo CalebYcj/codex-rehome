@@ -966,6 +966,21 @@ fn same_named_project_conversations_keep_separate_paths_in_all_metadata(
         let expected =
             rehome_desktop_lib::core::paths::codex_project_path(file.target.parent().unwrap())?;
         roots.insert(expected.clone());
+        let workspace_targets = plan
+            .reference_rewrites
+            .iter()
+            .filter(|rewrite| {
+                rewrite.source_task_id == session.source_task_id
+                    && rewrite.package_source == session.package_source
+                    && rewrite.kind
+                        == rehome_desktop_lib::core::models::ReferenceRewriteKind::WorkspaceRoot
+            })
+            .map(|rewrite| rewrite.to.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            workspace_targets,
+            std::collections::HashSet::from([expected.as_str()])
+        );
         let restored: serde_json::Value =
             serde_json::from_str(fs::read_to_string(&session.target)?.trim())?;
         let restored_cwd = restored
