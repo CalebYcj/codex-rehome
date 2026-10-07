@@ -38,7 +38,7 @@ static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
 ) -> Result<(), Box<dyn Error>> {
-    let old = r"C:\Users\25309\Documents\Codex";
+    let old = r"C:\Users\OldUser\Documents\Codex";
     let harness = RestoreHarness::new_with_projects(
         DatabaseSchema::Compatible,
         true,

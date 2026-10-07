@@ -2326,14 +2326,14 @@ mod tests {
                 source_task_id: id,
                 package_source: source.into(),
                 kind: ReferenceRewriteKind::ProjectPath,
-                from: r"C:\Users\25309\Documents\Codex".into(),
+                from: r"C:\Users\OldUser\Documents\Codex".into(),
                 to: "/Users/new/Codex".into(),
             },
             ReferenceRewrite {
                 source_task_id: id,
                 package_source: source.into(),
                 kind: ReferenceRewriteKind::WorkspaceRoot,
-                from: r"C:\Users\25309\Documents\Codex".into(),
+                from: r"C:\Users\OldUser\Documents\Codex".into(),
                 to: "/Users/new/Codex".into(),
             },
             ReferenceRewrite {
@@ -2352,10 +2352,11 @@ mod tests {
             },
         ];
         let roots = serde_json::json!([
-            r"C:\Users\25309\Documents\Codex",
-            "c:/users/25309/documents/codex/sub",
+            r"C:\Users\OldUser\Documents\Codex",
+            "c:/users/olduser/documents/codex/sub",
+            "c:/users/olduser/documents/codex",
             r"D:\Second",
-            r"C:\Users\25309\Documents\Codex-old",
+            r"C:\Users\OldUser\Documents\Codex-old",
             r"E:\NotMigrated"
         ]);
         let records = [
