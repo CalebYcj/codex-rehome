@@ -34,6 +34,7 @@ jobs:
       - working-directory: desktop
         run: npm run build
       - run: node --test scripts/generate-updater-json.test.mjs
+      - run: node --test scripts/installer-artwork.test.mjs
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       # macOS exposes its default temporary directory through /var, a symlink.

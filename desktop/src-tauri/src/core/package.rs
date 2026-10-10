@@ -1323,7 +1323,7 @@ fn write_archive_atomically(
 ) -> Result<(), RehomeError> {
     let output_parent = usable_parent(output_path);
     let mut temporary = NamedTempFile::new_in(output_parent)
-        .map_err(|error| package_invalid(format!("could not create package temp file: {error}")))?;
+        .map_err(|error| archive_output_io_error(error, "could not create package temp file"))?;
     {
         let mut writer = ZipWriter::new(temporary.as_file_mut());
         let entries = staged_archive_entries(staging_root, payloads)?;
@@ -1345,9 +1345,8 @@ fn write_archive_atomically(
         writer.finish().map_err(zip_package_error)?;
     }
     temporary.as_file().sync_all().map_err(io_package_error)?;
-    publish_archive(temporary.path(), output_path, replace_existing).map_err(|error| {
-        package_invalid(format!("could not atomically publish package: {error}"))
-    })?;
+    publish_archive(temporary.path(), output_path, replace_existing)
+        .map_err(|error| archive_output_io_error(error, "could not atomically publish package"))?;
     drop(temporary);
     Ok(())
 }
@@ -2377,9 +2376,55 @@ fn io_package_error(error: io::Error) -> RehomeError {
     )
 }
 
+fn archive_output_io_error(error: io::Error, operation: &str) -> RehomeError {
+    let mut error = io_package_error(error);
+    error.message = format!("{operation}: {}", error.message);
+    error
+}
+
 #[cfg(test)]
 mod archive_entry_tests {
     use super::*;
+
+    #[test]
+    fn final_archive_operations_preserve_storage_full_diagnostics() {
+        for operation in [
+            "could not create package temp file",
+            "could not atomically publish package",
+        ] {
+            let error = archive_output_io_error(
+                io::Error::new(io::ErrorKind::StorageFull, "full"),
+                operation,
+            );
+            assert_eq!(error.code, ErrorCode::DiskSpaceInsufficient, "{operation}");
+            assert!(error.message.contains(operation));
+            assert!(error.message.contains("full"));
+            let denied = archive_output_io_error(
+                io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+                operation,
+            );
+            assert_eq!(denied.code, ErrorCode::PackageInvalid);
+            assert!(denied.message.contains("denied"));
+        }
+    }
+
+    #[test]
+    fn final_archive_operations_preserve_native_capacity_errors() {
+        #[cfg(windows)]
+        let codes = [39, 112];
+        #[cfg(unix)]
+        let codes = [libc::ENOSPC, libc::EDQUOT];
+        for code in codes {
+            for operation in [
+                "could not create package temp file",
+                "could not atomically publish package",
+            ] {
+                let error = archive_output_io_error(io::Error::from_raw_os_error(code), operation);
+                assert_eq!(error.code, ErrorCode::DiskSpaceInsufficient);
+                assert!(error.message.contains(operation));
+            }
+        }
+    }
 
     #[test]
     fn export_staging_prefers_destination_and_avoids_selected_sources(
