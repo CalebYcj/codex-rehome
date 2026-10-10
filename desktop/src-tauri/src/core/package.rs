@@ -2145,6 +2145,8 @@ fn create_export_staging(
             // per-user staging behavior instead of leaving readable snapshots.
             #[cfg(windows)]
             Err(error) if matches!(error.raw_os_error(), Some(1 | 50)) => {}
+            #[cfg(unix)]
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
             Err(error) => return Err(export_staging_io_error(error, &output)),
         }
     }
@@ -2171,7 +2173,15 @@ fn export_staging_io_error(error: io::Error, location: &Path) -> RehomeError {
 #[cfg(unix)]
 fn make_export_staging_private(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    // Removable filesystems can accept chmod without retaining POSIX modes.
+    if fs::metadata(path)?.permissions().mode() & 0o777 != 0o700 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "destination filesystem cannot enforce private directory permissions",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
