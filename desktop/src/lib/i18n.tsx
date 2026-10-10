@@ -14,6 +14,9 @@ type Translator = (key: string, variables?: Variables) => string;
 const STORAGE_KEY = "rehome.locale";
 
 const english: Record<string, string> = {
+  "导出空间不足。请检查下方的实际暂存位置和保存位置。勾选项目会带走项目文件，减少对话数量不一定能缩小包；可改存到空间充足、且不在所选项目内的文件夹。\n{message}": "Not enough space to export. Check the actual staging and save locations below. Selecting a project includes its files, so fewer chats may not make the package much smaller. Choose a folder with sufficient space outside the selected projects.\n{message}",
+  "勾选项目会包含项目文件。导出需要暂存副本和迁移包的空间；通常暂存在保存位置，若保存到所选内容内或磁盘不支持私有权限，则使用本机缓存目录。": "Selecting a project includes its files. Export needs space for both a temporary snapshot and the package. The snapshot normally uses the save location; saving inside selected content or on a filesystem without private permissions uses the local cache instead.",
+  "选择项目的上级文件夹，ReHome 会在其中为各项目建立目录，并更新关联对话的项目路径。导入前请在预览中检查完整目标路径。": "Choose the parent folder for your projects. ReHome creates a folder for each project there and updates associated chat paths. Check the complete target paths in the preview before importing.",
   "如何分批迁移？": "How do I migrate in batches?",
   "每次只选一部分对话，分别保存成不同的迁移包。同一项目分批迁移时，每批都保留项目勾选，并在新电脑导入到同一个项目保存位置。未变化的项目文件会跳过；有变化的文件仍需确认冲突。": "Select a subset of chats each time and save separate packages. For batches from the same project, keep the project selected in every package and import to the same project destination on the new computer. Unchanged project files are skipped; changed files still require conflict confirmation.",
   "版本 {version}，检查更新": "Version {version}, check for updates",

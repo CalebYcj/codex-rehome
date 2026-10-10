@@ -1,6 +1,6 @@
 [package]
 name = "rehome-desktop"
-version = "0.1.31"
+version = "0.1.32"
 description = "ReHome Desktop migration utility"
 authors = ["ReHome contributors"]
 edition = "2021"
@@ -35,7 +35,7 @@ zip = { version = "4.6", default-features = false }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tauri-plugin-updater = "2"

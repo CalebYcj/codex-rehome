@@ -1029,40 +1029,72 @@ fn published_package_is_complete_when_the_target_first_appears() -> Result<(), B
 }
 
 #[test]
-fn sensitive_staging_never_appears_in_project_or_output_directories() -> Result<(), Box<dyn Error>>
-{
+fn export_snapshot_uses_destination_without_entering_source_and_is_cleaned(
+) -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     fs::File::create(fixture.project_path.join("large.bin"))?.set_len(128 * 1024 * 1024)?;
-    let directory = tempfile::tempdir()?;
+    let directory = if let Some(destination) = std::env::var_os("REHOME_EXPORT_TEST_DESTINATION") {
+        tempfile::tempdir_in(destination)?
+    } else {
+        tempfile::tempdir()?
+    };
     let package = directory.path().join("private-stage.rehome");
-    let watched_roots = [fixture.project_path.clone(), directory.path().to_path_buf()];
+    let project_root = fixture.project_path.clone();
+    let output_root = directory.path().to_path_buf();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_observer = Arc::clone(&stop);
     let observer = thread::spawn(move || {
-        let mut found = false;
+        let mut found_source = false;
+        let mut found_destination = false;
         while !stop_observer.load(Ordering::Acquire) {
-            found |= watched_roots.iter().any(|root| {
-                WalkDir::new(root)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .any(|entry| {
-                        entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(".rehome-stage-")
-                    })
+            found_source |= WalkDir::new(&project_root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".rehome-stage-")
+                });
+            found_destination |= fs::read_dir(&output_root).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".rehome-stage-")
+                })
             });
-            if found {
+            if found_source {
                 break;
             }
             thread::yield_now();
         }
-        found
+        (found_source, found_destination)
     });
 
-    create_package(package_request(&fixture, package))?;
+    let result = create_package(package_request(&fixture, package.clone()));
     stop.store(true, Ordering::Release);
-    assert!(!observer.join().map_err(|_| "observer panicked")?);
+    let (found_source, found_destination) = observer.join().map_err(|_| "observer panicked")?;
+    result?;
+    assert!(!found_source);
+    assert!(found_destination);
+    assert!(inspect_package(&package)?.checksum_valid);
+    assert_eq!(fs::read_dir(directory.path())?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn failed_export_cleans_destination_snapshot_without_replacing_existing_package(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let directory = tempfile::tempdir()?;
+    let output = directory.path().join("existing.rehome");
+    fs::write(&output, b"existing package")?;
+    let mut request = package_request(&fixture, output.clone());
+    request.conversation_ids = vec![Uuid::new_v4()];
+    assert!(create_package_replacing(request).is_err());
+    assert_eq!(fs::read(&output)?, b"existing package");
+    assert_eq!(fs::read_dir(directory.path())?.count(), 1);
     Ok(())
 }
 

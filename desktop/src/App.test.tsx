@@ -430,6 +430,7 @@ describe("ReHome Desktop workflows", () => {
     await user.click(screen.getByText("查看文件变更"));
     expect(await screen.findByText("codex/session_index.jsonl")).toBeVisible();
     expect(screen.queryByText("目标项目目录")).toBeNull();
+    expect(screen.queryByText(/选择项目的上级文件夹/)).toBeNull();
   });
 
   it.each([
@@ -465,6 +466,23 @@ describe("ReHome Desktop workflows", () => {
       expect(api.openPath).not.toHaveBeenCalled();
     },
   );
+
+  it("explains export disk space using the actual staging location", async () => {
+    const user = userEvent.setup();
+    const message = "export disk space insufficient; staging: D:\\Transfers\\.rehome-stage-test; package output directory: D:\\Transfers";
+    api.createPackage.mockRejectedValue({ code: "disk_space_insufficient", message });
+    render(<App />);
+    await screen.findByText(inventory.codex_home);
+    await user.click(screen.getByRole("button", { name: "前往导出" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    await user.click(screen.getByRole("button", { name: "继续" }));
+    expect(screen.getByText(/勾选项目会包含项目文件/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "选择保存位置并创建" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("减少对话数量不一定能缩小包");
+    expect(alert).toHaveTextContent(message);
+    expect(screen.getByRole("button", { name: "选择保存位置并创建" })).toBeEnabled();
+  });
 
   it("reveals a newly created package so the user can find it", async () => {
     const user = userEvent.setup();
@@ -681,6 +699,7 @@ describe("ReHome Desktop workflows", () => {
     expect(screen.getByText("禁用文件 0")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "继续" }));
     expect(screen.getByText("安全备份由 ReHome 自动管理")).toBeInTheDocument();
+    expect(screen.getByText(/选择项目的上级文件夹/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "选择项目保存位置" }));
     await user.click(screen.getByRole("button", { name: "预览导入内容" }));
     expect(screen.getByText("冲突 1")).toBeInTheDocument();
