@@ -479,7 +479,12 @@ export default function ReceivePage({
             onClick={projectLocationRequired ? chooseLocations : undefined}
             disabled={busy}
           />
-          <p className="privacy-note">{t("安全备份由 ReHome 自动管理")}</p>
+            {projectLocationRequired && (
+              <p className="muted">{t(
+                "选择项目的上级文件夹，ReHome 会在其中为各项目建立目录，并更新关联对话的项目路径。导入前请在预览中检查完整目标路径。",
+              )}</p>
+            )}
+            <p className="privacy-note">{t("安全备份由 ReHome 自动管理")}</p>
           <footer className="action-footer">
             <span className="muted">{t("预览不会写入迁移内容。")}</span>
             <button

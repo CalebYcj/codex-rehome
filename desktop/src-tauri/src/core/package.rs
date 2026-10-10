@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
-use tempfile::{Builder, NamedTempFile};
+use tempfile::{Builder, NamedTempFile, TempDir};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -87,159 +87,165 @@ fn create_package_with_overwrite(
     let inventory = discover_codex(Some(request.codex_home.clone()))?;
     let output_parent = usable_parent(&request.output_path);
     fs::create_dir_all(output_parent).map_err(|error| {
-        package_invalid(format!(
-            "could not create package output directory: {error}"
-        ))
+        let mut error = io_package_error(error);
+        error.message = format!(
+            "could not create package output directory {}: {}",
+            output_parent.display(),
+            error.message
+        );
+        error
     })?;
 
-    let staging_root = private_app_temp_root()?;
-    validate_staging_location(
-        &staging_root,
-        output_parent,
-        &request.project_paths,
-        &request.codex_home,
-    )?;
-    let staging = Builder::new()
-        .prefix(".rehome-stage-")
-        .tempdir_in(&staging_root)
-        .map_err(|error| package_invalid(format!("could not create private staging: {error}")))?;
-    make_staging_private(staging.path())?;
+    let staging = create_export_staging(output_parent, &request)?;
+    let output_location = output_parent.to_path_buf();
+    let result = (|| {
+        let mut payloads = PayloadCollection::new()?;
+        let mut counts = ContentCounts::default();
+        let mut excluded_files = 0_u64;
+        let mut excluded_bytes = 0_u64;
 
-    let mut payloads = PayloadCollection::new()?;
-    let mut counts = ContentCounts::default();
-    let mut excluded_files = 0_u64;
-    let mut excluded_bytes = 0_u64;
-
-    let (projects, project_exclusions) = stage_projects(
-        &request.project_paths,
-        staging.path(),
-        &mut payloads,
-        &mut counts,
-    )?;
-    excluded_files += project_exclusions.0;
-    excluded_bytes += project_exclusions.1;
-
-    let index_metadata = read_selected_session_index(
-        inventory.session_index_path.as_deref(),
-        &request.conversation_ids,
-    )?;
-    let thread_export = inventory
-        .state_db_path
-        .as_deref()
-        .map(|state_db| export_selected_threads(state_db, &request.conversation_ids))
-        .transpose()?;
-    let conversations = stage_conversations(
-        ConversationSelection {
-            paths: &inventory.conversation_paths,
-            codex_home: &request.codex_home,
-            selected_ids: &request.conversation_ids,
-            index: &index_metadata,
-            projects: &projects,
-            active_rollout_paths: thread_export.as_ref().map(|export| &export.rollout_paths),
-        },
-        staging.path(),
-        &mut payloads,
-        &mut counts,
-    )?;
-
-    let complete_index = complete_session_index(&index_metadata, &conversations)?;
-    if !complete_index.is_empty() {
-        stage_generated(
+        let (projects, project_exclusions) = stage_projects(
+            &request.project_paths,
             staging.path(),
             &mut payloads,
-            "codex/session_index.jsonl",
-            &complete_index,
+            &mut counts,
         )?;
-    }
+        excluded_files += project_exclusions.0;
+        excluded_bytes += project_exclusions.1;
 
-    if let Some(thread_export) = thread_export {
-        if thread_export.count > 0 {
+        let index_metadata = read_selected_session_index(
+            inventory.session_index_path.as_deref(),
+            &request.conversation_ids,
+        )?;
+        let thread_export = inventory
+            .state_db_path
+            .as_deref()
+            .map(|state_db| export_selected_threads(state_db, &request.conversation_ids))
+            .transpose()?;
+        let conversations = stage_conversations(
+            ConversationSelection {
+                paths: &inventory.conversation_paths,
+                codex_home: &request.codex_home,
+                selected_ids: &request.conversation_ids,
+                index: &index_metadata,
+                projects: &projects,
+                active_rollout_paths: thread_export.as_ref().map(|export| &export.rollout_paths),
+            },
+            staging.path(),
+            &mut payloads,
+            &mut counts,
+        )?;
+
+        let complete_index = complete_session_index(&index_metadata, &conversations)?;
+        if !complete_index.is_empty() {
             stage_generated(
                 staging.path(),
                 &mut payloads,
-                "codex/metadata/threads.json",
-                &thread_export.bytes,
+                "codex/session_index.jsonl",
+                &complete_index,
             )?;
         }
-        counts.sqlite_threads = thread_export.count;
-    }
 
-    if !request.skill_paths.is_empty() {
-        counts.skills = stage_selected_skill_trees(
-            &request.skill_paths,
-            &request.codex_home,
+        if let Some(thread_export) = thread_export {
+            if thread_export.count > 0 {
+                stage_generated(
+                    staging.path(),
+                    &mut payloads,
+                    "codex/metadata/threads.json",
+                    &thread_export.bytes,
+                )?;
+            }
+            counts.sqlite_threads = thread_export.count;
+        }
+
+        if !request.skill_paths.is_empty() {
+            counts.skills = stage_selected_skill_trees(
+                &request.skill_paths,
+                &request.codex_home,
+                staging.path(),
+                &mut payloads,
+            )?;
+        }
+        if !request.plugin_paths.is_empty() {
+            counts.plugins = stage_discovered_trees(
+                &request.plugin_paths,
+                &request.codex_home.join("plugins").join("cache"),
+                "codex/plugins/cache",
+                staging.path(),
+                &mut payloads,
+                true,
+            )?;
+        }
+        if !request.generated_image_paths.is_empty() {
+            counts.generated_images = stage_discovered_files(
+                &request.generated_image_paths,
+                &request.codex_home.join("generated_images"),
+                "codex/generated_images",
+                staging.path(),
+                &mut payloads,
+            )?;
+        }
+
+        let package_id = Uuid::new_v4();
+        let manifest = PackageManifest {
+            format: FORMAT.to_owned(),
+            schema_version: SCHEMA_VERSION,
+            package_id,
+            created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            source_os: inventory.source_os,
+            source_arch: env::consts::ARCH.to_owned(),
+            source_device_id: request.source_device_id,
+            mode: PackageMode::Full,
+            parent_checkpoint: None,
+            counts: counts.clone(),
+            projects,
+            conversations,
+            exclusions: ExclusionSummary {
+                excluded_files,
+                excluded_bytes,
+                rules: EXCLUSION_RULES
+                    .iter()
+                    .map(|rule| (*rule).to_owned())
+                    .collect(),
+            },
+        };
+
+        let checksums = render_checksums(&payloads);
+        ensure_control_size("checksums.sha256", checksums.len() as u64)?;
+        write_staged_bytes(staging.path(), "checksums.sha256", checksums.as_bytes())?;
+        // The manifest is deliberately materialized only after every payload and checksum.
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| package_invalid(format!("could not serialize manifest: {error}")))?;
+        ensure_control_size("manifest.json", manifest_bytes.len() as u64)?;
+        write_staged_bytes(staging.path(), "manifest.json", &manifest_bytes)?;
+
+        write_archive_atomically(
             staging.path(),
-            &mut payloads,
+            &request.output_path,
+            &payloads,
+            replace_existing,
         )?;
-    }
-    if !request.plugin_paths.is_empty() {
-        counts.plugins = stage_discovered_trees(
-            &request.plugin_paths,
-            &request.codex_home.join("plugins").join("cache"),
-            "codex/plugins/cache",
-            staging.path(),
-            &mut payloads,
-            true,
-        )?;
-    }
-    if !request.generated_image_paths.is_empty() {
-        counts.generated_images = stage_discovered_files(
-            &request.generated_image_paths,
-            &request.codex_home.join("generated_images"),
-            "codex/generated_images",
-            staging.path(),
-            &mut payloads,
-        )?;
-    }
+        let bytes_written = fs::metadata(&request.output_path)
+            .map_err(|error| {
+                package_invalid(format!("could not inspect finished package: {error}"))
+            })?
+            .len();
 
-    let package_id = Uuid::new_v4();
-    let manifest = PackageManifest {
-        format: FORMAT.to_owned(),
-        schema_version: SCHEMA_VERSION,
-        package_id,
-        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-        source_os: inventory.source_os,
-        source_arch: env::consts::ARCH.to_owned(),
-        source_device_id: request.source_device_id,
-        mode: PackageMode::Full,
-        parent_checkpoint: None,
-        counts: counts.clone(),
-        projects,
-        conversations,
-        exclusions: ExclusionSummary {
-            excluded_files,
-            excluded_bytes,
-            rules: EXCLUSION_RULES
-                .iter()
-                .map(|rule| (*rule).to_owned())
-                .collect(),
-        },
-    };
-
-    let checksums = render_checksums(&payloads);
-    ensure_control_size("checksums.sha256", checksums.len() as u64)?;
-    write_staged_bytes(staging.path(), "checksums.sha256", checksums.as_bytes())?;
-    // The manifest is deliberately materialized only after every payload and checksum.
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| package_invalid(format!("could not serialize manifest: {error}")))?;
-    ensure_control_size("manifest.json", manifest_bytes.len() as u64)?;
-    write_staged_bytes(staging.path(), "manifest.json", &manifest_bytes)?;
-
-    write_archive_atomically(
-        staging.path(),
-        &request.output_path,
-        &payloads,
-        replace_existing,
-    )?;
-    let bytes_written = fs::metadata(&request.output_path)
-        .map_err(|error| package_invalid(format!("could not inspect finished package: {error}")))?
-        .len();
-
-    Ok(CreatePackageReport {
-        package_path: request.output_path,
-        package_id,
-        bytes_written,
-        counts,
+        Ok(CreatePackageReport {
+            package_path: request.output_path,
+            package_id,
+            bytes_written,
+            counts,
+        })
+    })();
+    result.map_err(|mut error: RehomeError| {
+        if error.code == ErrorCode::DiskSpaceInsufficient {
+            error.message = format!(
+                "export disk space insufficient; staging: {}; package output directory: {}; the export needs space for both the snapshot and package, including selected project files. Save outside selected source folders to stage on the destination disk. Details: {}",
+                staging.path().display(), output_location.display(), error.message
+            );
+        }
+        error
     })
 }
 
@@ -2100,6 +2106,165 @@ pub(crate) fn private_app_temp_root() -> Result<PathBuf, RehomeError> {
     root.canonicalize().map_err(io_package_error)
 }
 
+// Keep the large export snapshot on the destination filesystem. Never create
+// it inside any selected source tree, where it could be recursively packaged.
+fn create_export_staging(
+    output_parent: &Path,
+    request: &CreatePackageRequest,
+) -> Result<TempDir, RehomeError> {
+    let output = output_parent.canonicalize().map_err(io_package_error)?;
+    let mut sources = vec![request.codex_home.clone()];
+    sources.extend(request.project_paths.iter().cloned());
+    for path in request
+        .skill_paths
+        .iter()
+        .chain(&request.plugin_paths)
+        .chain(&request.generated_image_paths)
+    {
+        sources.push(if path.is_file() {
+            usable_parent(path).to_path_buf()
+        } else {
+            path.clone()
+        });
+    }
+    let overlaps_source = sources
+        .iter()
+        .map(|source| source.canonicalize())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io_package_error)?
+        .iter()
+        .any(|source| output.starts_with(source));
+    if !overlaps_source {
+        let staging = Builder::new()
+            .prefix(".rehome-stage-")
+            .tempdir_in(&output)
+            .map_err(|error| export_staging_io_error(error, &output))?;
+        match make_export_staging_private(staging.path()) {
+            Ok(()) => return Ok(staging),
+            // FAT/exFAT cannot enforce a private ACL. Preserve the original
+            // per-user staging behavior instead of leaving readable snapshots.
+            #[cfg(windows)]
+            Err(error) if matches!(error.raw_os_error(), Some(1 | 50)) => {}
+            Err(error) => return Err(export_staging_io_error(error, &output)),
+        }
+    }
+    let root = private_app_temp_root()?;
+    validate_staging_location(&root, output_parent, &sources, &request.codex_home)?;
+    let staging = Builder::new()
+        .prefix(".rehome-stage-")
+        .tempdir_in(&root)
+        .map_err(|error| export_staging_io_error(error, &root))?;
+    make_staging_private(staging.path())?;
+    Ok(staging)
+}
+
+fn export_staging_io_error(error: io::Error, location: &Path) -> RehomeError {
+    let mut error = io_package_error(error);
+    error.message = format!(
+        "export staging location: {}; {}",
+        location.display(),
+        error.message
+    );
+    error
+}
+
+#[cfg(unix)]
+fn make_export_staging_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(windows)]
+fn make_export_staging_private(path: &Path) -> io::Result<()> {
+    use std::{os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{
+            Authorization::{GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT},
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        },
+        Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW},
+    };
+    // Copy the existing per-user application-cache DACL, not the destination
+    // folder's potentially shared ACL. Apply it before writing any content.
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut volume = vec![0_u16; 32_768];
+    if unsafe { GetVolumePathNameW(target.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut flags = 0;
+    if unsafe {
+        GetVolumeInformationW(
+            volume.as_ptr(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut flags,
+            ptr::null_mut(),
+            0,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if flags & 0x8 == 0 {
+        // FILE_PERSISTENT_ACLS
+        return Err(io::Error::from_raw_os_error(50));
+    }
+    let private_root = private_app_temp_root().map_err(io::Error::other)?;
+    let source: Vec<u16> = private_root
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            source.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let status = if dacl.is_null() {
+        5 // Never apply a null (unrestricted) DACL.
+    } else {
+        unsafe {
+            SetNamedSecurityInfoW(
+                target.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null_mut(),
+            )
+        }
+    };
+    unsafe {
+        LocalFree(descriptor);
+    }
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn make_export_staging_private(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn private_app_temp_path() -> PathBuf {
     env::var_os("LOCALAPPDATA")
@@ -2187,12 +2352,188 @@ fn package_invalid(message: impl Into<String>) -> RehomeError {
 }
 
 fn io_package_error(error: io::Error) -> RehomeError {
-    package_invalid(format!("package I/O failed: {error}"))
+    let full = error.kind() == io::ErrorKind::StorageFull;
+    #[cfg(windows)]
+    let full = full || matches!(error.raw_os_error(), Some(39 | 112));
+    #[cfg(unix)]
+    let full = full || error.raw_os_error() == Some(libc::EDQUOT);
+    RehomeError::new(
+        if full {
+            ErrorCode::DiskSpaceInsufficient
+        } else {
+            ErrorCode::PackageInvalid
+        },
+        format!("package I/O failed: {error}"),
+    )
 }
 
 #[cfg(test)]
 mod archive_entry_tests {
     use super::*;
+
+    #[test]
+    fn export_staging_prefers_destination_and_avoids_selected_sources(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let codex = root.join("codex");
+        let project = root.join("project");
+        let output = root.join("output");
+        let shared_skill = root.join("shared-skill");
+        for path in [&codex, &project, &output, &shared_skill] {
+            fs::create_dir(path)?;
+        }
+        let request = CreatePackageRequest {
+            codex_home: codex.clone(),
+            project_paths: vec![project.clone()],
+            conversation_ids: vec![],
+            output_path: output.join("test.rehome"),
+            source_device_id: Uuid::new_v4(),
+            skill_paths: vec![shared_skill.clone()],
+            plugin_paths: vec![],
+            generated_image_paths: vec![],
+        };
+        let staging = create_export_staging(&output, &request)?;
+        let stage_path = staging.path().to_path_buf();
+        assert_eq!(stage_path.parent(), Some(output.as_path()));
+        fs::write(stage_path.join("snapshot"), b"private")?;
+        drop(staging);
+        assert!(!stage_path.exists());
+        for source in [&project, &codex, &shared_skill] {
+            let staging = create_export_staging(source, &request)?;
+            assert!(!staging.path().starts_with(source));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn storage_full_is_not_an_invalid_package() {
+        #[cfg(windows)]
+        let code = 112;
+        #[cfg(not(windows))]
+        let code = 28;
+        let error = io_package_error(io::Error::from_raw_os_error(code));
+        assert_eq!(error.code, ErrorCode::DiskSpaceInsufficient);
+        let error = io_package_error(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
+        assert_eq!(error.code, ErrorCode::PackageInvalid);
+    }
+
+    #[test]
+    fn streaming_copy_and_zip_preserve_storage_full_errors() {
+        struct FullDisk;
+        impl Write for FullDisk {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::StorageFull, "full"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = copy_and_hash(&mut &b"snapshot"[..], &mut FullDisk).unwrap_err();
+        assert_eq!(error.code, ErrorCode::DiskSpaceInsufficient);
+        let error = zip_package_error(zip::result::ZipError::Io(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "full",
+        )));
+        assert_eq!(error.code, ErrorCode::DiskSpaceInsufficient);
+        let error = export_staging_io_error(
+            io::Error::new(io::ErrorKind::StorageFull, "full"),
+            Path::new("destination"),
+        );
+        assert_eq!(error.code, ErrorCode::DiskSpaceInsufficient);
+        assert!(error.message.contains("destination"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_staging_is_private_on_unix() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        make_export_staging_private(directory.path())?;
+        assert_eq!(
+            fs::metadata(directory.path())?.permissions().mode() & 0o777,
+            0o700
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn destination_staging_uses_protected_private_cache_acl(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::{os::windows::ffi::OsStrExt, ptr};
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+                GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+            },
+        };
+        fn read_acl(path: &Path) -> io::Result<(Vec<u8>, u16)> {
+            let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut dacl = ptr::null_mut();
+            let mut descriptor = ptr::null_mut();
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    name.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut dacl,
+                    ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let mut control = 0;
+            let mut revision = 0;
+            let result =
+                unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) };
+            let error = io::Error::last_os_error();
+            let mut bytes = if dacl.is_null() {
+                vec![]
+            } else {
+                unsafe {
+                    std::slice::from_raw_parts(dacl.cast::<u8>(), (*dacl).AclSize as usize).to_vec()
+                }
+            };
+            unsafe {
+                LocalFree(descriptor);
+            }
+            if result == 0 {
+                return Err(error);
+            }
+            // Protecting a copied ACL makes inherited ACEs explicit. Compare
+            // principals, rights and propagation flags, not that origin bit.
+            if bytes.len() >= 8 {
+                let count = u16::from_le_bytes([bytes[4], bytes[5]]);
+                let mut offset = 8;
+                for _ in 0..count {
+                    let size = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]) as usize;
+                    bytes[offset + 1] &= !0x10; // INHERITED_ACE
+                    offset += size;
+                }
+            }
+            Ok((bytes, control))
+        }
+        let directory = tempfile::tempdir()?;
+        make_export_staging_private(directory.path())?;
+        let expected = read_acl(&private_app_temp_root()?)?.0;
+        let (actual, control) = read_acl(directory.path())?;
+        assert!(!actual.is_empty());
+        assert_eq!(actual, expected);
+        assert_ne!(control & SE_DACL_PROTECTED, 0);
+        fs::create_dir(directory.path().join("child"))?;
+        fs::write(directory.path().join("child/snapshot"), b"private")?;
+        assert_eq!(
+            fs::read(directory.path().join("child/snapshot"))?,
+            b"private"
+        );
+        Ok(())
+    }
 
     #[test]
     fn combined_planning_metadata_budget_checks_boundaries_without_allocation() {
@@ -2272,5 +2613,8 @@ mod archive_entry_tests {
 }
 
 fn zip_package_error(error: zip::result::ZipError) -> RehomeError {
-    package_invalid(format!("ZIP write failed: {error}"))
+    match error {
+        zip::result::ZipError::Io(error) => io_package_error(error),
+        error => package_invalid(format!("ZIP write failed: {error}")),
+    }
 }

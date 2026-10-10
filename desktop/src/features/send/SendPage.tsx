@@ -197,7 +197,17 @@ export default function SendPage({
     } catch (caught) {
       setSupportId(supportIdFromError(caught));
       const message = errorMessage(caught);
-      if (message.includes("source file kept changing while being copied")) {
+      if (
+        typeof caught === "object" &&
+        caught !== null &&
+        "code" in caught &&
+        caught.code === "disk_space_insufficient"
+      ) {
+        setError(t(
+          "导出空间不足。请检查下方的实际暂存位置和保存位置。勾选项目会带走项目文件，减少对话数量不一定能缩小包；可改存到空间充足、且不在所选项目内的文件夹。\n{message}",
+          { message },
+        ));
+      } else if (message.includes("source file kept changing while being copied")) {
         setError(
           t(
             "有文件在打包过程中仍被修改。请稍等几秒后重试；如果反复出现，请先完全退出 Codex。\n{message}",
@@ -542,6 +552,9 @@ export default function SendPage({
           </div>
           <p className="privacy-note">{t("登录信息和敏感文件不会打包。")}</p>
           <p className="muted">{t("体积将在创建时确定。")}</p>
+            <p className="muted">{t(
+              "勾选项目会包含项目文件。导出需要暂存副本和迁移包的空间；通常暂存在保存位置，若保存到所选内容内或磁盘不支持私有权限，则使用本机缓存目录。",
+            )}</p>
           <details className="technical-details">
             <summary>{t("如何分批迁移？")}</summary>
             <p>{t("每次只选一部分对话，分别保存成不同的迁移包。同一项目分批迁移时，每批都保留项目勾选，并在新电脑导入到同一个项目保存位置。未变化的项目文件会跳过；有变化的文件仍需确认冲突。")}</p>

@@ -26,6 +26,10 @@ Starting with 0.1.31, import also maps saved workspace roots, including `runtime
 
 ## What it can move
 
+You can change project locations during import. In “Project save location”, choose the parent folder on the new computer. ReHome creates a directory for each project and updates associated chat paths. Check the complete target paths in the preview. Arbitrary per-project renaming and individual destination overrides are not currently available. The package must include the project to map its associated chats.
+
+Starting with 0.1.32, the full export snapshot normally uses the package's destination filesystem and is cleaned after success or failure. Windows copies access permissions from the local private cache; macOS uses private directory permissions. Saving inside selected source content or on a filesystem without private directory permissions uses the local cache instead. Leave room for both snapshot and package. Selecting a project includes its files, so reducing the number of chats may not significantly reduce size. Full disks now report actual staging and save locations instead of an invalid-package error.
+
 - Selected projects and their files
 - Selected conversations and the local indexes needed for Codex to rediscover them
 - Skills (including `.codex/skills` and shared `.agents/skills`), Plugins, and generated images
