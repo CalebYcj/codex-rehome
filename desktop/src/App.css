@@ -10,6 +10,7 @@
   --ink: #252c32;
   --muted: #65717b;
   --accent: #2e4c60;
+  --update-attention: #b42318;
   --line: #dde2e5;
   --selection: #eaf0f4;
 }
@@ -1300,8 +1301,12 @@ td code {
 .version-status {
   font-size: 11px;
 }
-.version-shortcut.has-update {
-  color: var(--accent);
+.version-shortcut.has-update .version-number {
+  color: var(--muted);
+}
+.version-shortcut.has-update .version-status,
+.version-shortcut.has-update .update-dot {
+  color: var(--update-attention);
 }
 .update-dot {
   width: 6px;
