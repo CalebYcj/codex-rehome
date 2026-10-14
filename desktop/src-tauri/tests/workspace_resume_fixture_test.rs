@@ -42,14 +42,39 @@ fn prepare_workspace_resume_fixture() -> Result<(), Box<dyn Error>> {
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(mode) = records[0]["payload"]["history_mode"].as_str() {
+        assert!(matches!(mode, "legacy" | "paginated"));
+        rusqlite::Connection::open(&fixture.state_db_path)?
+            .execute("UPDATE threads SET history_mode = ?1", [mode])?;
+    }
     let old = records[0]["payload"]["cwd"].as_str().unwrap().to_owned();
     records[0]["payload"]["id"] = common::THREAD_ID.into();
     records[0]["payload"]["cwd"] = native_project.into();
-    records.push(serde_json::json!({"type":"turn_context","payload":{"cwd":old}}));
+    let mut context = serde_json::json!({"type":"turn_context","payload":{"cwd":old}});
+    if records[0]["payload"]["history_mode"] == "paginated" {
+        context["ordinal"] = records
+            .last()
+            .and_then(|record| record["ordinal"].as_u64())
+            .unwrap()
+            .checked_add(1)
+            .unwrap()
+            .into();
+    }
+    records.push(context);
     fs::write(
         &fixture.session_path,
         records.iter().map(|r| format!("{r}\n")).collect::<String>(),
     )?;
+    let compressed = std::env::var("REHOME_WORKSPACE_PROBE_COMPRESSED").as_deref() == Ok("1");
+    let compressed_source = fixture.session_path.with_extension("jsonl.zst");
+    let compressed_bytes = if compressed {
+        let bytes = zstd::stream::encode_all(fs::read(&fixture.session_path)?.as_slice(), 3)?;
+        fs::write(&compressed_source, &bytes)?;
+        fs::remove_file(&fixture.session_path)?;
+        Some(bytes)
+    } else {
+        None
+    };
     // Project ID from the fixture's authoritative index associates the selected
     // conversation with these harmless project files.
     fs::create_dir(&output)?;
@@ -64,6 +89,11 @@ fn prepare_workspace_resume_fixture() -> Result<(), Box<dyn Error>> {
         plugin_paths: vec![],
         generated_image_paths: vec![],
     })?;
+    if let Some(bytes) = &compressed_bytes {
+        assert_eq!(&fs::read(&compressed_source)?, bytes);
+        assert!(!fixture.session_path.exists());
+        fs::write(output.join("source.jsonl.zst"), bytes)?;
+    }
     let home = output.join(".codex");
     fs::create_dir(&home)?;
     let database = rusqlite::Connection::open_with_flags(
@@ -109,7 +139,7 @@ fn prepare_workspace_resume_fixture() -> Result<(), Box<dyn Error>> {
         },
     )?;
     assert!(report.verification.sessions_valid && report.verification.path_mapping_valid);
-    let receipt = serde_json::json!({"session":session,"home":home,"threadId":common::THREAD_ID,"verification":report.verification});
+    let receipt = serde_json::json!({"session":session,"home":home,"threadId":common::THREAD_ID,"verification":report.verification,"compressed_source":compressed});
     fs::write(
         output.join("receipt.json"),
         serde_json::to_vec_pretty(&receipt)?,

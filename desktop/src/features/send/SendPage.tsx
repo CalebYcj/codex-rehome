@@ -42,6 +42,12 @@ interface SendPageProps {
   onHome: () => void;
 }
 
+function isUnsupportedConversation(conversation: ConversationEntry, unsupportedPaths?: string[]) {
+  if (!unsupportedPaths) return conversation.archive_path.toLowerCase().endsWith(".jsonl.zst");
+  const relative = "/" + conversation.archive_path.replace(/^codex\//, "");
+  return unsupportedPaths.some((path) => path.replace(/\\/g, "/").endsWith(relative));
+}
+
 export default function SendPage({
   headingRef,
   inventory,
@@ -87,10 +93,17 @@ export default function SendPage({
       plugins.size +
       images.size >
     0;
+  const exportableConversations = useMemo(
+    () => inventory?.conversations.filter((item) => !isUnsupportedConversation(item, inventory.unsupported_conversation_paths)) ?? [],
+    [inventory],
+  );
+  const unsupportedCount =
+    inventory?.unsupported_conversation_paths?.length ??
+    inventory?.conversations.filter((item) => isUnsupportedConversation(item)).length ?? 0;
   const hasSelectableContent = Boolean(
     inventory &&
       inventory.projects.filter((project) => project.source_available).length +
-        inventory.conversations.length +
+        exportableConversations.length +
         inventory.skills.length +
         inventory.plugins.length +
         inventory.generated_images.length >
@@ -102,14 +115,18 @@ export default function SendPage({
       inventory.projects
         .filter((project) => project.source_available)
         .every((project) => projects.has(project.project_id)) &&
-      inventory.conversations.every((conversation) =>
+      exportableConversations.every((conversation) =>
         conversations.has(conversation.task_id),
       ) &&
       inventory.skills.every((skill) => skills.has(skill.content_id)) &&
       inventory.plugins.every((plugin) => plugins.has(plugin.content_id)) &&
       inventory.generated_images.every((image) => images.has(image.content_id)),
   );
-  const canCreate = Boolean(inventory && hasContent && !busy);
+  const canCreate = Boolean(
+    inventory && hasContent && !busy &&
+    !inventory.conversations.some((item) =>
+      isUnsupportedConversation(item, inventory.unsupported_conversation_paths) && conversations.has(item.task_id)),
+  );
 
   function toggle(
     setter: (value: Set<string>) => void,
@@ -126,7 +143,7 @@ export default function SendPage({
     const next = new Set(conversations);
     for (const item of items) next.delete(item.task_id);
     for (const item of items) {
-      if (!item.classification) next.add(item.task_id);
+      if (!item.classification && !isUnsupportedConversation(item, inventory?.unsupported_conversation_paths)) next.add(item.task_id);
     }
     setConversations(next);
   }
@@ -139,7 +156,9 @@ export default function SendPage({
       for (const item of items) nextConversations.delete(item.task_id);
     } else {
       nextProjects.add(projectId);
-      for (const item of items) nextConversations.add(item.task_id);
+      for (const item of items) {
+        if (!isUnsupportedConversation(item, inventory?.unsupported_conversation_paths)) nextConversations.add(item.task_id);
+      }
       setExpanded((current) => new Set(current).add(projectId));
     }
     setProjects(nextProjects);
@@ -167,7 +186,7 @@ export default function SendPage({
     );
     setConversations(
       new Set(
-        inventory.conversations.map((conversation) => conversation.task_id),
+        exportableConversations.map((conversation) => conversation.task_id),
       ),
     );
     setSkills(new Set(inventory.skills.map((skill) => skill.content_id)));
@@ -358,6 +377,14 @@ export default function SendPage({
           )}
         </p>
       </header>
+      {unsupportedCount > 0 && (
+        <p className="inline-state status-warning" role="status">
+          {t(
+            "有 {count} 个压缩会话文件无法读取，暂不能导出。其他内容可正常迁移，请保留源文件。",
+            { count: unsupportedCount, plural: unsupportedCount === 1 ? "" : "s" },
+          )}
+        </p>
+      )}
       {step === "selection" ? (
         <>
           <div className="selection-toolbar">
@@ -391,6 +418,7 @@ export default function SendPage({
             <div className="project-list">
               {filteredGroups.map((project) => (
                 <ProjectChoice
+                  unsupportedPaths={inventory?.unsupported_conversation_paths}
                   key={project.project_id}
                   name={project.name}
                   path={formatDisplayPath(project.source_path)}
@@ -406,9 +434,10 @@ export default function SendPage({
                   onToggleExpanded={() =>
                     toggle(setExpanded, expanded, project.project_id)
                   }
-                  onToggleConversation={(id) =>
-                    toggle(setConversations, conversations, id)
-                  }
+                  onToggleConversation={(id) => {
+                    if (exportableConversations.some((item) => item.task_id === id))
+                      toggle(setConversations, conversations, id);
+                  }}
                   onSelectRecommended={() =>
                     selectRecommended(project.conversations)
                   }
@@ -428,6 +457,7 @@ export default function SendPage({
                   !query || chat.title.toLocaleLowerCase().includes(query),
               ) && (
                 <ProjectChoice
+                  unsupportedPaths={inventory?.unsupported_conversation_paths}
                   name={t("未归属项目的对话")}
                   path={t("只迁移对话，不包含项目文件")}
                   fileCount={null}
@@ -622,6 +652,7 @@ export default function SendPage({
 }
 
 interface ProjectChoiceProps {
+  unsupportedPaths?: string[];
   name: string;
   path: string;
   fileCount: number | null;
@@ -637,6 +668,7 @@ interface ProjectChoiceProps {
 }
 
 function ProjectChoice({
+  unsupportedPaths,
   name,
   path,
   fileCount,
@@ -651,10 +683,11 @@ function ProjectChoice({
   onSelectRecommended,
 }: ProjectChoiceProps) {
   const { locale, t } = useI18n();
-  const subagents = conversations.filter(
+  const exportable = conversations.filter((item) => !isUnsupportedConversation(item, unsupportedPaths));
+  const subagents = exportable.filter(
     (conversation) => conversation.classification,
   ).length;
-  const mainConversations = conversations.length - subagents;
+  const mainConversations = exportable.length - subagents;
   return (
     <div
       className={`project-choice${sourceAvailable ? "" : " project-choice-missing"}`}
@@ -669,7 +702,7 @@ function ProjectChoice({
                     selectedConversations.has(item.task_id),
                   )) &&
                 (!projectSelected ||
-                  !conversations.every((item) =>
+                  !exportable.every((item) =>
                     selectedConversations.has(item.task_id),
                   ))
               }
@@ -740,6 +773,7 @@ function ProjectChoice({
               <input
                 type="checkbox"
                 checked={selectedConversations.has(conversation.task_id)}
+                disabled={isUnsupportedConversation(conversation, unsupportedPaths)}
                 onChange={() => onToggleConversation(conversation.task_id)}
                 aria-label={t("选择对话 {name}", { name: conversation.title })}
               />
@@ -749,7 +783,7 @@ function ProjectChoice({
                 <MessageSquareText aria-hidden="true" />
               )}
               <span>
-                <strong>{conversation.title}</strong>
+                <strong>{conversation.title === "Codex compressed conversation" ? t("Codex 压缩会话") : conversation.title}</strong>
                 <small className="conversation-details">
                   <span
                     className={
@@ -758,17 +792,17 @@ function ProjectChoice({
                         : "conversation-badge badge-main"
                     }
                   >
-                    {conversation.classification
+                    {isUnsupportedConversation(conversation, unsupportedPaths) ? t("文件无法读取 · 暂不能导出") : conversation.classification
                       ? `${t("子 Agent")}${conversation.classification.depth ? ` · L${conversation.classification.depth}` : ""}`
                       : t("主对话")}
                   </span>
-                  <span>
+                  {!isUnsupportedConversation(conversation, unsupportedPaths) && <span>
                     {t(
                       conversation.classification
                         ? "辅助记录，通常可不迁移"
                         : "建议迁移",
                     )}
-                  </span>
+                  </span>}
                   <time>{formatDate(conversation.updated_at, locale)}</time>
                 </small>
               </span>

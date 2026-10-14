@@ -110,6 +110,9 @@ pub struct CodexInventory {
     pub project_paths: Vec<PathBuf>,
     pub conversations: Vec<ConversationEntry>,
     pub conversation_paths: Vec<PathBuf>,
+    /// Unreadable compressed files, including files whose thread ID cannot be recovered.
+    #[serde(default)]
+    pub unsupported_conversation_paths: Vec<PathBuf>,
     pub session_index_path: Option<PathBuf>,
     pub state_db_path: Option<PathBuf>,
     pub skill_paths: Vec<PathBuf>,

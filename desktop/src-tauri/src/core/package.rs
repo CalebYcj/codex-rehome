@@ -1,6 +1,7 @@
 use crate::core::{
     discovery::{
-        associated_project_id, conversation_classification, discover_codex, StateDatabaseSnapshot,
+        associated_project_id, conversation_classification, discover_codex, is_compressed_rollout,
+        StateDatabaseSnapshot,
     },
     error::{ErrorCode, RehomeError},
     exclusions::is_forbidden,
@@ -9,7 +10,7 @@ use crate::core::{
         ExclusionSummary, PackageManifest, PackageMode, PackagePreview, ProjectEntry,
     },
     paths::normalize_entry,
-    session::{metadata_string, metadata_uuid, session_metadata_from_value, SessionMetadata},
+    session::{metadata_string, metadata_uuid, SessionMetadata},
     session_stream::SessionPayload,
 };
 use chrono::{SecondsFormat, Utc};
@@ -85,6 +86,34 @@ fn create_package_with_overwrite(
 ) -> Result<CreatePackageReport, RehomeError> {
     validate_output_path(&request.output_path, replace_existing)?;
     let inventory = discover_codex(Some(request.codex_home.clone()))?;
+    let requested_ids: HashSet<_> = request.conversation_ids.iter().copied().collect();
+    let selected_archives: HashSet<_> = inventory
+        .conversations
+        .iter()
+        .filter(|item| requested_ids.contains(&item.task_id))
+        .map(|item| item.archive_path.as_str())
+        .collect();
+    let selected_paths: Vec<_> = inventory
+        .conversation_paths
+        .iter()
+        .filter(|path| {
+            let archive = path
+                .strip_prefix(&inventory.codex_home)
+                .ok()
+                .and_then(|relative| normalize_entry(relative).ok());
+            archive.is_some_and(|relative| {
+                selected_archives.contains(format!("codex/{relative}").as_str())
+            })
+        })
+        .cloned()
+        .collect();
+    let blocked_paths: HashSet<_> = inventory.unsupported_conversation_paths.iter().collect();
+    if let Some(path) = selected_paths
+        .iter()
+        .find(|path| blocked_paths.contains(*path))
+    {
+        return Err(package_invalid(format!("selected compressed Codex conversation cannot be read: {}; keep the original file and repair it before exporting", path.display())));
+    }
     let output_parent = usable_parent(&request.output_path);
     fs::create_dir_all(output_parent).map_err(|error| {
         let mut error = io_package_error(error);
@@ -124,7 +153,7 @@ fn create_package_with_overwrite(
             .transpose()?;
         let conversations = stage_conversations(
             ConversationSelection {
-                paths: &inventory.conversation_paths,
+                paths: &selected_paths,
                 codex_home: &request.codex_home,
                 selected_ids: &request.conversation_ids,
                 index: &index_metadata,
@@ -795,7 +824,7 @@ fn stage_conversations(
         let task_candidates = candidates
             .remove(&task_id)
             .ok_or_else(|| package_invalid("one or more selected conversations were not found"))?;
-        let (source, session_value) = select_conversation_rollout(
+        let (source, _) = select_conversation_rollout(
             task_id,
             task_candidates,
             selection.active_rollout_paths,
@@ -804,9 +833,22 @@ fn stage_conversations(
         let relative = source
             .strip_prefix(selection.codex_home)
             .map_err(|_| package_invalid("conversation path escapes the selected Codex home"))?;
-        let archive_path = format!("codex/{}", normalize_entry(relative)?);
+        let relative = if is_compressed_rollout(&source) {
+            relative.with_extension("")
+        } else {
+            relative.to_path_buf()
+        };
+        let archive_path = format!("codex/{}", normalize_entry(&relative)?);
         let archive_path = normalize_entry(Path::new(&archive_path))?;
-        let staged_payload = copy_source_to_staging(&source, staging_root, &archive_path)?;
+        let staged_payload = copy_conversation_to_staging(&source, staging_root, &archive_path)?;
+        let staged_session = session_identity_from_file(&staging_root.join(&archive_path))?
+            .filter(|session| session.task_id == task_id)
+            .ok_or_else(|| {
+                package_invalid(
+                    "staged conversation identity differs from the selected conversation",
+                )
+            })?;
+        let session_value = staged_session.fields;
         let content_hash = staged_payload.hash.clone();
         payloads.insert(archive_path.clone(), staged_payload)?;
         let metadata = selection
@@ -1235,6 +1277,43 @@ fn copy_source_to_staging(
 ) -> Result<Payload, RehomeError> {
     retry_stable_copy(source, || {
         copy_source_to_staging_once(source, staging_root, archive_path)
+    })
+}
+
+fn copy_conversation_to_staging(
+    source: &Path,
+    root: &Path,
+    archive: &str,
+) -> Result<Payload, RehomeError> {
+    if !is_compressed_rollout(source) {
+        return copy_source_to_staging(source, root, archive);
+    }
+    retry_stable_copy(source, || {
+        let before = source_fingerprint(source)?;
+        let destination = root.join(archive);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(io_package_error)?;
+        }
+        let mut reader = super::rollout::open(source).map_err(io_package_error)?;
+        let mut writer = fs::File::create(&destination).map_err(io_package_error)?;
+        let hash = copy_and_hash(&mut reader, &mut writer).map_err(|mut error| {
+            error.message = format!(
+                "could not export compressed Codex conversation {}: {}",
+                source.display(),
+                error.message
+            );
+            error
+        })?;
+        writer.sync_all().map_err(io_package_error)?;
+        drop(writer);
+        if before != source_fingerprint(source)? {
+            fs::remove_file(&destination).map_err(io_package_error)?;
+            return Ok(StableCopyAttempt::Changed);
+        }
+        Ok(StableCopyAttempt::Complete(Payload {
+            hash,
+            executable: source_is_executable(source),
+        }))
     })
 }
 
@@ -2015,21 +2094,7 @@ fn source_fingerprint(path: &Path) -> Result<SourceFingerprint, RehomeError> {
 }
 
 fn session_identity_from_file(path: &Path) -> Result<Option<SessionMetadata>, RehomeError> {
-    let file = fs::File::open(path).map_err(io_package_error)?;
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    while read_bounded_line(&mut reader, &mut line)? {
-        let Ok(line) = std::str::from_utf8(strip_line_ending(&line)) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(metadata) = session_metadata_from_value(value) {
-            return Ok(Some(metadata));
-        }
-    }
-    Ok(None)
+    super::rollout::metadata(path).map_err(io_package_error)
 }
 
 fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> Result<bool, RehomeError> {

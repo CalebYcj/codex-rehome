@@ -18,6 +18,10 @@ Move selected Codex Desktop projects, conversations, Skills, Plugins, and genera
 
 The installer and a migration package are different files. The EXE or DMG installs ReHome Desktop; a `.rehome` file carries selected data between computers.
 
+Starting with 0.1.34, ReHome discovers and exports Codex `.jsonl.zst` compressed rollouts. Export streams decoded bytes into normal `.jsonl` package entries, preserving the original thread ID, history mode and messages without changing source files. Plain rollouts and older packages remain supported. Corrupt or identity-mismatched rollouts produce explicit errors instead of incomplete successful packages or replacement of existing output. If the source computer has compressed rollouts, update ReHome there and export again.
+
+0.1.34 also fixes a false conflict during immediate rollback after importing into a native SQLite WAL database. Genuine external changes after import remain protected. Keep backups on a real conflict; do not manually delete WAL or change the database journal mode.
+
 Starting with 0.1.26, projects with colliding names in one package automatically restore into separate directories with identity suffixes. Conversation paths and project registration use the corresponding directories. This includes case-only and Unicode-equivalent names; unique names retain their original directory names. If an older version reports `multiple package projects map to the same target directory`, update ReHome on the target computer and import the original package again.
 
 Starting with 0.1.27, ReHome preserves Codex's paginated conversation history mode and can recover that mode from conversation files in older migration packages. This fixes a missing history-mode marker that can cause `list_turns is not supported yet` after import. If a restored chat will not open, update ReHome on the target computer, close Codex, import the original package again, and then reopen Codex.

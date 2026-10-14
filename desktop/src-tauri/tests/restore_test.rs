@@ -36,6 +36,82 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn compressed_export_restores_messages_paths_indexes_and_rolls_back() -> Result<(), Box<dyn Error>>
+{
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let fixture = &harness._fixture;
+    let marker = "compressed-round-trip-橙子-紫色-64";
+    let mut original = fs::read(&fixture.session_path)?;
+    original.extend(format!("{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{marker}\"}}]}}}}\n").as_bytes());
+    let compressed = fixture.session_path.with_extension("jsonl.zst");
+    let frame = zstd::stream::encode_all(original.as_slice(), 3)?;
+    fs::write(&compressed, &frame)?;
+    fs::remove_file(&fixture.session_path)?;
+    let package = fixture.root.join("compressed-round-trip.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+    let package_before = fs::read(&package)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let preview = inspect_package(&package)?;
+    let plan = build_restore_plan(
+        &preview,
+        &target,
+        &fixture.root.join("target").join("projects"),
+    )?;
+    let restored = plan.sessions[0].target.clone();
+    let index_before = fs::read(target.codex_home.join("session_index.jsonl"))?;
+    let db_before = fs::read(target.codex_home.join("state_5.sqlite"))?;
+    let report = apply_restore(plan, harness.options())?;
+    assert!(
+        report.verification.sessions_valid
+            && report.verification.session_index_valid
+            && report.verification.sqlite_threads_valid
+            && report.verification.path_mapping_valid
+            && report.verification.project_files_valid
+    );
+    assert!(!report.verification.app_visible_ready);
+    let contents = fs::read_to_string(&restored)?;
+    assert!(contents.contains(marker));
+    let connection = Connection::open(target.codex_home.join("state_5.sqlite"))?;
+    let rollout: String = connection.query_row(
+        "SELECT rollout_path FROM threads WHERE id=?1",
+        [THREAD_ID],
+        |row| row.get(0),
+    )?;
+    assert!(Path::new(&rollout).exists() && rollout.ends_with(".jsonl"));
+    drop(connection);
+    assert_eq!(fs::read(&compressed)?, frame);
+    assert!(!fixture.session_path.exists());
+    assert_eq!(fs::read(&package)?, package_before);
+    rollback(report.transaction_id)?;
+    assert!(!restored.exists());
+    assert_eq!(
+        fs::read(target.codex_home.join("session_index.jsonl"))?,
+        index_before
+    );
+    assert_eq!(
+        fs::read(target.codex_home.join("state_5.sqlite"))?,
+        db_before
+    );
+    Ok(())
+}
+
+#[test]
 fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
 ) -> Result<(), Box<dyn Error>> {
     let old = r"C:\Users\OldUser\Documents\Codex";
@@ -997,6 +1073,235 @@ fn sqlite_wal_verification_failure_refreshes_sidecars_before_rollback() -> Resul
     for suffix in ["-wal", "-shm", "-journal"] {
         assert!(!sqlite_sidecar(&database, suffix).exists());
     }
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_successful_verification_records_sidecars_for_immediate_rollback(
+) -> Result<(), Box<dyn Error>> {
+    let harness = wal_restore_harness()?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let index = harness.plan.target_codex_home.join("session_index.jsonl");
+    let index_before = fs::read(&index)?;
+    let package_before = fs::read(&harness.plan.package_path)?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    assert!(report.verification.sqlite_threads_valid && report.verification.sessions_valid);
+    for suffix in ["-wal", "-shm"] {
+        assert!(sqlite_sidecar(&database, suffix).exists());
+    }
+
+    assert!(rollback(report.transaction_id)?.success);
+
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    assert_eq!(fs::read(&index)?, index_before);
+    assert_eq!(fs::read(&harness.plan.package_path)?, package_before);
+    assert!(!harness.plan.sessions[0].target.exists());
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!sqlite_sidecar(&database, suffix).exists());
+    }
+    let restored = Connection::open(&database)?;
+    assert_eq!(
+        restored.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get::<_, i64>(0))?,
+        0
+    );
+    assert_eq!(
+        restored.query_row("SELECT value FROM original_marker", [], |r| r
+            .get::<_, String>(0))?,
+        "keep original data"
+    );
+    assert_eq!(
+        restored.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?,
+        "ok"
+    );
+    assert!(rollback(report.transaction_id)?.success);
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_verification_read_error_records_sidecars_before_automatic_rollback(
+) -> Result<(), Box<dyn Error>> {
+    let harness = wal_restore_harness()?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch("INSERT INTO threads(id,cwd,title) VALUES ('99999999-9999-4999-8999-999999999999',X'010203','existing blob cwd');")?;
+    drop(connection);
+    let mut harness = harness;
+    replan_wal_harness(&mut harness)?;
+
+    let error = apply_restore(harness.plan.clone(), harness.options()).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RestoreFailed, "{error:?}");
+    assert!(
+        error.message.contains("could not read restored SQLite row"),
+        "{error:?}"
+    );
+    assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+    assert!(!harness.plan.sessions[0].target.exists());
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!sqlite_sidecar(&database, suffix).exists());
+    }
+    let restored = Connection::open(&database)?;
+    assert_eq!(
+        restored.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(
+        restored.query_row("SELECT cwd FROM threads", [], |r| r.get::<_, Vec<u8>>(0))?,
+        vec![1, 2, 3]
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_rollback_rejects_changed_sidecar_before_any_target_is_reverted(
+) -> Result<(), Box<dyn Error>> {
+    let harness = wal_restore_harness()?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let wal = sqlite_sidecar(&database, "-wal");
+    let mut bytes = fs::read(&wal)?;
+    bytes.extend(b"external WAL change must survive");
+    fs::write(&wal, &bytes)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed, "{error:?}");
+    assert_eq!(fs::read(wal)?, bytes);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_rollback_rejects_same_content_new_sidecar_identity_before_mutation(
+) -> Result<(), Box<dyn Error>> {
+    let harness = wal_restore_harness()?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let wal = sqlite_sidecar(&database, "-wal");
+    let bytes = fs::read(&wal)?;
+    fs::rename(&wal, harness._fixture.root.join("retained-original-wal"))?;
+    fs::write(&wal, &bytes)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed, "{error:?}");
+    assert_eq!(fs::read(wal)?, bytes);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_rollback_preserves_committed_external_work_before_any_revert(
+) -> Result<(), Box<dyn Error>> {
+    let harness = wal_restore_harness()?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let writer = Connection::open(&database)?;
+    writer.pragma_update(None, "wal_autocheckpoint", 0)?;
+    writer.execute_batch("CREATE TABLE external_work(value TEXT NOT NULL); INSERT INTO external_work VALUES ('keep newer committed work');")?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed, "{error:?}");
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    assert_eq!(
+        writer.query_row("SELECT value FROM external_work", [], |r| r
+            .get::<_, String>(0))?,
+        "keep newer committed work"
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_rollback_resumes_owned_quarantine_before_progress_checkpoint(
+) -> Result<(), Box<dyn Error>> {
+    for source in [
+        "codex/metadata/threads.json",
+        "codex/metadata/sqlite-sidecar-wal",
+    ] {
+        let harness = wal_restore_harness()?;
+        let report = apply_restore(harness.plan.clone(), harness.options())?;
+        let mut journal = harness.read_journal(report.transaction_id)?;
+        journal["status"] = Value::String("rolling_back".into());
+        let (index, operation) = journal["operations"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+            .find(|(_, operation)| operation["package_source"] == source)
+            .unwrap();
+        let target = PathBuf::from(operation["target"].as_str().unwrap());
+        let quarantine_name = rollback_quarantine_name(report.transaction_id, index);
+        fs::rename(&target, target.parent().unwrap().join(&quarantine_name))?;
+        operation["rollback_quarantine"] = Value::String(quarantine_name);
+        fs::write(
+            harness.journal_path(report.transaction_id),
+            serde_json::to_vec_pretty(&journal)?,
+        )?;
+
+        assert!(rollback(report.transaction_id)?.success, "{source}");
+        assert_eq!(harness.single_journal_status()?, RecoveryStatus::RolledBack);
+        let database = harness.plan.target_codex_home.join("state_5.sqlite");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!sqlite_sidecar(&database, suffix).exists());
+        }
+        let restored = Connection::open(database)?;
+        assert_eq!(
+            restored.query_row("SELECT value FROM original_marker", [], |r| r
+                .get::<_, String>(0))?,
+            "keep original data"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_wal_rollback_rejects_same_content_new_database_identity_before_mutation(
+) -> Result<(), Box<dyn Error>> {
+    let harness = wal_restore_harness()?;
+    let report = apply_restore(harness.plan.clone(), harness.options())?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let bytes = fs::read(&database)?;
+    fs::rename(
+        &database,
+        harness._fixture.root.join("retained-original-database"),
+    )?;
+    fs::write(&database, &bytes)?;
+    let before = snapshot_mutable_targets(&harness.plan)?;
+
+    let error = rollback(report.transaction_id).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::RollbackFailed, "{error:?}");
+    assert_eq!(fs::read(database)?, bytes);
+    assert_eq!(snapshot_mutable_targets(&harness.plan)?, before);
+    Ok(())
+}
+
+fn wal_restore_harness() -> Result<RestoreHarness, Box<dyn Error>> {
+    let mut harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let database = harness.plan.target_codex_home.join("state_5.sqlite");
+    let connection = Connection::open(&database)?;
+    connection.execute_batch("CREATE TABLE original_marker(value TEXT NOT NULL); INSERT INTO original_marker VALUES ('keep original data');")?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    drop(connection);
+    replan_wal_harness(&mut harness)?;
+    Ok(harness)
+}
+
+fn replan_wal_harness(harness: &mut RestoreHarness) -> Result<(), Box<dyn Error>> {
+    let preview = inspect_package(&harness.plan.package_path)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    harness.plan = build_restore_plan(&preview, &target, &harness.plan.projects_root)?;
     Ok(())
 }
 

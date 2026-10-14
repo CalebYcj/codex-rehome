@@ -98,6 +98,7 @@ export interface CodexInventory {
   project_paths: string[];
   conversations: ConversationEntry[];
   conversation_paths: string[];
+  unsupported_conversation_paths?: string[];
   session_index_path: string | null;
   state_db_path: string | null;
   skill_paths: string[];

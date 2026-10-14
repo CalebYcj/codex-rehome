@@ -1378,6 +1378,58 @@ fn validate_rollback_inputs(journal: &TransactionJournal) -> Result<(), RehomeEr
             ));
         }
     }
+    validate_pending_sqlite_group(journal)
+}
+
+fn validate_pending_sqlite_group(journal: &TransactionJournal) -> Result<(), RehomeError> {
+    let has_pending_database = journal.operations.iter().any(|operation| {
+        operation.package_source == "codex/metadata/threads.json"
+            && operation.rollback_progress == RollbackProgress::Pending
+            && operation.applied_state.is_some()
+    });
+    if !has_pending_database {
+        return Ok(());
+    }
+    // The database and its WAL are one logical store. Reject an externally
+    // changed member before reverting any project, index or database file.
+    // Per-operation quarantine checks still protect later races and resumes.
+    for operation in journal.operations.iter().filter(|operation| {
+        (operation.package_source == "codex/metadata/threads.json"
+            || operation
+                .package_source
+                .starts_with("codex/metadata/sqlite-sidecar"))
+            && operation.rollback_progress == RollbackProgress::Pending
+    }) {
+        match operation.applied_state.as_ref() {
+            Some(AppliedState::Absent) => verify_target_absent(
+                operation,
+                "rollback conflict: SQLite target was expected to be absent",
+            )?,
+            Some(AppliedState::File { hash, identity }) => {
+                let matches = if let Some(quarantine) = operation.rollback_quarantine.as_deref() {
+                    // A crash can occur after rename but before its progress
+                    // checkpoint. Only the exact owned quarantine is accepted.
+                    if matches!(fs::symlink_metadata(&operation.target), Err(error) if error.kind() == io::ErrorKind::NotFound)
+                    {
+                        quarantine_matches_applied(operation, quarantine)?
+                    } else {
+                        let (actual_hash, actual_identity) = inspect_current_file(operation)?;
+                        actual_hash.eq_ignore_ascii_case(hash) && actual_identity == *identity
+                    }
+                } else {
+                    let (actual_hash, actual_identity) = inspect_current_file(operation)?;
+                    actual_hash.eq_ignore_ascii_case(hash) && actual_identity == *identity
+                };
+                if !matches {
+                    return Err(rollback_failed(format!(
+                        "rollback conflict: SQLite target hash or identity changed: {}",
+                        operation.target.display()
+                    )));
+                }
+            }
+            None => {}
+        }
+    }
     Ok(())
 }
 
