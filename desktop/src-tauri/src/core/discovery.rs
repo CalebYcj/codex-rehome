@@ -498,10 +498,29 @@ fn discovered_rollout_matches(
     };
     candidate == active
         || plain_rollout_path(&candidate) == plain_rollout_path(&active)
-        || match (candidate.canonicalize(), active.canonicalize()) {
+        || match (
+            canonical_rollout_path(&candidate),
+            canonical_rollout_path(&active),
+        ) {
             (Ok(candidate), Ok(active)) => candidate == active,
             _ => false,
         }
+}
+
+fn canonical_rollout_path(path: &Path) -> io::Result<PathBuf> {
+    path.canonicalize().or_else(|error| {
+        // SQLite may retain the logical JSONL path after Codex compresses the
+        // physical file. Resolve its sibling as well, including native aliases.
+        if is_compressed_rollout(path) {
+            return plain_rollout_path(path).canonicalize();
+        }
+        if extension_is(path, "jsonl") {
+            let mut compressed = path.as_os_str().to_os_string();
+            compressed.push(".zst");
+            return PathBuf::from(compressed).canonicalize();
+        }
+        Err(error)
+    })
 }
 
 fn read_session_metadata_file(path: &Path) -> io::Result<Option<SessionMetadata>> {

@@ -128,6 +128,46 @@ fn compressed_archived_rollout_without_index_still_has_identity() -> Result<(), 
 }
 
 #[test]
+fn compressed_active_rollout_resolves_a_logical_path_alias() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let parent = fixture.session_path.parent().unwrap();
+    fs::copy(
+        &fixture.session_path,
+        parent.join(format!("rollout-2026-07-21T00-00-00-{THREAD_ID}.jsonl")),
+    )?;
+    fs::write(
+        fixture.session_path.with_extension("jsonl.zst"),
+        b"unread compressed active",
+    )?;
+    fs::remove_file(&fixture.session_path)?;
+    // Do not use PathBuf::join here: on Windows a verbatim parent can
+    // normalize away `..`, leaving this alias test with a direct path.
+    let separator = std::path::MAIN_SEPARATOR;
+    let parent_text = parent.to_string_lossy();
+    let parent_text = parent_text.strip_prefix(r"\\?\").unwrap_or(&parent_text);
+    let alias = std::path::PathBuf::from(format!(
+        "{parent_text}{separator}..{separator}22{separator}{}",
+        fixture.session_path.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(alias
+        .components()
+        .any(|component| component == std::path::Component::ParentDir));
+    Connection::open(&fixture.state_db_path)?.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        params![alias.to_string_lossy().as_ref(), THREAD_ID],
+    )?;
+    let inventory = discover_codex_with_context(
+        Some(fixture.codex_home.clone()),
+        &DiscoveryContext::default(),
+    )?;
+    assert_eq!(inventory.conversations.len(), 1);
+    assert!(inventory.conversations[0]
+        .archive_path
+        .ends_with(".jsonl.zst"));
+    Ok(())
+}
+
+#[test]
 fn compressed_invalid_filename_is_warned_not_silently_ignored() -> Result<(), Box<dyn Error>> {
     let fixture = synthetic_codex_fixture()?;
     fs::write(
