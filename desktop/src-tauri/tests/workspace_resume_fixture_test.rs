@@ -42,10 +42,25 @@ fn prepare_workspace_resume_fixture() -> Result<(), Box<dyn Error>> {
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(mode) = records[0]["payload"]["history_mode"].as_str() {
+        assert!(matches!(mode, "legacy" | "paginated"));
+        rusqlite::Connection::open(&fixture.state_db_path)?
+            .execute("UPDATE threads SET history_mode = ?1", [mode])?;
+    }
     let old = records[0]["payload"]["cwd"].as_str().unwrap().to_owned();
     records[0]["payload"]["id"] = common::THREAD_ID.into();
     records[0]["payload"]["cwd"] = native_project.into();
-    records.push(serde_json::json!({"type":"turn_context","payload":{"cwd":old}}));
+    let mut context = serde_json::json!({"type":"turn_context","payload":{"cwd":old}});
+    if records[0]["payload"]["history_mode"] == "paginated" {
+        context["ordinal"] = records
+            .last()
+            .and_then(|record| record["ordinal"].as_u64())
+            .unwrap()
+            .checked_add(1)
+            .unwrap()
+            .into();
+    }
+    records.push(context);
     fs::write(
         &fixture.session_path,
         records.iter().map(|r| format!("{r}\n")).collect::<String>(),
