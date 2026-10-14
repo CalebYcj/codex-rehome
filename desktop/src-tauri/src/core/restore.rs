@@ -181,19 +181,17 @@ fn apply_transaction(
     restored_bytes += changed_target_bytes(plan)?;
 
     update_status(transaction, RecoveryStatus::Verifying)?;
-    let mut verification = verify_restore(plan, verified)?;
+    let verification = verify_restore(plan, verified);
+    // Read-only SQLite verification can create WAL/SHM files after the bridge
+    // recorded its applied state. Record those effects on every outcome,
+    // including a row-read error, before committing or attempting rollback.
+    if let Some(operation) = plan.operations.iter().find(|operation| {
+        operation.package_source == THREAD_METADATA_SOURCE && operation.rollback_required
+    }) {
+        record_applied_mutation(transaction, &operation.target)?;
+    }
+    let mut verification = verification?;
     if !data_verification_passed(&verification) {
-        // Verification opens the restored SQLite database after the bridge has
-        // recorded its first applied state. In WAL mode that read can create
-        // fresh sidecars, so refresh the journal before rollback decides
-        // whether a sidecar belongs to this transaction.
-        if let Some(operation) = plan
-            .operations
-            .iter()
-            .find(|operation| operation.package_source == THREAD_METADATA_SOURCE)
-        {
-            record_applied_mutation(transaction, &operation.target)?;
-        }
         return Err(restore_failed(format!(
             "restore verification did not pass: {verification:?}"
         )));
