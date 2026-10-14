@@ -88,13 +88,13 @@ pub fn discover_codex_with_context(
     }
     let mut conversation_paths = collect_files(
         &codex_home.join("sessions"),
-        |path| extension_is(path, "jsonl"),
+        |path| extension_is(path, "jsonl") || is_compressed_rollout(path),
         "sessions",
         &mut warnings,
     );
     conversation_paths.extend(collect_files(
         &codex_home.join("archived_sessions"),
-        |path| extension_is(path, "jsonl"),
+        |path| extension_is(path, "jsonl") || is_compressed_rollout(path),
         "archived sessions",
         &mut warnings,
     ));
@@ -176,6 +176,29 @@ pub fn discover_codex_with_context(
         &mut warnings,
     );
 
+    let plain_ids: HashSet<_> = conversations
+        .iter()
+        .filter(|item| !is_compressed_rollout(Path::new(&item.archive_path)))
+        .map(|item| item.task_id)
+        .collect();
+    let compressed_ids: HashSet<_> = conversations
+        .iter()
+        .filter(|item| is_compressed_rollout(Path::new(&item.archive_path)))
+        .map(|item| item.task_id)
+        .collect();
+    let unsupported_conversation_paths: Vec<_> = conversation_paths
+        .iter()
+        .filter(|path| is_compressed_rollout(path))
+        .filter(|path| {
+            compressed_rollout_id(path)
+                .is_none_or(|id| compressed_ids.contains(&id) || !plain_ids.contains(&id))
+        })
+        .cloned()
+        .collect();
+    if !unsupported_conversation_paths.is_empty() {
+        warnings.push(format!("Detected {} compressed Codex conversation files (.jsonl.zst); they cannot be exported by this version. Recognition does not validate their compressed content.", unsupported_conversation_paths.len()));
+    }
+
     dedupe_warnings(&mut warnings);
 
     let codex_skill_paths = skill_paths
@@ -232,6 +255,7 @@ pub fn discover_codex_with_context(
         project_paths,
         conversations,
         conversation_paths,
+        unsupported_conversation_paths,
         session_index_path,
         state_db_path,
         skill_paths,
@@ -416,6 +440,16 @@ fn discovered_conversations(
     }
     let mut selected = Vec::new();
     for (task_id, mut candidates) in grouped {
+        // Codex prefers an existing plain sibling; the compressed copy may be stale.
+        let plain_paths: HashSet<_> = candidates
+            .iter()
+            .filter(|item| !is_compressed_rollout(Path::new(&item.archive_path)))
+            .map(|item| item.archive_path.clone())
+            .collect();
+        candidates.retain(|item| {
+            !is_compressed_rollout(Path::new(&item.archive_path))
+                || !plain_paths.contains(&item.archive_path[..item.archive_path.len() - 4])
+        });
         if candidates.len() == 1 {
             selected.push(candidates.pop().expect("single conversation candidate"));
             continue;
@@ -463,6 +497,7 @@ fn discovered_rollout_matches(
         codex_home.join(active)
     };
     candidate == active
+        || plain_rollout_path(&candidate) == plain_rollout_path(&active)
         || match (candidate.canonicalize(), active.canonicalize()) {
             (Ok(candidate), Ok(active)) => candidate == active,
             _ => false,
@@ -470,6 +505,14 @@ fn discovered_rollout_matches(
 }
 
 fn read_session_metadata_file(path: &Path) -> io::Result<Option<SessionMetadata>> {
+    if is_compressed_rollout(path) {
+        // First-stage recognition only: never interpret compressed bytes as JSONL.
+        // Identity is inferred from Codex's filename and displayed with index metadata.
+        return Ok(compressed_rollout_id(path).map(|task_id| SessionMetadata {
+            task_id,
+            fields: serde_json::json!({"id":task_id.to_string(),"title":"Codex compressed conversation"}),
+        }));
+    }
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
@@ -482,6 +525,32 @@ fn read_session_metadata_file(path: &Path) -> io::Result<Option<SessionMetadata>
         if let Some(metadata) = parse_session_metadata(&line) {
             return Ok(Some(metadata));
         }
+    }
+}
+
+pub(crate) fn is_compressed_rollout(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".jsonl.zst"))
+}
+
+pub(crate) fn compressed_rollout_id(path: &Path) -> Option<Uuid> {
+    if !is_compressed_rollout(path) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    let stem = name.get(..name.len().checked_sub(".jsonl.zst".len())?)?;
+    if !stem.starts_with("rollout-") {
+        return None;
+    }
+    Uuid::parse_str(stem.get(stem.len().checked_sub(36)?..)?).ok()
+}
+
+fn plain_rollout_path(path: &Path) -> PathBuf {
+    if is_compressed_rollout(path) {
+        path.with_extension("")
+    } else {
+        path.to_path_buf()
     }
 }
 

@@ -524,6 +524,7 @@ mod tests {
                     conversation(unassociated, None),
                 ],
                 conversation_paths: vec![],
+                unsupported_conversation_paths: vec![],
                 session_index_path: None,
                 state_db_path: None,
                 skill_paths: vec![],

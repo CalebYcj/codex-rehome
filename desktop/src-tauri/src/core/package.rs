@@ -1,6 +1,7 @@
 use crate::core::{
     discovery::{
-        associated_project_id, conversation_classification, discover_codex, StateDatabaseSnapshot,
+        associated_project_id, conversation_classification, discover_codex, is_compressed_rollout,
+        StateDatabaseSnapshot,
     },
     error::{ErrorCode, RehomeError},
     exclusions::is_forbidden,
@@ -85,6 +86,12 @@ fn create_package_with_overwrite(
 ) -> Result<CreatePackageReport, RehomeError> {
     validate_output_path(&request.output_path, replace_existing)?;
     let inventory = discover_codex(Some(request.codex_home.clone()))?;
+    if inventory.conversations.iter().any(|item| {
+        request.conversation_ids.contains(&item.task_id)
+            && is_compressed_rollout(Path::new(&item.archive_path))
+    }) {
+        return Err(package_invalid("selected compressed Codex conversation (.jsonl.zst) cannot be exported by this version; keep the original files and use a ReHome version with compressed-session export support"));
+    }
     let output_parent = usable_parent(&request.output_path);
     fs::create_dir_all(output_parent).map_err(|error| {
         let mut error = io_package_error(error);
@@ -778,6 +785,9 @@ fn stage_conversations(
     let mut conversations = Vec::new();
 
     for source in selection.paths {
+        if is_compressed_rollout(source) {
+            continue;
+        }
         let Some(session) = session_identity_from_file(source)? else {
             continue;
         };
