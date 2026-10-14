@@ -11,10 +11,11 @@ use std::{error::Error, fs};
 use uuid::Uuid;
 
 #[test]
-fn compressed_rollout_is_recognized_without_reading_its_body() -> Result<(), Box<dyn Error>> {
+fn unreadable_compressed_rollout_stays_visible_and_preserves_source() -> Result<(), Box<dyn Error>>
+{
     let fixture = synthetic_codex_fixture()?;
     let compressed = fixture.session_path.with_extension("jsonl.zst");
-    // Deliberately not a valid frame: recognition must not imply content validation.
+    // An invalid frame remains visible and blocked; its source is never changed.
     fs::write(&compressed, b"\x28\xb5\x2f\xfdrecognition-only")?;
     fs::remove_file(&fixture.session_path)?;
     let before = fs::read(&compressed)?;

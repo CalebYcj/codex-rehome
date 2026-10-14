@@ -35,11 +35,11 @@ describe("Compressed rollout recognition", () => {
     const user = userEvent.setup();
     api.discoverCodex.mockResolvedValue({
       ...inventory, conversations: [inventory.conversations[0], compressed],
-      unsupported_conversation_paths: ["C:/synthetic/old.jsonl.zst"],
+      unsupported_conversation_paths: ["C:/synthetic/sessions/old.jsonl.zst"],
     });
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "前往导出" }));
-    expect(screen.getByText(/检测到 1 个压缩会话文件/)).toBeVisible();
+    expect(screen.getByText(/有 1 个压缩会话文件无法读取/)).toBeVisible();
     await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
     const compressedBox = screen.getByRole("checkbox", { name: "选择对话 Compressed old chat" });
     expect(compressedBox).toBeDisabled();
@@ -49,7 +49,7 @@ describe("Compressed rollout recognition", () => {
     await user.click(screen.getByRole("button", { name: "只选主对话" }));
     expect(compressedBox).not.toBeChecked();
     await user.click(screen.getByRole("button", { name: "继续" }));
-    expect(screen.getByText(/检测到 1 个压缩会话文件/)).toBeVisible();
+    expect(screen.getByText(/有 1 个压缩会话文件无法读取/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "选择保存位置并创建" }));
     expect(api.createPackage.mock.calls[0][0].conversation_ids)
       .toEqual([inventory.conversations[0].task_id]);
@@ -60,12 +60,12 @@ describe("Compressed rollout recognition", () => {
     api.discoverCodex.mockResolvedValue({
       ...inventory, projects: [], conversations: [{ ...compressed, project_id: null }],
       skills: [], plugins: [], generated_images: [],
-      unsupported_conversation_paths: ["C:/old.jsonl.zst", "C:/unidentified.jsonl.zst"],
+      unsupported_conversation_paths: ["C:/synthetic/sessions/old.jsonl.zst", "C:/unidentified.jsonl.zst"],
     });
     localStorage.setItem("rehome.locale", "en");
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Go to Export" }));
-    expect(screen.getByText(/Detected 2 compressed chat files/)).toBeVisible();
+    expect(screen.getByText(/Cannot read 2 compressed chat files/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Expand project Conversations without a project" }));
     expect(screen.getByRole("checkbox", { name: "Select conversation Compressed old chat" }))
       .toBeDisabled();
@@ -80,6 +80,27 @@ describe("Compressed rollout recognition", () => {
     localStorage.setItem("rehome.locale", "en");
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Go to Export" }));
-    expect(screen.getByText(/Detected 1 compressed chat file\./)).toBeVisible();
+    expect(screen.getByText(/Cannot read 1 compressed chat file;/)).toBeVisible();
+  });
+
+  it("includes readable compressed chats in recommended and bulk export", async () => {
+    const user = userEvent.setup();
+    api.discoverCodex.mockResolvedValue({ ...inventory,
+      conversations: [inventory.conversations[0], compressed], unsupported_conversation_paths: [],
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "前往导出" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择项目 rehome-app" }));
+    const box = screen.getByRole("checkbox", { name: "选择对话 Compressed old chat" });
+    expect(box).toBeEnabled();
+    expect(box).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "只选主对话" }));
+    expect(box).toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: "全选迁移内容" }));
+    expect(box).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "继续" }));
+    await user.click(screen.getByRole("button", { name: "选择保存位置并创建" }));
+    expect(api.createPackage.mock.calls[0][0].conversation_ids)
+      .toEqual([inventory.conversations[0].task_id, compressed.task_id]);
   });
 });

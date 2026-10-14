@@ -110,7 +110,7 @@ pub struct CodexInventory {
     pub project_paths: Vec<PathBuf>,
     pub conversations: Vec<ConversationEntry>,
     pub conversation_paths: Vec<PathBuf>,
-    /// Recognition-only formats, including files whose thread ID cannot be inferred.
+    /// Unreadable compressed files, including files whose thread ID cannot be recovered.
     #[serde(default)]
     pub unsupported_conversation_paths: Vec<PathBuf>,
     pub session_index_path: Option<PathBuf>,

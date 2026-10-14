@@ -30,6 +30,7 @@ unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
 walkdir = "2"
 zip = { version = "4.6", default-features = false }
+zstd = { version = "0.14.2", default-features = false, features = ["vendored"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

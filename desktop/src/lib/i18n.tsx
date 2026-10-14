@@ -14,8 +14,8 @@ type Translator = (key: string, variables?: Variables) => string;
 const STORAGE_KEY = "rehome.locale";
 
 const english: Record<string, string> = {
-  "检测到 {count} 个压缩会话文件，本版暂不支持导出这些对话。其他内容可正常迁移，请保留源文件。": "Detected {count} compressed chat file{plural}. This version cannot export these chats. Other content can still be migrated; keep the original files.",
-  "压缩格式 · 暂不支持导出": "Compressed · Export not supported yet",
+  "有 {count} 个压缩会话文件无法读取，暂不能导出。其他内容可正常迁移，请保留源文件。": "Cannot read {count} compressed chat file{plural}; these chats cannot be exported. Other content can still be migrated; keep the original files.",
+  "文件无法读取 · 暂不能导出": "Unreadable file · Cannot export",
   "Codex 压缩会话": "Compressed Codex chat",
   "导出空间不足。请检查下方的实际暂存位置和保存位置。勾选项目会带走项目文件，减少对话数量不一定能缩小包；可改存到空间充足、且不在所选项目内的文件夹。\n{message}": "Not enough space to export. Check the actual staging and save locations below. Selecting a project includes its files, so fewer chats may not make the package much smaller. Choose a folder with sufficient space outside the selected projects.\n{message}",
   "勾选项目会包含项目文件。导出需要暂存副本和迁移包的空间；通常暂存在保存位置，若保存到所选内容内或磁盘不支持私有权限，则使用本机缓存目录。": "Selecting a project includes its files. Export needs space for both a temporary snapshot and the package. The snapshot normally uses the save location; saving inside selected content or on a filesystem without private permissions uses the local cache instead.",

@@ -5,15 +5,14 @@ use crate::core::{
         OptionalContentEntry, ProjectEntry, SourceOs,
     },
     paths::normalize_entry,
-    session::{metadata_string, metadata_uuid, parse_session_metadata, SessionMetadata},
+    session::{metadata_string, metadata_uuid, SessionMetadata},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashSet},
-    env, fs,
-    io::{self, BufRead, BufReader},
+    env, fs, io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -167,6 +166,7 @@ pub fn discover_codex_with_context(
         .unwrap_or_else(|| (0, BTreeMap::new()));
 
     let projects = discovered_projects(&project_paths);
+    let mut unreadable_compressed_paths = Vec::new();
     let conversations = discovered_conversations(
         &codex_home,
         &conversation_paths,
@@ -174,6 +174,7 @@ pub fn discover_codex_with_context(
         &projects,
         &active_rollout_paths,
         &mut warnings,
+        &mut unreadable_compressed_paths,
     );
 
     let plain_ids: HashSet<_> = conversations
@@ -186,7 +187,7 @@ pub fn discover_codex_with_context(
         .filter(|item| is_compressed_rollout(Path::new(&item.archive_path)))
         .map(|item| item.task_id)
         .collect();
-    let unsupported_conversation_paths: Vec<_> = conversation_paths
+    let unsupported_conversation_paths: Vec<_> = unreadable_compressed_paths
         .iter()
         .filter(|path| is_compressed_rollout(path))
         .filter(|path| {
@@ -196,7 +197,7 @@ pub fn discover_codex_with_context(
         .cloned()
         .collect();
     if !unsupported_conversation_paths.is_empty() {
-        warnings.push(format!("Detected {} compressed Codex conversation files (.jsonl.zst); they cannot be exported by this version. Recognition does not validate their compressed content.", unsupported_conversation_paths.len()));
+        warnings.push(format!("Detected {} unreadable compressed Codex conversation files (.jsonl.zst); they cannot be exported until the source files are repaired. Other content remains exportable.", unsupported_conversation_paths.len()));
     }
 
     dedupe_warnings(&mut warnings);
@@ -363,6 +364,7 @@ fn discovered_conversations(
     projects: &[ProjectEntry],
     active_rollout_paths: &BTreeMap<Uuid, PathBuf>,
     warnings: &mut Vec<String>,
+    unreadable_compressed_paths: &mut Vec<PathBuf>,
 ) -> Vec<ConversationEntry> {
     let index = read_session_index_entries(session_index_path, warnings);
     let mut conversations = Vec::new();
@@ -370,6 +372,9 @@ fn discovered_conversations(
         let session = match read_session_metadata_file(path) {
             Ok(Some(session)) => session,
             Ok(None) => {
+                if is_compressed_rollout(path) {
+                    unreadable_compressed_paths.push(path.clone());
+                }
                 push_warning_unique(
                     warnings,
                     format!(
@@ -390,6 +395,14 @@ fn discovered_conversations(
                 continue;
             }
         };
+        if session
+            .fields
+            .get("_rehome_unreadable")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            unreadable_compressed_paths.push(path.clone());
+        }
         let task_id = session.task_id;
         let metadata = index.get(&task_id).unwrap_or(&session.fields);
         let relative = match path.strip_prefix(codex_home).map(normalize_entry) {
@@ -525,32 +538,22 @@ fn canonical_rollout_path(path: &Path) -> io::Result<PathBuf> {
 
 fn read_session_metadata_file(path: &Path) -> io::Result<Option<SessionMetadata>> {
     if is_compressed_rollout(path) {
-        // First-stage recognition only: never interpret compressed bytes as JSONL.
-        // Identity is inferred from Codex's filename and displayed with index metadata.
+        if let Ok(Some(metadata)) = super::rollout::metadata(path) {
+            if compressed_rollout_id(path).is_none_or(|id| id == metadata.task_id) {
+                return Ok(Some(metadata));
+            }
+        }
+        // Keep unreadable files visible, but never export inferred identities.
         return Ok(compressed_rollout_id(path).map(|task_id| SessionMetadata {
             task_id,
-            fields: serde_json::json!({"id":task_id.to_string(),"title":"Codex compressed conversation"}),
+            fields: serde_json::json!({"id":task_id.to_string(),"title":"Codex compressed conversation","_rehome_unreadable":true}),
         }));
     }
-    let file = fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            return Ok(None);
-        }
-        if let Some(metadata) = parse_session_metadata(&line) {
-            return Ok(Some(metadata));
-        }
-    }
+    super::rollout::metadata(path)
 }
 
 pub(crate) fn is_compressed_rollout(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".jsonl.zst"))
+    super::rollout::is_compressed(path)
 }
 
 pub(crate) fn compressed_rollout_id(path: &Path) -> Option<Uuid> {

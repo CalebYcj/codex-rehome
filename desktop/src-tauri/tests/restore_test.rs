@@ -36,6 +36,82 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn compressed_export_restores_messages_paths_indexes_and_rolls_back() -> Result<(), Box<dyn Error>>
+{
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let fixture = &harness._fixture;
+    let marker = "compressed-round-trip-橙子-紫色-64";
+    let mut original = fs::read(&fixture.session_path)?;
+    original.extend(format!("{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{marker}\"}}]}}}}\n").as_bytes());
+    let compressed = fixture.session_path.with_extension("jsonl.zst");
+    let frame = zstd::stream::encode_all(original.as_slice(), 3)?;
+    fs::write(&compressed, &frame)?;
+    fs::remove_file(&fixture.session_path)?;
+    let package = fixture.root.join("compressed-round-trip.rehome");
+    create_package(CreatePackageRequest {
+        codex_home: fixture.codex_home.clone(),
+        project_paths: vec![fixture.project_path.clone()],
+        conversation_ids: vec![Uuid::parse_str(THREAD_ID)?],
+        output_path: package.clone(),
+        source_device_id: Uuid::nil(),
+        skill_paths: vec![],
+        plugin_paths: vec![],
+        generated_image_paths: vec![],
+    })?;
+    let package_before = fs::read(&package)?;
+    let target = TargetInventory {
+        codex_home: harness.plan.target_codex_home.clone(),
+        target_os: current_source_os(),
+        target_arch: "x86_64".into(),
+        counts: ContentCounts::default(),
+        projects: vec![],
+        conversations: vec![],
+    };
+    let preview = inspect_package(&package)?;
+    let plan = build_restore_plan(
+        &preview,
+        &target,
+        &fixture.root.join("target").join("projects"),
+    )?;
+    let restored = plan.sessions[0].target.clone();
+    let index_before = fs::read(target.codex_home.join("session_index.jsonl"))?;
+    let db_before = fs::read(target.codex_home.join("state_5.sqlite"))?;
+    let report = apply_restore(plan, harness.options())?;
+    assert!(
+        report.verification.sessions_valid
+            && report.verification.session_index_valid
+            && report.verification.sqlite_threads_valid
+            && report.verification.path_mapping_valid
+            && report.verification.project_files_valid
+    );
+    assert!(!report.verification.app_visible_ready);
+    let contents = fs::read_to_string(&restored)?;
+    assert!(contents.contains(marker));
+    let connection = Connection::open(target.codex_home.join("state_5.sqlite"))?;
+    let rollout: String = connection.query_row(
+        "SELECT rollout_path FROM threads WHERE id=?1",
+        [THREAD_ID],
+        |row| row.get(0),
+    )?;
+    assert!(Path::new(&rollout).exists() && rollout.ends_with(".jsonl"));
+    drop(connection);
+    assert_eq!(fs::read(&compressed)?, frame);
+    assert!(!fixture.session_path.exists());
+    assert_eq!(fs::read(&package)?, package_before);
+    rollback(report.transaction_id)?;
+    assert!(!restored.exists());
+    assert_eq!(
+        fs::read(target.codex_home.join("session_index.jsonl"))?,
+        index_before
+    );
+    assert_eq!(
+        fs::read(target.codex_home.join("state_5.sqlite"))?,
+        db_before
+    );
+    Ok(())
+}
+
+#[test]
 fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
 ) -> Result<(), Box<dyn Error>> {
     let old = r"C:\Users\OldUser\Documents\Codex";
