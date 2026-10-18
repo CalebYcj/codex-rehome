@@ -46,6 +46,7 @@ const MAX_SOURCE_COPY_ATTEMPTS: usize = 8;
 const SOURCE_COPY_RETRY_DELAY: Duration = Duration::from_millis(200);
 const THREAD_EXPORT_COLUMNS_V1: &[&str] = &[
     "id",
+    "project_id",
     "cwd",
     "rollout_path",
     "title",
@@ -159,6 +160,7 @@ fn create_package_with_overwrite(
                 index: &index_metadata,
                 projects: &projects,
                 active_rollout_paths: thread_export.as_ref().map(|export| &export.rollout_paths),
+                current_threads: thread_export.as_ref().map(|export| &export.by_id),
             },
             staging.path(),
             &mut payloads,
@@ -653,12 +655,14 @@ struct ConversationSelection<'a> {
     index: &'a SessionIndexMetadata,
     projects: &'a [ProjectEntry],
     active_rollout_paths: Option<&'a BTreeMap<Uuid, PathBuf>>,
+    current_threads: Option<&'a BTreeMap<Uuid, Value>>,
 }
 
 struct SelectedThreadExport {
     bytes: Vec<u8>,
     count: u64,
     rollout_paths: BTreeMap<Uuid, PathBuf>,
+    by_id: BTreeMap<Uuid, Value>,
 }
 
 fn complete_session_index(
@@ -851,11 +855,24 @@ fn stage_conversations(
         let session_value = staged_session.fields;
         let content_hash = staged_payload.hash.clone();
         payloads.insert(archive_path.clone(), staged_payload)?;
-        let metadata = selection
+        let mut metadata = selection
             .index
             .by_id
             .get(&task_id)
-            .unwrap_or(&session_value);
+            .unwrap_or(&session_value)
+            .clone();
+        if let Some(current) = selection
+            .current_threads
+            .and_then(|rows| rows.get(&task_id))
+        {
+            if let Some(cwd) = current
+                .get("cwd")
+                .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            {
+                metadata["cwd"] = cwd.clone();
+            }
+        }
+        let metadata = &metadata;
         conversations.push(ConversationEntry {
             task_id,
             project_id: associated_project_id(metadata, &session_value, selection.projects),
@@ -1004,6 +1021,7 @@ fn export_selected_threads(
     let mut bytes = vec![b'[', b'\n'];
     let mut count = 0_u64;
     let mut rollout_paths = BTreeMap::new();
+    let mut by_id = BTreeMap::new();
     while let Some(row) = rows
         .next()
         .map_err(|error| package_invalid(format!("could not read Codex thread row: {error}")))?
@@ -1023,6 +1041,11 @@ fn export_selected_threads(
             })?;
             object.insert((*column).to_owned(), sqlite_json_value(value)?);
         }
+        if let Some(id) = object.get("project_id").and_then(Value::as_str) {
+            if let Some(project) = crate::core::projects::descriptor(&connection, id)? {
+                object.insert(crate::core::projects::DESCRIPTOR.to_owned(), project);
+            }
+        }
         if let Some(rollout_path) = object
             .get("rollout_path")
             .and_then(Value::as_str)
@@ -1032,7 +1055,13 @@ fn export_selected_threads(
                 .map_err(|_| package_invalid("Codex threads table contains an invalid id"))?;
             rollout_paths.insert(task_id, PathBuf::from(rollout_path));
         }
-        let encoded = serde_json::to_vec(&Value::Object(object))
+        let value = Value::Object(object);
+        by_id.insert(
+            Uuid::parse_str(&id)
+                .map_err(|_| package_invalid("invalid selected thread identity"))?,
+            value.clone(),
+        );
+        let encoded = serde_json::to_vec(&value)
             .map_err(|error| package_invalid(format!("could not encode Codex thread: {error}")))?;
         let separator_bytes = usize::from(count > 0) * 2;
         let projected_size = bytes
@@ -1056,6 +1085,7 @@ fn export_selected_threads(
         bytes,
         count,
         rollout_paths,
+        by_id,
     })
 }
 

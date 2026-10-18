@@ -165,6 +165,29 @@ pub fn discover_codex_with_context(
         })
         .unwrap_or_else(|| (0, BTreeMap::new()));
 
+    let current_threads = state_db_path
+        .as_deref()
+        .map(crate::core::projects::current_threads)
+        .transpose()
+        .unwrap_or_else(|error| {
+            warnings.push(format!(
+                "Could not read current conversation projects: {}",
+                error.message
+            ));
+            None
+        })
+        .unwrap_or_default();
+    for metadata in current_threads.values() {
+        if let Some(roots) = metadata
+            .get(crate::core::projects::DESCRIPTOR)
+            .and_then(|p| p.get("workspace_roots"))
+            .and_then(Value::as_array)
+        {
+            for root in roots.iter().filter_map(Value::as_str) {
+                push_unique_path(root, &mut project_paths, &mut seen_projects);
+            }
+        }
+    }
     let projects = discovered_projects(&project_paths);
     let mut unreadable_compressed_paths = Vec::new();
     let conversations = discovered_conversations(
@@ -172,7 +195,7 @@ pub fn discover_codex_with_context(
         &conversation_paths,
         session_index_path.as_deref(),
         &projects,
-        &active_rollout_paths,
+        (&active_rollout_paths, &current_threads),
         &mut warnings,
         &mut unreadable_compressed_paths,
     );
@@ -362,10 +385,11 @@ fn discovered_conversations(
     paths: &[PathBuf],
     session_index_path: Option<&Path>,
     projects: &[ProjectEntry],
-    active_rollout_paths: &BTreeMap<Uuid, PathBuf>,
+    current_state: (&BTreeMap<Uuid, PathBuf>, &BTreeMap<Uuid, Value>),
     warnings: &mut Vec<String>,
     unreadable_compressed_paths: &mut Vec<PathBuf>,
 ) -> Vec<ConversationEntry> {
+    let (active_rollout_paths, current_threads) = current_state;
     let index = read_session_index_entries(session_index_path, warnings);
     let mut conversations = Vec::new();
     for path in paths {
@@ -404,7 +428,16 @@ fn discovered_conversations(
             unreadable_compressed_paths.push(path.clone());
         }
         let task_id = session.task_id;
-        let metadata = index.get(&task_id).unwrap_or(&session.fields);
+        let mut metadata = index.get(&task_id).unwrap_or(&session.fields).clone();
+        if let Some(current) = current_threads.get(&task_id) {
+            if let Some(cwd) = current
+                .get("cwd")
+                .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            {
+                metadata["cwd"] = cwd.clone();
+            }
+        }
+        let metadata = &metadata;
         let relative = match path.strip_prefix(codex_home).map(normalize_entry) {
             Ok(Ok(relative)) => relative,
             _ => {
@@ -650,11 +683,21 @@ pub(crate) fn associated_project_id(
         let path = PathBuf::from(&cwd);
         let canonical = fs::canonicalize(&path).unwrap_or(path);
         let key = ProjectPathKey::new(&canonical.to_string_lossy(), &canonical);
-        if let Some(project) = projects.iter().find(|project| {
-            let source = PathBuf::from(&project.source_path);
-            let source_key = ProjectPathKey::new(&project.source_path, &source);
-            source_key == key || project_path_contains(&source_key, &key)
-        }) {
+        if let Some(project) = projects
+            .iter()
+            .filter(|project| {
+                let source = PathBuf::from(&project.source_path);
+                let source_key = ProjectPathKey::new(&project.source_path, &source);
+                source_key == key || project_path_contains(&source_key, &key)
+            })
+            .max_by_key(|project| {
+                let path = PathBuf::from(&project.source_path);
+                match ProjectPathKey::new(&project.source_path, &path) {
+                    ProjectPathKey::Windows(path) => path.split('/').count(),
+                    ProjectPathKey::Native(path) => path.components().count(),
+                }
+            })
+        {
             return Some(project.project_id);
         }
     }
@@ -1449,6 +1492,19 @@ mod tests {
         path::{Path, PathBuf},
     };
     use uuid::Uuid;
+
+    #[test]
+    fn deepest_project_ignores_windows_verbatim_prefix_length() {
+        let projects = super::discovered_projects(&[
+            PathBuf::from(r"\\?\Z:\rehome-missing"),
+            PathBuf::from(r"Z:\rehome-missing\child"),
+        ]);
+        let metadata = serde_json::json!({"cwd":r"Z:\rehome-missing\child"});
+        assert_eq!(
+            super::associated_project_id(&metadata, &metadata, &projects),
+            Some(projects[1].project_id)
+        );
+    }
 
     #[test]
     fn project_name_accepts_windows_paths_on_macos_and_unix_paths_on_windows() {

@@ -509,6 +509,21 @@ fn verify_bridge_metadata(
         });
     }
     if requires_sqlite {
+        if let Some(database) = &plan.bridge_verification.sqlite_database {
+            let db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| {
+                    restore_failed(format!("could not verify project memberships: {e}"))
+                })?;
+            let bytes = verified.authenticated_planning_payload(THREAD_METADATA_SOURCE)?;
+            for row in crate::core::bridge::package_thread_rows(
+                bytes,
+                &plan.sessions,
+                &plan.reference_rewrites,
+                &std::collections::HashMap::new(),
+            )? {
+                mapping_valid &= crate::core::projects::verify_restored(&db, &row)?;
+            }
+        }
         sqlite_valid = plan.sessions.iter().all(|session| {
             sqlite_rows
                 .get(&session.target_task_id.to_string())
