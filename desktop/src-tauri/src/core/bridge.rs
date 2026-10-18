@@ -53,6 +53,7 @@ const INDEX_REPAIR_FIELDS: &[&str] = &[
 ];
 const THREAD_IMPORT_FIELDS: &[&str] = &[
     "id",
+    "project_id",
     "cwd",
     "rollout_path",
     "title",
@@ -637,7 +638,7 @@ fn import_sqlite_threads_for_operation(
     ensure_safe_codex_target(root, &operation.target)?;
     reject_hard_linked_sqlite(&operation.target)?;
     let identity = sqlite_file_identity(&operation.target)?;
-    let rows = package_thread_rows(package_bytes, sessions, rewrites, history_modes)?;
+    let mut rows = package_thread_rows(package_bytes, sessions, rewrites, history_modes)?;
     let _guard = TargetReplacementGuard::acquire(root, operation, lock_token)?;
     reject_hard_linked_sqlite(&operation.target)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -673,8 +674,10 @@ fn import_sqlite_threads_for_operation(
             "target Codex threads table has no id column",
         ));
     }
-    for row in &rows {
+    for row in &mut rows {
+        crate::core::projects::prepare_import(&transaction, row)?;
         import_thread_row(&transaction, row, &schema)?;
+        crate::core::projects::verify_member(&transaction, row)?;
     }
     transaction.commit().map_err(|error| {
         restore_failed(format!("could not commit Codex thread import: {error}"))
@@ -682,7 +685,7 @@ fn import_sqlite_threads_for_operation(
     Ok(rows.len())
 }
 
-fn package_thread_rows(
+pub(crate) fn package_thread_rows(
     package_bytes: &[u8],
     sessions: &[PlannedSession],
     rewrites: &[ReferenceRewrite],
@@ -705,7 +708,7 @@ fn package_thread_rows(
     let mut target_ids = HashSet::new();
     let mut result = Vec::with_capacity(values.len());
     let mut source_ids = HashSet::new();
-    for value in values {
+    for mut value in values {
         let source_id = metadata_id(&value)
             .ok_or_else(|| package_invalid("thread metadata row is missing its conversation ID"))?
             .to_owned();
@@ -732,6 +735,11 @@ fn package_thread_rows(
             })
             .cloned()
             .collect::<Vec<_>>();
+        // Logical project roots are capabilities too: only selected, mapped
+        // roots may enter the target. Do not reattach old-machine directories.
+        let descriptor = value
+            .as_object_mut()
+            .and_then(|v| v.remove(crate::core::projects::DESCRIPTOR));
         let mut line = serde_json::to_vec(&value).map_err(|error| {
             package_invalid(format!("could not encode bridge metadata row: {error}"))
         })?;
@@ -742,6 +750,28 @@ fn package_thread_rows(
             .as_object()
             .cloned()
             .ok_or_else(|| package_invalid("thread metadata row must be a JSON object"))?;
+        if let Some(mut descriptor) = descriptor {
+            let roots = descriptor
+                .get("workspace_roots")
+                .and_then(Value::as_array)
+                .ok_or_else(|| package_invalid("invalid logical project roots"))?;
+            let selected_refs = selected.iter().collect::<Vec<_>>();
+            let mut mapped = Vec::new();
+            for root in roots {
+                let root = root
+                    .as_str()
+                    .ok_or_else(|| package_invalid("logical project root must be a string"))?;
+                if let Some(target) = crate::core::planner::map_workspace_root(root, &selected_refs)
+                {
+                    let target = Value::String(target);
+                    if !mapped.contains(&target) {
+                        mapped.push(target)
+                    }
+                }
+            }
+            descriptor["workspace_roots"] = Value::Array(mapped);
+            object.insert(crate::core::projects::DESCRIPTOR.into(), descriptor);
+        }
         object.remove("thread_id");
         object.remove("conversation_id");
         object.insert(

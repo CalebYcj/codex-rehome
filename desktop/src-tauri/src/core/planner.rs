@@ -1204,7 +1204,7 @@ pub(crate) fn workspace_roots_are_mapped(
     metadata.is_none_or(|m| check(m, rewrites))
 }
 
-fn map_workspace_root(root: &str, rewrites: &[&ReferenceRewrite]) -> Option<String> {
+pub(crate) fn map_workspace_root(root: &str, rewrites: &[&ReferenceRewrite]) -> Option<String> {
     rewrites
         .iter()
         .filter(|r| r.kind == ReferenceRewriteKind::WorkspaceRoot)
@@ -1461,9 +1461,23 @@ fn sqlite_threads_contain(
     }
 
     for desired_row in rows {
-        let object = desired_row
+        let mut object = desired_row
             .as_object()
-            .ok_or_else(|| package_invalid("thread metadata row must be a JSON object"))?;
+            .ok_or_else(|| package_invalid("thread metadata row must be a JSON object"))?
+            .clone();
+        if let Some(source) = object
+            .get(crate::core::projects::DESCRIPTOR)
+            .and_then(|d| d.get("source_id"))
+            .and_then(serde_json::Value::as_str)
+        {
+            let id = crate::core::projects::target_id(source);
+            object.insert("project_id".into(), serde_json::Value::String(id));
+            if !crate::core::projects::verify_restored(&connection, &object)? {
+                return Ok(false);
+            }
+        } else {
+            object.remove("project_id");
+        }
         let id = metadata_id(desired_row)
             .ok_or_else(|| package_invalid("thread metadata row is missing its conversation ID"))?;
         if object.contains_key("rollout_path") && !columns.contains("rollout_path") {
