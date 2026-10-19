@@ -113,7 +113,7 @@ jobs:
       - name: Build macOS installer
         if: ${{ !startsWith(github.ref, 'refs/tags/desktop-v') }}
         working-directory: desktop
-        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
       - name: Build signed macOS updater
         if: startsWith(github.ref, 'refs/tags/desktop-v')
         working-directory: desktop
