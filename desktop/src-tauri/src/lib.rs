@@ -3,6 +3,10 @@ pub mod core;
 pub mod support;
 pub mod workflow;
 
+fn application_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -32,7 +36,7 @@ pub fn run() {
             workflow::open_support_issue,
             workflow::recheck_support,
         ])
-        .run(tauri::generate_context!())
+        .run(application_context())
         .expect("error while running ReHome Desktop");
 }
 
@@ -40,7 +44,7 @@ pub fn run() {
 mod brand_tests {
     #[test]
     fn compiled_default_window_icon_contains_the_current_blue_brand() {
-        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let context = super::application_context();
         let icon = context
             .default_window_icon()
             .expect("application window icon");
