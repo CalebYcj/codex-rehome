@@ -46,13 +46,15 @@ mod brand_tests {
             .expect("application window icon");
         assert!(icon.width() >= 32 && icon.height() >= 32);
         assert!(
-            icon.rgba()
-                .chunks_exact(4)
-                .any(|pixel| pixel == [47, 91, 211, 255]),
+            icon.rgba().as_chunks::<4>().0.contains(&[47, 91, 211, 255]),
             "the runtime/taskbar default must embed the blue house/return mark"
         );
         assert!(
-            icon.rgba().chunks_exact(4).any(|pixel| pixel[3] == 0),
+            icon.rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] == 0),
             "platform icon corners must remain transparent"
         );
     }
