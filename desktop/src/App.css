@@ -171,7 +171,9 @@ summary:hover {
 .brand .brand-mark {
   width: 33px;
   height: 33px;
-  color: var(--accent);
+  display: block;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 .menu-anchor {
   position: relative;

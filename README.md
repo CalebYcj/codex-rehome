@@ -1,5 +1,7 @@
 # Codex ReHome
 
+<img src="docs/assets/rehome-mark.svg" alt="ReHome" width="64" height="64">
+
 [中文](README.md) | [English](README.en.md) | [下载 ReHome Desktop](https://github.com/CalebYcj/codex-rehome/releases)
 
 把 Codex Desktop 里你选择的项目、对话、Skills、Plugins 和生成内容，从一台电脑离线搬到另一台电脑。

@@ -35,6 +35,7 @@ jobs:
         run: npm run build
       - run: node --test scripts/generate-updater-json.test.mjs
       - run: node --test scripts/installer-artwork.test.mjs
+      - run: node --test scripts/brand-assets.test.mjs
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       # macOS exposes its default temporary directory through /var, a symlink.
@@ -75,6 +76,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --bundles nsis --config src-tauri/tauri.release.conf.json
+      - name: Verify embedded application and setup branding
+        shell: pwsh
+        run: ./scripts/verify-windows-brand.ps1
       - name: Stage Windows release files
         shell: pwsh
         run: |

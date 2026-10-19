@@ -158,16 +158,7 @@ function AppContent() {
           disabled={locked}
           aria-label={t("ReHome 首页")}
         >
-          <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-            <path
-              d="M13 24H5V5h15v8M19 8h8v19H12v-8M12 16h9"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.1"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <img className="brand-mark" src={new URL("../brand-mark.svg", import.meta.url).href} alt="" aria-hidden="true" width="33" height="33" />
           <strong>ReHome</strong>
         </button>
         <div className="menu-anchor">

@@ -35,3 +35,25 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running ReHome Desktop");
 }
+
+#[cfg(test)]
+mod brand_tests {
+    #[test]
+    fn compiled_default_window_icon_contains_the_current_blue_brand() {
+        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let icon = context
+            .default_window_icon()
+            .expect("application window icon");
+        assert!(icon.width() >= 32 && icon.height() >= 32);
+        assert!(
+            icon.rgba()
+                .chunks_exact(4)
+                .any(|pixel| pixel == [47, 91, 211, 255]),
+            "the runtime/taskbar default must embed the blue house/return mark"
+        );
+        assert!(
+            icon.rgba().chunks_exact(4).any(|pixel| pixel[3] == 0),
+            "platform icon corners must remain transparent"
+        );
+    }
+}

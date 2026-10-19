@@ -86,6 +86,17 @@ async function toggleLanguage(user: ReturnType<typeof userEvent.setup>) {
   );
   await user.click(screen.getByRole("menuitem", { name: /English|中文/ }));
 }
+
+it("uses the shared house logo without changing the home button accessibility", async () => {
+  render(<App />);
+  const home = await screen.findByRole("button", { name: "ReHome 首页" });
+  const mark = home.querySelector("img.brand-mark");
+  expect(mark).toHaveAttribute("alt", "");
+  expect(mark).toHaveAttribute("aria-hidden", "true");
+  expect(mark?.getAttribute("src")).toBe(new URL("../brand-mark.svg", import.meta.url).href);
+  expect(mark).toHaveAttribute("width", "33");
+  expect(mark).toHaveAttribute("height", "33");
+});
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
   await user.click(
     screen.getByRole("button", { name: /更多选项|More options/ }),

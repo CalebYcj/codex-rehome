@@ -1,5 +1,7 @@
 # Codex ReHome
 
+<img src="assets/rehome-mark.svg" alt="ReHome" width="64" height="64">
+
 Codex ReHome is an offline desktop app for moving selected Codex Desktop projects, conversations, Skills (including `.codex/skills` and shared `.agents/skills`), Plugins, and generated artifacts between computers.
 
 [Download ReHome Desktop](https://github.com/CalebYcj/codex-rehome/releases) · [中文主页](../README.md) · [English README](../README.en.md)

@@ -1,5 +1,7 @@
 # Codex ReHome
 
+<img src="docs/assets/rehome-mark.svg" alt="ReHome" width="64" height="64">
+
 [中文](README.md) | [English](README.en.md) | [Download ReHome Desktop](https://github.com/CalebYcj/codex-rehome/releases)
 
 Move selected Codex Desktop projects, conversations, Skills, Plugins, and generated artifacts between computers through a local, offline migration package.
