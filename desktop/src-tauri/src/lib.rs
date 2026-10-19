@@ -3,6 +3,10 @@ pub mod core;
 pub mod support;
 pub mod workflow;
 
+fn application_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -32,6 +36,30 @@ pub fn run() {
             workflow::open_support_issue,
             workflow::recheck_support,
         ])
-        .run(tauri::generate_context!())
+        .run(application_context())
         .expect("error while running ReHome Desktop");
+}
+
+#[cfg(test)]
+mod brand_tests {
+    #[test]
+    fn compiled_default_window_icon_contains_the_current_blue_brand() {
+        let context = super::application_context();
+        let icon = context
+            .default_window_icon()
+            .expect("application window icon");
+        assert!(icon.width() >= 32 && icon.height() >= 32);
+        assert!(
+            icon.rgba().as_chunks::<4>().0.contains(&[47, 91, 211, 255]),
+            "the runtime/taskbar default must embed the blue house/return mark"
+        );
+        assert!(
+            icon.rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] == 0),
+            "platform icon corners must remain transparent"
+        );
+    }
 }
