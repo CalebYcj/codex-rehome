@@ -58,6 +58,10 @@ pub struct ConversationEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationClassification {
+    #[serde(default)]
+    pub fork_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_source_id: Option<Uuid>,
     pub parent_task_id: Option<Uuid>,
     pub agent_path: Option<String>,
     pub agent_nickname: Option<String>,
@@ -192,6 +196,8 @@ pub enum SessionAction {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceRewriteKind {
+    LineageId,
+    LineageOffset,
     ConversationId,
     ConversationTitle,
     ProjectPath,

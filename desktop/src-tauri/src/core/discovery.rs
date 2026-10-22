@@ -612,10 +612,17 @@ fn plain_rollout_path(path: &Path) -> PathBuf {
 pub(crate) fn conversation_classification(fields: &Value) -> Option<ConversationClassification> {
     if metadata_string(fields, &["thread_source"]).as_deref() != Some("subagent")
         && fields.pointer("/source/subagent/thread_spawn").is_none()
+        && crate::core::lineage::required_source(fields)
+            .ok()
+            .flatten()
+            .is_none()
     {
         return None;
     }
     Some(ConversationClassification {
+        fork_only: metadata_string(fields, &["thread_source"]).as_deref() != Some("subagent")
+            && fields.pointer("/source/subagent/thread_spawn").is_none(),
+        required_source_id: crate::core::lineage::required_source(fields).ok().flatten(),
         parent_task_id: metadata_uuid(fields, &["parent_thread_id", "forked_from_id"]),
         agent_path: metadata_string(fields, &["agent_path"]).or_else(|| {
             fields

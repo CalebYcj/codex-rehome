@@ -14,6 +14,13 @@ type Translator = (key: string, variables?: Variables) => string;
 const STORAGE_KEY = "rehome.locale";
 
 const english: Record<string, string> = {
+  "如果 Codex 首次打开分叉对话时历史为空，请先打开它的原对话一次，再返回分叉对话。请保留迁移包和备份，直到历史确认完整。": "If a fork initially shows no history in Codex, open its source chat once, then return to the fork. Keep the package and backups until you have confirmed the history is complete.",
+  "分叉对话": "Forked chat",
+  "需要一起迁移的原对话": "Source chats needed for this migration",
+  "所选分叉对话引用了原对话的历史。请确认下面的内容可以一起带走；未勾选前不会打包。": "The selected forks reference history in these source chats. Review what will be included; nothing is added until you select it.",
+  "源记录未找到，请保留旧电脑数据": "Source history not found; keep the data on the old computer",
+  "对话依赖形成循环，请保留源文件并联系支持。": "The chat dependencies contain a cycle. Keep the source files and contact support.",
+  "勾选这些原对话": "Select these source chats",
   "有 {count} 个压缩会话文件无法读取，暂不能导出。其他内容可正常迁移，请保留源文件。": "Cannot read {count} compressed chat file{plural}; these chats cannot be exported. Other content can still be migrated; keep the original files.",
   "文件无法读取 · 暂不能导出": "Unreadable file · Cannot export",
   "Codex 压缩会话": "Compressed Codex chat",

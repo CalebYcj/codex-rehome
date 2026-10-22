@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod error;
 pub mod exclusions;
 pub(crate) mod legacy;
+pub(crate) mod lineage;
 pub mod models;
 pub mod package;
 pub mod paths;

@@ -657,6 +657,11 @@ export default function ReceivePage({
               "文件和索引已导入。请重启 Codex，打开原对话并继续发送一条消息，确认可以使用。",
             )}
           </p>
+          {preview?.manifest.conversations.some((chat) => chat.classification?.required_source_id) && (
+            <p className="manual-status">
+              {t("如果 Codex 首次打开分叉对话时历史为空，请先打开它的原对话一次，再返回分叉对话。请保留迁移包和备份，直到历史确认完整。")}
+            </p>
+          )}
           <details className="technical-details">
             <summary>{t("查看系统检查详情")}</summary>
             <div className="verification-list">

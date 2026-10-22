@@ -62,6 +62,10 @@ impl SessionPayload {
                                 | "project_id"
                                 | "rollout_path"
                                 | "history_mode"
+                                | "forked_from_id"
+                                | "forked_from_ordinal_exclusive"
+                                | "session_id"
+                                | "history_base"
                         )
                     });
                     fields.insert("id".into(), Value::String(record.task_id.to_string()));
@@ -129,6 +133,21 @@ impl SessionPayload {
         source: &str,
     ) -> Result<String, RehomeError> {
         self.write_rewritten(&mut io::sink(), rewrites, source)
+    }
+
+    pub(crate) fn rewritten_prefix_offset(
+        &self,
+        rewrites: &[ReferenceRewrite],
+        source: &str,
+        ordinal: u64,
+        original_offset: u64,
+    ) -> Result<u64, RehomeError> {
+        let original = prefix_offset(File::open(&self.file).map_err(io_error)?, ordinal)?;
+        if original != original_offset {
+            return Err(invalid("paginated history_base byte offset does not match its source ordinal; keep the original history"));
+        }
+        let (rewritten, _) = self.rewritten_file(rewrites, source)?;
+        prefix_offset(rewritten.reopen().map_err(io_error)?, ordinal)
     }
 
     pub(crate) fn write_rewritten(
@@ -250,6 +269,37 @@ fn read_record(reader: &mut impl BufRead, line: &mut Vec<u8>) -> Result<bool, Re
             return Ok(true);
         }
     }
+}
+
+pub(crate) fn prefix_offset(reader: impl Read, ordinal: u64) -> Result<u64, RehomeError> {
+    if ordinal == 0 {
+        return Ok(0);
+    }
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    let mut offset = 0_u64;
+    let mut first = true;
+    while read_record(&mut reader, &mut line)? {
+        offset = offset
+            .checked_add(line.len() as u64)
+            .ok_or_else(|| invalid("rollout offset overflow"))?;
+        let bytes = if first {
+            line.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&line)
+        } else {
+            &line
+        };
+        first = false;
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record: Value = serde_json::from_slice(bytes).map_err(json_error)?;
+        if record.get("ordinal").and_then(Value::as_u64) == Some(ordinal - 1) {
+            return Ok(offset);
+        }
+    }
+    Err(invalid(
+        "paginated history_base source ordinal is missing or truncated",
+    ))
 }
 
 struct HashReader {

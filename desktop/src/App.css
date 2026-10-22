@@ -838,6 +838,19 @@ summary:hover {
   width: 17px;
   height: 17px;
 }
+.lineage-notice {
+  display: block;
+  white-space: normal;
+}
+.lineage-notice p {
+  margin: 8px 0;
+}
+.lineage-notice ul {
+  padding-inline-start: 20px;
+}
+.lineage-notice button {
+  margin-top: 8px;
+}
 .table-wrap {
   width: 100%;
   overflow: auto;

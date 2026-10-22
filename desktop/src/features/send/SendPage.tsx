@@ -48,6 +48,10 @@ function isUnsupportedConversation(conversation: ConversationEntry, unsupportedP
   return unsupportedPaths.some((path) => path.replace(/\\/g, "/").endsWith(relative));
 }
 
+function isSubagent(conversation: ConversationEntry) {
+  return Boolean(conversation.classification && !conversation.classification.fork_only);
+}
+
 export default function SendPage({
   headingRef,
   inventory,
@@ -100,6 +104,26 @@ export default function SendPage({
   const unsupportedCount =
     inventory?.unsupported_conversation_paths?.length ??
     inventory?.conversations.filter((item) => isUnsupportedConversation(item)).length ?? 0;
+  const dependencies = useMemo(() => {
+    const byId = new Map(inventory?.conversations.map((item) => [item.task_id, item]));
+    const required = new Set<string>();
+    const checked = new Set<string>();
+    let cycle = false;
+    for (const selected of conversations) {
+      const path = new Set<string>();
+      let id: string | null | undefined = selected;
+      while (id) {
+        if (path.has(id)) { cycle = true; break; }
+        if (checked.has(id)) break;
+        path.add(id);
+        checked.add(id);
+        const source: string | null | undefined = byId.get(id)?.classification?.required_source_id;
+        if (source && !conversations.has(source)) required.add(source);
+        id = source;
+      }
+    }
+    return { cycle, missing: [...required].map((id) => ({ id, item: byId.get(id) })) };
+  }, [inventory, conversations]);
   const hasSelectableContent = Boolean(
     inventory &&
       inventory.projects.filter((project) => project.source_available).length +
@@ -123,7 +147,7 @@ export default function SendPage({
       inventory.generated_images.every((image) => images.has(image.content_id)),
   );
   const canCreate = Boolean(
-    inventory && hasContent && !busy &&
+    inventory && hasContent && !busy && !dependencies.cycle && dependencies.missing.length === 0 &&
     !inventory.conversations.some((item) =>
       isUnsupportedConversation(item, inventory.unsupported_conversation_paths) && conversations.has(item.task_id)),
   );
@@ -143,7 +167,7 @@ export default function SendPage({
     const next = new Set(conversations);
     for (const item of items) next.delete(item.task_id);
     for (const item of items) {
-      if (!item.classification && !isUnsupportedConversation(item, inventory?.unsupported_conversation_paths)) next.add(item.task_id);
+      if (!isSubagent(item) && !isUnsupportedConversation(item, inventory?.unsupported_conversation_paths)) next.add(item.task_id);
     }
     setConversations(next);
   }
@@ -599,6 +623,27 @@ export default function SendPage({
           </details>
         </section>
       )}
+      {(dependencies.cycle || dependencies.missing.length > 0) && (
+        <section className="inline-state lineage-notice" aria-label={t("需要一起迁移的原对话")} role="status">
+          <strong>{t("需要一起迁移的原对话")}</strong>
+          <p>{t("所选分叉对话引用了原对话的历史。请确认下面的内容可以一起带走；未勾选前不会打包。")}</p>
+          <ul>
+            {dependencies.missing.map(({ id, item }) => (
+              <li key={id}>{item?.title ?? id}{!item && ` · ${t("源记录未找到，请保留旧电脑数据")}`}</li>
+            ))}
+          </ul>
+          {dependencies.cycle && <p>{t("对话依赖形成循环，请保留源文件并联系支持。")}</p>}
+          {dependencies.missing.some(({ item }) => item && !isUnsupportedConversation(item, inventory?.unsupported_conversation_paths)) && (
+            <button className="secondary-button" onClick={() => {
+              const next = new Set(conversations);
+              for (const { item } of dependencies.missing) {
+                if (item && !isUnsupportedConversation(item, inventory?.unsupported_conversation_paths)) next.add(item.task_id);
+              }
+              setConversations(next);
+            }}>{t("勾选这些原对话")}</button>
+          )}
+        </section>
+      )}
       {error && (
         <p className="inline-state status-error" role="alert">
           {error}
@@ -685,7 +730,7 @@ function ProjectChoice({
   const { locale, t } = useI18n();
   const exportable = conversations.filter((item) => !isUnsupportedConversation(item, unsupportedPaths));
   const subagents = exportable.filter(
-    (conversation) => conversation.classification,
+    (conversation) => isSubagent(conversation),
   ).length;
   const mainConversations = exportable.length - subagents;
   return (
@@ -777,7 +822,7 @@ function ProjectChoice({
                 onChange={() => onToggleConversation(conversation.task_id)}
                 aria-label={t("选择对话 {name}", { name: conversation.title })}
               />
-              {conversation.classification ? (
+              {isSubagent(conversation) ? (
                 <Bot aria-hidden="true" />
               ) : (
                 <MessageSquareText aria-hidden="true" />
@@ -787,18 +832,18 @@ function ProjectChoice({
                 <small className="conversation-details">
                   <span
                     className={
-                      conversation.classification
+                      isSubagent(conversation)
                         ? "conversation-badge badge-subagent"
                         : "conversation-badge badge-main"
                     }
                   >
-                    {isUnsupportedConversation(conversation, unsupportedPaths) ? t("文件无法读取 · 暂不能导出") : conversation.classification
+                    {isUnsupportedConversation(conversation, unsupportedPaths) ? t("文件无法读取 · 暂不能导出") : conversation.classification?.fork_only ? t("分叉对话") : conversation.classification
                       ? `${t("子 Agent")}${conversation.classification.depth ? ` · L${conversation.classification.depth}` : ""}`
                       : t("主对话")}
                   </span>
                   {!isUnsupportedConversation(conversation, unsupportedPaths) && <span>
                     {t(
-                      conversation.classification
+                      isSubagent(conversation)
                         ? "辅助记录，通常可不迁移"
                         : "建议迁移",
                     )}

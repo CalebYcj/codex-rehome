@@ -167,6 +167,61 @@ fn create_package_with_overwrite(
             &mut counts,
         )?;
 
+        let graph = conversations
+            .iter()
+            .map(|conversation| {
+                let metadata = session_identity_from_file(
+                    &staging.path().join(&conversation.archive_path),
+                )?
+                .ok_or_else(|| package_invalid("selected conversation metadata is missing"))?;
+                Ok((
+                    conversation.task_id,
+                    crate::core::lineage::required_source(&metadata.fields)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, RehomeError>>()?;
+        crate::core::lineage::ordered(&graph)?;
+        let by_id = conversations
+            .iter()
+            .map(|item| (item.task_id, item))
+            .collect::<BTreeMap<_, _>>();
+        for conversation in &conversations {
+            let fields =
+                session_identity_from_file(&staging.path().join(&conversation.archive_path))?
+                    .ok_or_else(|| package_invalid("selected conversation metadata is missing"))?
+                    .fields;
+            if let Some(parent) = graph[&conversation.task_id] {
+                let parent_metadata =
+                    session_identity_from_file(&staging.path().join(&by_id[&parent].archive_path))?
+                        .ok_or_else(|| {
+                            package_invalid("required source rollout metadata is missing")
+                        })?;
+                if parent_metadata
+                    .fields
+                    .get("history_mode")
+                    .and_then(Value::as_str)
+                    != Some("paginated")
+                {
+                    return Err(package_invalid("required source rollout is not paginated"));
+                }
+            }
+            if let Some(base) = fields.get("history_base").filter(|v| !v.is_null()) {
+                let parent = graph[&conversation.task_id].expect("validated history base ID");
+                let path = staging.path().join(&by_id[&parent].archive_path);
+                let offset = crate::core::session_stream::prefix_offset(
+                    fs::File::open(path).map_err(io_package_error)?,
+                    base["end_ordinal_exclusive"]
+                        .as_u64()
+                        .expect("validated cutoff"),
+                )?;
+                if Some(offset) != base["end_byte_offset"].as_u64() {
+                    return Err(package_invalid(
+                        "paginated history_base byte offset does not match its source ordinal",
+                    ));
+                }
+            }
+        }
+
         let complete_index = complete_session_index(&index_metadata, &conversations)?;
         if !complete_index.is_empty() {
             stage_generated(

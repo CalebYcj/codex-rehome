@@ -71,6 +71,8 @@ export interface ConversationEntry {
   content_hash: string;
   archive_path: string;
   classification: {
+    fork_only?: boolean;
+    required_source_id?: string | null;
     parent_task_id: string | null;
     agent_path: string | null;
     agent_nickname: string | null;

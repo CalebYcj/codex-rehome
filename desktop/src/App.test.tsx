@@ -992,6 +992,12 @@ describe("ReHome Desktop workflows", () => {
 
   it("keeps conversation visibility unverified after successful project registration", async () => {
     const user = userEvent.setup();
+    api.inspectPackage.mockResolvedValue({ ...preview, manifest: { ...preview.manifest,
+      conversations: inventory.conversations.slice(0,1).map((chat,index) => index === 0 ? {
+        ...chat, classification: { parent_task_id: "source-chat", required_source_id: "source-chat", fork_only: true,
+          agent_path: null, agent_nickname: null, depth: null },
+      } : chat),
+    }});
     const report = restoreReportWithRegistration("registered");
     report.verification.app_registration_valid = true;
     report.verification.app_visible_ready = false;
@@ -1004,6 +1010,7 @@ describe("ReHome Desktop workflows", () => {
     );
     await user.click(screen.getByRole("button", { name: "导入到 Codex" }));
     await screen.findByText("实际使用待确认");
+    expect(screen.getByText(/如果 Codex 首次打开分叉对话时历史为空/)).toBeVisible();
     await user.click(screen.getByText("查看系统检查详情"));
     expect(screen.getByText("对话可见性待确认")).toBeVisible();
     expect(

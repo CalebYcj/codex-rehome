@@ -150,8 +150,40 @@ pub fn build_restore_plan_with_conflict_resolution(
         .map(|conversation| conversation.task_id)
         .collect::<HashSet<_>>();
     let mut planned_ids = HashSet::new();
+    let mut mapped_ids = HashMap::<Uuid, Uuid>::new();
+    let lineage = package
+        .manifest
+        .conversations
+        .iter()
+        .map(|conversation| {
+            let bytes = verified
+                .planning_payloads
+                .get(&conversation.archive_path)
+                .ok_or_else(|| package_invalid("verified session summary is missing"))?;
+            let dependency = parse_session_metadata(bytes)
+                .map(|metadata| crate::core::lineage::required_source(&metadata.fields))
+                .transpose()?
+                .flatten();
+            Ok((conversation.task_id, dependency))
+        })
+        .collect::<Result<BTreeMap<_, _>, RehomeError>>()?;
+    let order = crate::core::lineage::ordered(&lineage)?;
+    let by_id = package
+        .manifest
+        .conversations
+        .iter()
+        .map(|item| (item.task_id, item))
+        .collect::<HashMap<_, _>>();
+    for parent in lineage.values().flatten() {
+        if session_history_mode(&verified.planning_payloads[&by_id[parent].archive_path])
+            != Some("paginated")
+        {
+            return Err(package_invalid("required source rollout is not paginated"));
+        }
+    }
 
-    for conversation in &package.manifest.conversations {
+    for id in order {
+        let conversation = by_id[&id];
         let payload = payloads.get(&conversation.archive_path).ok_or_else(|| {
             package_invalid("manifest conversation references a missing package payload")
         })?;
@@ -178,7 +210,67 @@ pub fn build_restore_plan_with_conflict_resolution(
             })
             .transpose()?
             .unwrap_or_else(|| original_target.clone());
-        let base_rewrites = conversation_rewrites(
+        let metadata =
+            parse_session_metadata(&verified.planning_payloads[&conversation.archive_path])
+                .unwrap_or(crate::core::session::SessionMetadata {
+                    task_id: source_task_id,
+                    fields: serde_json::Value::Null,
+                });
+        let mut lineage_rewrites = Vec::new();
+        for field in ["forked_from_id", "session_id"] {
+            if let Some(from) = metadata
+                .fields
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| id.parse::<Uuid>().ok())
+            {
+                if let Some(to) = mapped_ids.get(&from).filter(|to| **to != from) {
+                    let rewrite = ReferenceRewrite {
+                        source_task_id,
+                        package_source: conversation.archive_path.clone(),
+                        kind: ReferenceRewriteKind::LineageId,
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    };
+                    if !lineage_rewrites.contains(&rewrite) {
+                        lineage_rewrites.push(rewrite);
+                    }
+                }
+            }
+        }
+        if let Some(base) = metadata.fields.get("history_base").filter(|v| !v.is_null()) {
+            let parent = lineage[&source_task_id].expect("validated history base ID");
+            let parent_conversation = by_id[&parent];
+            let to = mapped_ids[&parent];
+            lineage_rewrites.push(ReferenceRewrite {
+                source_task_id,
+                package_source: conversation.archive_path.clone(),
+                kind: ReferenceRewriteKind::LineageId,
+                from: parent.to_string(),
+                to: to.to_string(),
+            });
+            let parent_rewrites = rewrites.values().cloned().collect::<Vec<_>>();
+            let ordinal = base["end_ordinal_exclusive"]
+                .as_u64()
+                .expect("validated cutoff");
+            let from = base["end_byte_offset"].as_u64().expect("validated offset");
+            let offset = verified
+                .session_payload(&parent_conversation.archive_path)?
+                .rewritten_prefix_offset(
+                    &parent_rewrites,
+                    &parent_conversation.archive_path,
+                    ordinal,
+                    from,
+                )?;
+            lineage_rewrites.push(ReferenceRewrite {
+                source_task_id,
+                package_source: conversation.archive_path.clone(),
+                kind: ReferenceRewriteKind::LineageOffset,
+                from: from.to_string(),
+                to: offset.to_string(),
+            });
+        }
+        let mut base_rewrites = conversation_rewrites(
             payloads,
             &verified.planning_payloads,
             conversation,
@@ -187,6 +279,7 @@ pub fn build_restore_plan_with_conflict_resolution(
             None,
             &existing_target,
         )?;
+        base_rewrites.extend(lineage_rewrites.iter().cloned());
         let base_hash =
             rewritten_content_hash(source_bytes, &base_rewrites, &conversation.archive_path)?;
         let existing_state = target_state(&existing_target, target.target_os)?;
@@ -234,8 +327,10 @@ pub fn build_restore_plan_with_conflict_resolution(
                 &planned_ids,
                 &target.codex_home,
                 target.target_os,
+                &lineage_rewrites,
             )?,
         };
+        mapped_ids.insert(source_task_id, target_task_id);
         if !planned_ids.insert(target_task_id) {
             return Err(restore_failed(
                 "restore plan contains duplicate conversation IDs",
@@ -791,9 +886,17 @@ fn branch_session_target(
         .rfind(separator)
         .map(|index| &original[..index])
         .ok_or_else(|| package_invalid("conversation target has no parent directory"))?;
-    Ok(PathBuf::from(format!(
-        "{parent}{separator}{derived_id}.jsonl"
-    )))
+    let filename = original.rsplit(separator).next().unwrap_or_default();
+    let canonical_prefix = filename.strip_suffix(".jsonl").and_then(|stem| {
+        let index = stem.len().checked_sub(36)?;
+        (stem.starts_with("rollout-") && Uuid::parse_str(stem.get(index..)?).is_ok())
+            .then(|| stem.get(..index))
+            .flatten()
+    });
+    let name = canonical_prefix
+        .map(|prefix| format!("{prefix}{derived_id}.jsonl"))
+        .unwrap_or_else(|| format!("{derived_id}.jsonl"));
+    Ok(PathBuf::from(format!("{parent}{separator}{name}")))
 }
 
 fn is_target_absolute(path: &Path, target_os: SourceOs) -> Result<bool, RehomeError> {
@@ -840,6 +943,7 @@ fn plan_branch_session(
     planned_ids: &HashSet<Uuid>,
     codex_home: &Path,
     target_os: SourceOs,
+    lineage_rewrites: &[ReferenceRewrite],
 ) -> Result<SessionDecision, RehomeError> {
     let title = format!("{} · ReHome", conversation.title);
     for attempt in 0_u32.. {
@@ -849,7 +953,7 @@ fn plan_branch_session(
         }
         if let Some(existing) = target_conversations.get(&candidate) {
             let existing_target = codex_target_path(codex_home, &existing.archive_path, target_os)?;
-            let candidate_rewrites = conversation_rewrites(
+            let mut candidate_rewrites = conversation_rewrites(
                 payloads,
                 planning_payloads,
                 conversation,
@@ -858,6 +962,7 @@ fn plan_branch_session(
                 Some((candidate, &title)),
                 &existing_target,
             )?;
+            candidate_rewrites.extend_from_slice(lineage_rewrites);
             let expected_hash = rewritten_content_hash(
                 source_bytes,
                 &candidate_rewrites,
@@ -881,7 +986,7 @@ fn plan_branch_session(
         }
 
         let candidate_target = branch_session_target(original_target, candidate, target_os)?;
-        let candidate_rewrites = conversation_rewrites(
+        let mut candidate_rewrites = conversation_rewrites(
             payloads,
             planning_payloads,
             conversation,
@@ -890,6 +995,7 @@ fn plan_branch_session(
             Some((candidate, &title)),
             &candidate_target,
         )?;
+        candidate_rewrites.extend_from_slice(lineage_rewrites);
         let expected_hash = rewritten_content_hash(
             source_bytes,
             &candidate_rewrites,
@@ -1039,6 +1145,7 @@ fn rewrite_json_value(value: &mut serde_json::Value, rewrites: &[&ReferenceRewri
         Some("session_meta") => {
             if let Some(payload) = object.get_mut("payload") {
                 rewrite_known_metadata_fields(payload, rewrites, true);
+                rewrite_lineage_fields(payload, rewrites);
             }
         }
         Some("turn_context") => {
@@ -1048,6 +1155,22 @@ fn rewrite_json_value(value: &mut serde_json::Value, rewrites: &[&ReferenceRewri
         }
         Some("event_msg") => {
             if let Some(payload) = object.get_mut("payload") {
+                if matches!(
+                    payload.get("type").and_then(serde_json::Value::as_str),
+                    Some("item_started" | "item_completed")
+                ) {
+                    // Canonical item lifecycle ownership is metadata; the item
+                    // itself (including user text and tool output) is not.
+                    if let Some(id) = payload.get("thread_id").and_then(serde_json::Value::as_str) {
+                        if let Some(rewrite) = rewrites.iter().find(|r| {
+                            r.kind == ReferenceRewriteKind::ConversationId
+                                && r.source_task_id.to_string() == id
+                                && r.from == id
+                        }) {
+                            payload["thread_id"] = serde_json::Value::String(rewrite.to.clone());
+                        }
+                    }
+                }
                 let owned_settings = payload.get("type").and_then(serde_json::Value::as_str)
                     == Some("thread_settings_applied")
                     && payload
@@ -1067,6 +1190,43 @@ fn rewrite_json_value(value: &mut serde_json::Value, rewrites: &[&ReferenceRewri
         }
         Some(_) => {}
         None => rewrite_known_metadata_fields(value, rewrites, true),
+    }
+}
+
+fn rewrite_lineage_fields(value: &mut serde_json::Value, rewrites: &[&ReferenceRewrite]) {
+    for field in ["forked_from_id", "session_id"] {
+        if let Some(text) = value.get(field).and_then(serde_json::Value::as_str) {
+            if let Some(rewrite) = rewrites
+                .iter()
+                .find(|r| r.kind == ReferenceRewriteKind::LineageId && r.from == text)
+            {
+                value[field] = serde_json::Value::String(rewrite.to.clone());
+            }
+        }
+    }
+    if let Some(base) = value.get_mut("history_base").filter(|v| v.is_object()) {
+        if let Some(id) = base.get("thread_id").and_then(serde_json::Value::as_str) {
+            if let Some(rewrite) = rewrites
+                .iter()
+                .find(|r| r.kind == ReferenceRewriteKind::LineageId && r.from == id)
+            {
+                base["thread_id"] = serde_json::Value::String(rewrite.to.clone());
+            }
+        }
+        if let Some(offset) = base
+            .get("end_byte_offset")
+            .and_then(serde_json::Value::as_u64)
+        {
+            if let Some(to) = rewrites
+                .iter()
+                .find(|r| {
+                    r.kind == ReferenceRewriteKind::LineageOffset && r.from == offset.to_string()
+                })
+                .and_then(|r| r.to.parse::<u64>().ok())
+            {
+                base["end_byte_offset"] = to.into();
+            }
+        }
     }
 }
 
@@ -1119,9 +1279,13 @@ fn rewrite_known_metadata_fields(
         if let Some(rewrite) = rewrites.iter().find(|rewrite| {
             text == rewrite.from
                 && match rewrite.kind {
+                    ReferenceRewriteKind::LineageId | ReferenceRewriteKind::LineageOffset => false,
                     ReferenceRewriteKind::ConversationId => {
                         include_identity
-                            && matches!(field.as_str(), "id" | "thread_id" | "conversation_id")
+                            && matches!(
+                                field.as_str(),
+                                "id" | "thread_id" | "conversation_id" | "session_id"
+                            )
                     }
                     ReferenceRewriteKind::ConversationTitle => include_identity && field == "title",
                     ReferenceRewriteKind::ProjectPath => {
@@ -2145,6 +2309,42 @@ fn restore_failed(message: impl Into<String>) -> RehomeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_rollouts_keep_the_canonical_timestamp_filename() {
+        let id = Uuid::from_u128(2);
+        for (source,os,expected) in [
+            ("/codex/sessions/rollout-2026-10-22T15-04-35-11111111-1111-4111-8111-111111111111.jsonl",SourceOs::Macos,format!("/codex/sessions/rollout-2026-10-22T15-04-35-{id}.jsonl")),
+            (r"C:\codex\sessions\rollout-2026-10-22T15-04-35-11111111-1111-4111-8111-111111111111.jsonl",SourceOs::Windows,format!(r"C:\codex\sessions\rollout-2026-10-22T15-04-35-{id}.jsonl")),
+        ] { assert_eq!(branch_session_target(Path::new(source),id,os).unwrap(),PathBuf::from(expected)); }
+    }
+
+    #[test]
+    fn canonical_item_owner_changes_without_touching_item_content_or_foreign_owners() {
+        let id = Uuid::from_u128(1);
+        let next = Uuid::from_u128(2);
+        let source = "codex/sessions/test.jsonl";
+        let rewrites = vec![ReferenceRewrite {
+            source_task_id: id,
+            package_source: source.into(),
+            kind: ReferenceRewriteKind::ConversationId,
+            from: id.to_string(),
+            to: next.to_string(),
+        }];
+        let body = serde_json::json!({"id":id,"text":id.to_string(),"thread_id":id});
+        for owner in [id, Uuid::from_u128(3)] {
+            let row = serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":owner,"item":body}});
+            let bytes =
+                rewrite_jsonl_payload(&serde_json::to_vec(&row).unwrap(), &rewrites, source)
+                    .unwrap();
+            let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                actual["payload"]["thread_id"],
+                if owner == id { next } else { owner }.to_string()
+            );
+            assert_eq!(actual["payload"]["item"], body);
+        }
+    }
 
     #[test]
     fn directory_allocation_reserves_original_names_and_is_order_independent() {
