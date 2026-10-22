@@ -47,6 +47,10 @@ Project files and conversation history are separate. Selecting a conversation do
 
 ## Supported scenarios
 
+Forked chats may reference their source history instead of storing a full copy. Export lists the source chats that must travel together and includes them only after you explicitly select them. Missing sources and dependency cycles block incomplete exports. Each batch containing a referenced fork must include its required source chats. Missing history cannot be recreated from an incomplete old package; keep the old computer's data and export again.
+
+Codex versions can affect history loading; upgrading every computer to the latest release is not a universal migration requirement. In isolated testing with Codex CLI 0.163.0-alpha.11, directly reading a fork with a fresh history index could return an empty list. Opening its source chat first rebuilt readable history, which remained readable after restart. This limitation is recorded separately; file verification is not a claim that model continuation was verified.
+
 - Windows to Windows
 - Windows to macOS
 - macOS to Windows
