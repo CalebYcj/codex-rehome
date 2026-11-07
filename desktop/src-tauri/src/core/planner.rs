@@ -888,10 +888,8 @@ fn branch_session_target(
         .ok_or_else(|| package_invalid("conversation target has no parent directory"))?;
     let filename = original.rsplit(separator).next().unwrap_or_default();
     let canonical_prefix = filename.strip_suffix(".jsonl").and_then(|stem| {
-        let index = stem.len().checked_sub(36)?;
-        (stem.starts_with("rollout-") && Uuid::parse_str(stem.get(index..)?).is_ok())
-            .then(|| stem.get(..index))
-            .flatten()
+        let (index, _) = super::rollout::filename_identity(stem)?;
+        stem.get(..index)
     });
     let name = canonical_prefix
         .map(|prefix| format!("{prefix}{derived_id}.jsonl"))
@@ -2316,6 +2314,8 @@ mod tests {
         for (source,os,expected) in [
             ("/codex/sessions/rollout-2026-10-22T15-04-35-11111111-1111-4111-8111-111111111111.jsonl",SourceOs::Macos,format!("/codex/sessions/rollout-2026-10-22T15-04-35-{id}.jsonl")),
             (r"C:\codex\sessions\rollout-2026-10-22T15-04-35-11111111-1111-4111-8111-111111111111.jsonl",SourceOs::Windows,format!(r"C:\codex\sessions\rollout-2026-10-22T15-04-35-{id}.jsonl")),
+            ("/codex/sessions/rollout-2026-10-22T15-04-35-11111111-1111-4111-8111-111111111111-33333333-3333-4333-8333-333333333333.jsonl",SourceOs::Macos,format!("/codex/sessions/rollout-2026-10-22T15-04-35-{id}.jsonl")),
+            (r"C:\codex\sessions\rollout-2026-10-22T15-04-35-11111111-1111-4111-8111-111111111111-33333333-3333-4333-8333-333333333333.jsonl",SourceOs::Windows,format!(r"C:\codex\sessions\rollout-2026-10-22T15-04-35-{id}.jsonl")),
         ] { assert_eq!(branch_session_target(Path::new(source),id,os).unwrap(),PathBuf::from(expected)); }
     }
 

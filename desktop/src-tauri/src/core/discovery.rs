@@ -595,10 +595,7 @@ pub(crate) fn compressed_rollout_id(path: &Path) -> Option<Uuid> {
     }
     let name = path.file_name()?.to_str()?;
     let stem = name.get(..name.len().checked_sub(".jsonl.zst".len())?)?;
-    if !stem.starts_with("rollout-") {
-        return None;
-    }
-    Uuid::parse_str(stem.get(stem.len().checked_sub(36)?..)?).ok()
+    super::rollout::filename_identity(stem).map(|(_, id)| id)
 }
 
 fn plain_rollout_path(path: &Path) -> PathBuf {

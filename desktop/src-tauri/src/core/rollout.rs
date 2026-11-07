@@ -5,6 +5,29 @@ use std::{
     path::Path,
 };
 
+/// The first delimited UUID is the session ID; later UUIDs identify segments.
+/// Return its position too so conflict copies retain only the timestamp prefix.
+pub(crate) fn filename_identity(stem: &str) -> Option<(usize, uuid::Uuid)> {
+    let rest = stem.strip_prefix("rollout-")?;
+    for (offset, _) in rest.char_indices() {
+        let index = "rollout-".len() + offset;
+        if offset != 0 && rest.as_bytes()[offset - 1] != b'-' {
+            continue;
+        }
+        let end = index.checked_add(36)?;
+        let Some(text) = stem.get(index..end) else {
+            continue;
+        };
+        if end != stem.len() && !matches!(stem.as_bytes().get(end), Some(b'-' | b'.')) {
+            continue;
+        }
+        if let Ok(id) = uuid::Uuid::parse_str(text) {
+            return Some((index, id));
+        }
+    }
+    None
+}
+
 pub(crate) fn is_compressed(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -44,6 +67,34 @@ pub(crate) fn metadata(path: &Path) -> io::Result<Option<SessionMetadata>> {
         }
         if let Some(metadata) = parse_session_metadata(&line) {
             return Ok(Some(metadata));
+        }
+    }
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::*;
+
+    #[test]
+    fn first_delimited_uuid_identifies_plain_or_segmented_rollouts() {
+        let id = uuid::Uuid::from_u128(1);
+        let segment = uuid::Uuid::from_u128(2);
+        for stem in [
+            format!("rollout-{id}"),
+            format!("rollout-2026-11-07T01-02-03-{id}-{segment}"),
+            format!("rollout-2026-11-07T01-02-03-{id}.segment-{segment}"),
+        ] {
+            let (offset, actual) = filename_identity(&stem).unwrap();
+            assert_eq!(actual, id);
+            assert_eq!(&stem[offset..offset + 36], id.to_string());
+        }
+        for stem in [
+            format!("other-{id}"),
+            format!("rollout-x{id}"),
+            format!("rollout-{id}x"),
+            "rollout-坏文件名".into(),
+        ] {
+            assert!(filename_identity(&stem).is_none());
         }
     }
 }
