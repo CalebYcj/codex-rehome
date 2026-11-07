@@ -897,6 +897,18 @@ fn stage_conversations(
         } else {
             relative.to_path_buf()
         };
+        // Segmented physical filenames are not canonical rollout names to the
+        // native paginated reader. Normalize only the package entry, retaining
+        // the timestamp and authenticated session ID without editing the source.
+        let relative = relative
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| {
+                let (index, id) = super::rollout::filename_identity(stem)?;
+                (id == task_id && index + 36 < stem.len())
+                    .then(|| relative.with_file_name(format!("{}{id}.jsonl", &stem[..index])))
+            })
+            .unwrap_or(relative);
         let archive_path = format!("codex/{}", normalize_entry(&relative)?);
         let archive_path = normalize_entry(Path::new(&archive_path))?;
         let staged_payload = copy_conversation_to_staging(&source, staging_root, &archive_path)?;

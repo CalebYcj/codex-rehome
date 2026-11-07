@@ -31,14 +31,19 @@ pub(crate) fn required_source(fields: &Value) -> Result<Option<Uuid>, RehomeErro
         {
             return Err(invalid("invalid paginated history_base byte offset"));
         }
-        if fields
+        let cutoff = fields
             .get("forked_from_ordinal_exclusive")
-            .filter(|v| !v.is_null())
-            .is_some_and(|v| v.as_u64() != Some(ordinal))
+            .filter(|v| !v.is_null());
+        // Without an ordinal, forked_from_id is legacy provenance, which can
+        // name an older ancestor. history_base is the actual shared dependency.
+        if cutoff.is_some_and(|v| v.as_u64() != Some(ordinal))
             || fields
                 .get("forked_from_id")
                 .filter(|v| !v.is_null())
-                .is_some_and(|v| v.as_str().and_then(|s| s.parse::<Uuid>().ok()) != Some(id))
+                .is_some_and(|v| {
+                    let provenance = v.as_str().and_then(|s| s.parse::<Uuid>().ok());
+                    provenance.is_none() || (cutoff.is_some() && provenance != Some(id))
+                })
         {
             return Err(invalid(
                 "inconsistent paginated history_base and fork reference",
@@ -127,6 +132,22 @@ mod tests {
             .map(|n| (Uuid::from_u128(n), (n > 1).then(|| Uuid::from_u128(n - 1))))
             .collect();
         assert_eq!(ordered(&graph).unwrap().len(), 10_000);
+    }
+
+    #[test]
+    fn legacy_provenance_can_differ_from_explicit_history_base() {
+        let source = Uuid::from_u128(1);
+        let ancestor = Uuid::from_u128(2);
+        let mut fields = json!({"history_mode":"paginated","forked_from_id":ancestor,
+            "history_base":{"thread_id":source,"end_ordinal_exclusive":4,"end_byte_offset":120}});
+        assert_eq!(required_source(&fields).unwrap(), Some(source));
+        fields["forked_from_ordinal_exclusive"] = Value::Null;
+        assert_eq!(required_source(&fields).unwrap(), Some(source));
+        fields["forked_from_ordinal_exclusive"] = 4.into();
+        assert!(required_source(&fields).is_err());
+        fields["forked_from_ordinal_exclusive"] = Value::Null;
+        fields["forked_from_id"] = "invalid".into();
+        assert!(required_source(&fields).is_err());
     }
 
     #[test]

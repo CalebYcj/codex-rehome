@@ -13,6 +13,15 @@ const GRANDCHILD: &str = "44444444-4444-4444-8444-444444444444";
 #[test]
 fn byte_offsets_and_fork_ids_follow_renamed_ancestors_and_repeat_import(
 ) -> Result<(), Box<dyn Error>> {
+    nested_round_trip(false)
+}
+
+#[test]
+fn segmented_legacy_provenance_preserves_nested_history_on_restore() -> Result<(), Box<dyn Error>> {
+    nested_round_trip(true)
+}
+
+fn nested_round_trip(legacy_provenance: bool) -> Result<(), Box<dyn Error>> {
     use rehome_desktop_lib::core::{
         discovery::discover_codex,
         models::*,
@@ -31,14 +40,24 @@ fn byte_offsets_and_fork_ids_follow_renamed_ancestors_and_repeat_import(
     );
     fs::write(&f.session_path, &parent)?;
     let fork = |id: &str, source: &str, ordinal: u64, offset: u64| {
+        let mut payload = json!({"id":id,"session_id":THREAD_ID,
+            "history_mode":"paginated","cwd":cwd,"forked_from_id":source,
+            "forked_from_ordinal_exclusive":ordinal,"history_base":{"thread_id":source,
+                "end_ordinal_exclusive":ordinal,"end_byte_offset":offset}});
+        if legacy_provenance {
+            payload["forked_from_id"] = THREAD_ID.into();
+            payload
+                .as_object_mut()
+                .unwrap()
+                .remove("forked_from_ordinal_exclusive");
+        }
         format!(
-            "{}\n",
+            "{}\n{}\n",
             json!({
-                "type":"session_meta","ordinal":ordinal,"payload":{"id":id,"session_id":THREAD_ID,
-                    "history_mode":"paginated","cwd":cwd,"forked_from_id":source,
-                    "forked_from_ordinal_exclusive":ordinal,"history_base":{"thread_id":source,
-                        "end_ordinal_exclusive":ordinal,"end_byte_offset":offset}}
-            })
+                "type":"session_meta","ordinal":ordinal,"payload":payload
+            }),
+            json!({"type":"response_item","ordinal":ordinal+1,"payload":{"type":"message","role":"user",
+                "content":[{"type":"input_text","text":format!("local marker {id}")}]}})
         )
     };
     let child = fork(CHILD, THREAD_ID, 2, parent.len() as u64);
@@ -53,7 +72,7 @@ fn byte_offsets_and_fork_ids_follow_renamed_ancestors_and_repeat_import(
             .parent()
             .unwrap()
             .join(format!("rollout-{GRANDCHILD}.jsonl")),
-        fork(GRANDCHILD, CHILD, 3, child.len() as u64),
+        fork(GRANDCHILD, CHILD, 4, child.len() as u64),
     )?;
     let source_db = rusqlite::Connection::open(&f.state_db_path)?;
     source_db.execute_batch(
@@ -71,6 +90,30 @@ fn byte_offsets_and_fork_ids_follow_renamed_ancestors_and_repeat_import(
             .join(format!("rollout-{id}.jsonl"));
         source_db.execute("INSERT INTO threads (id,cwd,rollout_path,title,updated_at,archived,has_user_event,preview,history_mode) VALUES (?1,?2,?3,'fork','2026-10-22',0,1,'fork','paginated')",
             rusqlite::params![id,cwd,path.to_string_lossy()])?;
+    }
+    let mut compressed_sources = Vec::new();
+    if legacy_provenance {
+        for id in [THREAD_ID, CHILD, GRANDCHILD] {
+            let plain = if id == THREAD_ID {
+                f.session_path.clone()
+            } else {
+                f.session_path
+                    .parent()
+                    .unwrap()
+                    .join(format!("rollout-{id}.jsonl"))
+            };
+            let segmented = plain.with_file_name(format!(
+                "rollout-2026-07-22T00-00-00-{id}-55555555-5555-4555-8555-555555555555.jsonl.zst"
+            ));
+            let bytes = zstd::stream::encode_all(fs::read(&plain)?.as_slice(), 3)?;
+            fs::write(&segmented, &bytes)?;
+            fs::remove_file(&plain)?;
+            source_db.execute(
+                "UPDATE threads SET rollout_path=?1 WHERE id=?2",
+                rusqlite::params![segmented.to_string_lossy(), id],
+            )?;
+            compressed_sources.push((segmented, bytes));
+        }
     }
     let package = f.root.join("nested.rehome");
     create_package(CreatePackageRequest {
@@ -149,8 +192,23 @@ fn byte_offsets_and_fork_ids_follow_renamed_ancestors_and_repeat_import(
         );
         assert_eq!(
             value["payload"]["forked_from_id"],
-            parent_session.target_task_id.to_string()
+            if legacy_provenance {
+                plan.sessions
+                    .iter()
+                    .find(|s| s.source_task_id.to_string() == THREAD_ID)
+                    .unwrap()
+                    .target_task_id
+            } else {
+                parent_session.target_task_id
+            }
+            .to_string()
         );
+        if legacy_provenance {
+            assert!(value["payload"]
+                .get("forked_from_ordinal_exclusive")
+                .is_none());
+        }
+        assert!(fs::read_to_string(&session.target)?.contains(&format!("local marker {source}")));
         assert_eq!(
             value["payload"]["session_id"],
             plan.sessions
@@ -187,7 +245,13 @@ fn byte_offsets_and_fork_ids_follow_renamed_ancestors_and_repeat_import(
     assert_eq!(fs::read_to_string(&old_path)?, format!("{parent}\n"));
     assert!(!parent_session.target.exists());
     assert_eq!(fs::read(&package)?, package_bytes);
-    assert_eq!(fs::read_to_string(&f.session_path)?, parent);
+    if legacy_provenance {
+        for (path, bytes) in compressed_sources {
+            assert_eq!(fs::read(path)?, bytes);
+        }
+    } else {
+        assert_eq!(fs::read_to_string(&f.session_path)?, parent);
+    }
     Ok(())
 }
 

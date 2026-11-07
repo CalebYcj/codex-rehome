@@ -11,6 +11,44 @@ use std::{error::Error, fs, io::Read};
 use uuid::Uuid;
 
 #[test]
+fn segmented_compressed_name_keeps_session_identity_and_original_bytes(
+) -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let original = fs::read(&fixture.session_path)?;
+    let segmented = fixture.session_path.with_file_name(format!(
+        "rollout-2026-07-22T00-00-00-{THREAD_ID}-22222222-2222-4222-8222-222222222222.jsonl.zst"
+    ));
+    let frame = zstd::stream::encode_all(original.as_slice(), 3)?;
+    fs::write(&segmented, &frame)?;
+    fs::remove_file(&fixture.session_path)?;
+    rusqlite::Connection::open(&fixture.state_db_path)?.execute(
+        "UPDATE threads SET rollout_path=?1 WHERE id=?2",
+        rusqlite::params![segmented.to_string_lossy(), THREAD_ID],
+    )?;
+    let inventory = discover_codex_with_context(
+        Some(fixture.codex_home.clone()),
+        &DiscoveryContext::default(),
+    )?;
+    assert!(inventory.unsupported_conversation_paths.is_empty());
+    assert_eq!(inventory.conversations.len(), 1);
+    assert_eq!(inventory.conversations[0].task_id.to_string(), THREAD_ID);
+    let output = tempfile::tempdir()?;
+    let report = create_package(request(&fixture, output.path().join("segmented.rehome")))?;
+    let preview = inspect_package(&report.package_path)?;
+    assert!(preview.manifest.conversations[0]
+        .archive_path
+        .ends_with(&format!("rollout-2026-07-22T00-00-00-{THREAD_ID}.jsonl")));
+    let mut archive = zip::ZipArchive::new(fs::File::open(report.package_path)?)?;
+    let mut decoded = Vec::new();
+    archive
+        .by_name(&preview.manifest.conversations[0].archive_path)?
+        .read_to_end(&mut decoded)?;
+    assert_eq!(decoded, original);
+    assert_eq!(fs::read(segmented)?, frame);
+    Ok(())
+}
+
+#[test]
 fn export_uses_the_active_compressed_alias_not_an_older_plain_rollout() -> Result<(), Box<dyn Error>>
 {
     let fixture = synthetic_codex_fixture()?;
@@ -113,6 +151,26 @@ fn compressed_payload_with_a_different_identity_is_blocked() -> Result<(), Box<d
     let output = tempfile::tempdir()?;
     assert!(create_package(request(&fixture, output.path().join("bad.rehome"))).is_err());
     assert!(!output.path().join("bad.rehome").exists());
+    Ok(())
+}
+
+#[test]
+fn segmented_suffix_must_not_override_a_mismatched_session_id() -> Result<(), Box<dyn Error>> {
+    let fixture = synthetic_codex_fixture()?;
+    let bytes = fs::read(&fixture.session_path)?;
+    let segmented = fixture.session_path.with_file_name(format!(
+        "rollout-2026-07-22T00-00-00-22222222-2222-4222-8222-222222222222-{THREAD_ID}.jsonl.zst"
+    ));
+    fs::write(&segmented, zstd::stream::encode_all(bytes.as_slice(), 3)?)?;
+    fs::remove_file(&fixture.session_path)?;
+    let inventory = discover_codex_with_context(
+        Some(fixture.codex_home.clone()),
+        &DiscoveryContext::default(),
+    )?;
+    assert_eq!(inventory.unsupported_conversation_paths, vec![segmented]);
+    let output = tempfile::tempdir()?;
+    assert!(create_package(request(&fixture, output.path().join("mismatch.rehome"))).is_err());
+    assert!(!output.path().join("mismatch.rehome").exists());
     Ok(())
 }
 
