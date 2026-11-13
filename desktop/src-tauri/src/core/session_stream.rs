@@ -16,7 +16,7 @@ use tempfile::{Builder, NamedTempFile, TempPath};
 
 // This bounds one JSON record, not a conversation or migration package. Records
 // are released after processing; the transcript itself stays on disk.
-pub(crate) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SUMMARY_PATHS: usize = 100_000;
 const MAX_SUMMARY_BYTES: usize = 64 * 1024 * 1024;
 
@@ -260,7 +260,10 @@ fn read_record(reader: &mut impl BufRead, line: &mut Vec<u8>) -> Result<bool, Re
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index + 1);
         if line.len().saturating_add(length) > MAX_RECORD_BYTES {
-            return Err(invalid("session JSON record exceeds the 64 MiB parsing limit; the migration package and conversation have no fixed total-size limit"));
+            return Err(invalid(format!(
+                "session JSON record exceeds the {} MiB parsing limit; the migration package and conversation have no fixed total-size limit",
+                MAX_RECORD_BYTES / (1024 * 1024)
+            )));
         }
         line.extend_from_slice(&available[..length]);
         let complete = available[length - 1] == b'\n';
@@ -379,7 +382,7 @@ mod tests {
             |_, _| Ok(()),
         )
         .unwrap_err();
-        assert!(error.message.contains("64 MiB parsing limit"));
+        assert!(error.message.contains("128 MiB parsing limit"));
     }
 
     #[test]

@@ -841,6 +841,16 @@ summary:hover {
 .lineage-notice {
   display: block;
   white-space: normal;
+  scroll-margin-top: 100px;
+}
+.action-footer .export-blocked-reason {
+  color: #8b3e32;
+  font-size: 13px;
+  max-width: 56ch;
+}
+.export-blocked-reason a {
+  color: inherit;
+  white-space: nowrap;
 }
 .lineage-notice p {
   margin: 8px 0;

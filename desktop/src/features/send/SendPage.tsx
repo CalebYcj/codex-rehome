@@ -151,6 +151,14 @@ export default function SendPage({
     !inventory.conversations.some((item) =>
       isUnsupportedConversation(item, inventory.unsupported_conversation_paths) && conversations.has(item.task_id)),
   );
+  const dependencyBlockReason = dependencies.cycle
+    ? t("对话依赖形成循环，暂时无法导出。")
+    : dependencies.missing.length > 0
+      ? t("还缺 {count} 条原对话，请先查看依赖提示。", {
+          count: dependencies.missing.length,
+          plural: dependencies.missing.length === 1 ? "" : "s",
+        })
+      : null;
 
   function toggle(
     setter: (value: Set<string>) => void,
@@ -624,7 +632,7 @@ export default function SendPage({
         </section>
       )}
       {(dependencies.cycle || dependencies.missing.length > 0) && (
-        <section className="inline-state lineage-notice" aria-label={t("需要一起迁移的原对话")} role="status">
+        <section id="export-source-dependencies" className="inline-state lineage-notice" aria-label={t("需要一起迁移的原对话")} role="status">
           <strong>{t("需要一起迁移的原对话")}</strong>
           <p>{t("所选分叉对话引用了原对话的历史。请确认下面的内容可以一起带走；未勾选前不会打包。")}</p>
           <ul>
@@ -664,11 +672,18 @@ export default function SendPage({
               images: images.size,
             })}
           </small>
+          {dependencyBlockReason && (
+            <p id="export-blocked-reason" className="export-blocked-reason" role="status">
+              {dependencyBlockReason}{" "}
+              <a href="#export-source-dependencies">{t("查看原因")}</a>
+            </p>
+          )}
         </div>
         {step === "selection" ? (
           <button
             className="command-button"
             disabled={!canCreate}
+            aria-describedby={dependencyBlockReason ? "export-blocked-reason" : undefined}
             onClick={() => setStep("review")}
           >
             {t("继续")}
@@ -684,6 +699,7 @@ export default function SendPage({
             <button
               className="command-button"
               disabled={!canCreate}
+              aria-describedby={dependencyBlockReason ? "export-blocked-reason" : undefined}
               onClick={() => void handleCreate()}
             >
               <PackagePlus aria-hidden="true" />
