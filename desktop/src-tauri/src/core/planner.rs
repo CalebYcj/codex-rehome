@@ -133,15 +133,30 @@ pub fn build_restore_plan_with_conflict_resolution(
         }
     }
 
-    let target_conversations = target
-        .conversations
-        .iter()
-        .map(|conversation| (conversation.task_id, conversation))
-        .collect::<HashMap<_, _>>();
-    if target_conversations.len() != target.conversations.len() {
-        return Err(restore_failed(
-            "target inventory contains duplicate conversation IDs",
-        ));
+    let mut target_conversations = HashMap::new();
+    for conversation in &target.conversations {
+        let id = conversation.task_id;
+        if target_conversations.insert(id, conversation).is_some() {
+            let mut paths = target
+                .conversations
+                .iter()
+                .filter(|candidate| candidate.task_id == id)
+                .map(|candidate| {
+                    candidate
+                        .archive_path
+                        .strip_prefix("codex/")
+                        .unwrap_or(&candidate.archive_path)
+                })
+                .collect::<Vec<_>>();
+            paths.sort_unstable();
+            let count = paths.len();
+            paths.truncate(6);
+            return Err(restore_failed(format!(
+                "target inventory contains duplicate conversation IDs: {id} has {count} candidate rollout records under the destination Codex data directory (showing {}): {}",
+                paths.len(),
+                paths.join(", ")
+            )));
+        }
     }
     let source_ids = package
         .manifest

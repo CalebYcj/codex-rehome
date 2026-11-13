@@ -48,6 +48,8 @@ describe("Compressed rollout recognition", () => {
     expect(api.createPackage).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "勾选这些原对话" }));
     expect(screen.getByRole("checkbox", { name: "选择对话 Private source chat" })).toBeChecked();
+    expect(screen.queryByRole("link", { name: "查看原因" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "继续" })).not.toHaveAttribute("aria-describedby");
     await user.click(screen.getByRole("button", { name: "继续" }));
     await user.click(screen.getByRole("button", { name: "选择保存位置并创建" }));
     expect(api.createPackage.mock.calls[0][0].conversation_ids).toEqual([child.task_id, parent.task_id]);
@@ -67,6 +69,10 @@ describe("Compressed rollout recognition", () => {
     expect(screen.getByText(/Source history not found/)).toBeVisible();
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Select these source chats" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue" })).toHaveAccessibleDescription(
+      "1 source chat still needed. Review the dependency details. View reason",
+    );
+    expect(screen.getByRole("link", { name: "View reason" })).toHaveAttribute("href", "#export-source-dependencies");
   });
 
   it("blocks cyclic fork dependencies even if every chat is selected", async () => {
@@ -81,8 +87,33 @@ describe("Compressed rollout recognition", () => {
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "前往导出" }));
     await userEvent.click(screen.getByRole("checkbox", { name: "全选迁移内容" }));
-    expect(screen.getByText(/对话依赖形成循环/)).toBeVisible();
+    expect(screen.getByText("对话依赖形成循环，请保留源文件并联系支持。")).toBeVisible();
     expect(screen.getByRole("button", { name: "继续" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "继续" })).toHaveAccessibleDescription(
+      "对话依赖形成循环，暂时无法导出。 查看原因",
+    );
+  });
+
+  it("explains distinct missing ancestors next to Continue for a large selected project", async () => {
+    localStorage.setItem("rehome.locale", "en");
+    const chats = Array.from({ length: 67 }, (_, index) => ({
+      ...inventory.conversations[0], task_id: `chat-${index}`, title: `Selected chat ${index}`,
+      classification: index < 2 ? {
+        parent_task_id: `missing-${index}`, required_source_id: `missing-${index}`, fork_only: true,
+        agent_path: null, agent_nickname: null, depth: null,
+      } : null,
+    }));
+    api.discoverCodex.mockResolvedValue({ ...inventory, conversations: chats });
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Go to Export" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select all migration content" }));
+    expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Continue" })).toHaveAccessibleDescription(
+      "2 source chats still needed. Review the dependency details. View reason",
+    );
+    expect(screen.getByRole("status", { name: "Source chats needed for this migration" }))
+      .toHaveAttribute("id", "export-source-dependencies");
+    expect(api.createPackage).not.toHaveBeenCalled();
   });
   it("excludes compressed chats from project, recommended and bulk selection", async () => {
     const user = userEvent.setup();

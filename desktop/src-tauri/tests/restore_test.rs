@@ -36,6 +36,40 @@ use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, Zip
 static APP_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn preview_identifies_ambiguous_destination_rollouts_without_modifying_them(
+) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
+    let codex_home = &harness.plan.target_codex_home;
+    let first = Path::new("sessions/2026/01/01/first.jsonl");
+    let second = Path::new("archived_sessions/second.jsonl");
+    let original = fs::read(&harness._fixture.session_path)?;
+    for path in [first, second] {
+        let path = codex_home.join(path);
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, &original)?;
+    }
+    let inventory = rehome_desktop_lib::core::discovery::discover_codex(Some(codex_home.clone()))?;
+    let target = TargetInventory {
+        codex_home: codex_home.clone(),
+        target_os: inventory.source_os,
+        target_arch: inventory.source_arch,
+        counts: inventory.counts,
+        projects: inventory.projects,
+        conversations: inventory.conversations,
+    };
+    let preview = inspect_package(&harness._fixture.root.join("handoff.rehome"))?;
+    let error = build_restore_plan(&preview, &target, &harness.plan.projects_root).unwrap_err();
+    assert_eq!(error.code, ErrorCode::RestoreFailed);
+    assert!(error.message.contains(THREAD_ID), "{error}");
+    assert!(error.message.contains(first.to_str().unwrap()), "{error}");
+    assert!(error.message.contains(second.to_str().unwrap()), "{error}");
+    for path in [first, second] {
+        assert_eq!(fs::read(codex_home.join(path))?, original);
+    }
+    Ok(())
+}
+
+#[test]
 fn compressed_export_restores_messages_paths_indexes_and_rolls_back() -> Result<(), Box<dyn Error>>
 {
     let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
@@ -204,15 +238,28 @@ fn workspace_roots_round_trip_preserves_secondary_projects_and_owned_settings(
 #[test]
 fn streamed_large_conversation_round_trip_preserves_messages_paths_and_rollback(
 ) -> Result<(), Box<dyn Error>> {
-    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let body = format!(
         "{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{}\"}}}}\n",
         "synthetic transcript body ".repeat(128)
     );
+    assert_transcript_round_trip(&body, 8192)
+}
+
+#[test]
+fn individual_record_above_64_mib_round_trips_without_truncation() -> Result<(), Box<dyn Error>> {
+    let body = format!(
+        "{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{}\"}}}}\n",
+        "x".repeat(65 * 1024 * 1024)
+    );
+    assert_transcript_round_trip(&body, 1)
+}
+
+fn assert_transcript_round_trip(body: &str, record_count: usize) -> Result<(), Box<dyn Error>> {
+    let harness = RestoreHarness::new(DatabaseSchema::Compatible)?;
     let mut source = fs::OpenOptions::new()
         .append(true)
         .open(&harness._fixture.session_path)?;
-    for _ in 0..8192 {
+    for _ in 0..record_count {
         source.write_all(body.as_bytes())?;
     }
     source.sync_all()?;
@@ -261,11 +308,11 @@ fn streamed_large_conversation_round_trip_preserves_messages_paths_and_rollback(
         let line = line?;
         let value: Value = serde_json::from_str(&line)?;
         if value["type"] == "response_item" {
-            assert_eq!(value, serde_json::from_str::<Value>(&body)?);
+            assert_eq!(value, serde_json::from_str::<Value>(body)?);
             records += 1;
         }
     }
-    assert_eq!(records, 8192);
+    assert_eq!(records, record_count);
     assert!(rollback(report.transaction_id)?.success);
     assert!(!session_path.exists());
     assert_eq!(
