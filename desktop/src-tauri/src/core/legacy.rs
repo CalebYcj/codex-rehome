@@ -80,12 +80,41 @@ pub(crate) fn inspect_schema_v3(path: &Path) -> Result<Option<VerifiedPackage>, 
         .map_err(|error| invalid(format!("invalid ZIP container: {error}")))?;
     ensure_legacy_entry_count(archive.len())?;
 
+    let mut common_prefix: Option<String> = None;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| invalid(format!("could not read ZIP entry: {error}")))?;
+        let Ok(name) = normalize_zip_name(entry.name(), entry.is_dir()) else {
+            // Let the current-format inspector report malformed paths. A bad
+            // path cannot establish a reliable legacy package root.
+            return Ok(None);
+        };
+        if entry.is_dir() {
+            // Directory entries can truncate the prefix to their own name.
+            continue;
+        }
+        common_prefix = Some(match common_prefix {
+            Some(prefix) => common_path_prefix(&prefix, &name),
+            None => name,
+        });
+    }
+    let common_directory_prefix = common_prefix
+        .and_then(|prefix| prefix.rfind('/').map(|index| prefix[..=index].to_owned()))
+        .unwrap_or_default();
     let manifest_candidates = (0..archive.len())
         .filter_map(|index| {
             let entry = archive.by_index(index).ok()?;
             let name = normalize_zip_name(entry.name(), entry.is_dir()).ok()?;
             (!entry.is_dir() && (name == "MANIFEST.json" || name.ends_with("/MANIFEST.json")))
                 .then_some(name)
+        })
+        // A package may legitimately contain MANIFEST.json files in its
+        // project payload. Only a candidate at the common file root can be
+        // the legacy package manifest.
+        .filter(|name| {
+            name.strip_suffix("MANIFEST.json")
+                .is_some_and(|prefix| common_directory_prefix.starts_with(prefix))
         })
         .collect::<Vec<_>>();
     if manifest_candidates.is_empty() {
@@ -660,6 +689,17 @@ fn adapted_payload_is_forbidden(path: &str) -> bool {
         return is_forbidden(Path::new(relative));
     }
     is_forbidden(Path::new(path))
+}
+
+fn common_path_prefix(left: &str, right: &str) -> String {
+    let mut length = 0;
+    for (left, right) in left.chars().zip(right.chars()) {
+        if left != right {
+            break;
+        }
+        length += left.len_utf8();
+    }
+    left[..length].to_owned()
 }
 
 fn normalize_zip_name(raw: &str, directory: bool) -> Result<String, RehomeError> {
